@@ -1,0 +1,6 @@
+hunts:
+  - name: monitor_test_houston
+    source: craigslist
+    city: houston
+    query: monitor
+    limit: 5
