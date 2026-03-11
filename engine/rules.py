@@ -14,13 +14,13 @@ def matches_rules(listing: Listing, rules: dict) -> bool:
     include_keywords = rules.get("include_keywords") or []
     if include_keywords:
         title_lower = listing.title.lower()
-        if not any(kw.lower() in title_lower for kw in include_keywords):
+        if not any(str(kw).lower() in title_lower for kw in include_keywords):
             return False
 
     exclude_keywords = rules.get("exclude_keywords") or []
     if exclude_keywords:
         title_lower = listing.title.lower()
-        if any(kw.lower() in title_lower for kw in exclude_keywords):
+        if any(str(kw).lower() in title_lower for kw in exclude_keywords):
             return False
 
     return True

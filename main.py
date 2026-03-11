@@ -1,8 +1,25 @@
+import logging
+from pathlib import Path
+
 from adapters.craigslist import search_craigslist
 from engine.database import init_db, save_listing
 from engine.hunts import load_hunts
 from engine.notifier import send_discord_alert
 from engine.rules import matches_rules
+
+log = logging.getLogger(__name__)
+
+
+def setup_logging() -> None:
+    Path("logs").mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("logs/vulture.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 
 def run_hunt(hunt: dict) -> None:
@@ -10,7 +27,7 @@ def run_hunt(hunt: dict) -> None:
     source = hunt["source"]
     rules = hunt.get("rules") or {}
 
-    print(f"\n=== Running hunt: {name} ({source}) ===")
+    log.info("Starting hunt: %s (%s)", name, source)
 
     if source == "craigslist":
         listings = search_craigslist(
@@ -19,7 +36,7 @@ def run_hunt(hunt: dict) -> None:
             limit=hunt.get("limit", 10),
         )
     else:
-        print(f"Skipping unsupported source: {source}")
+        log.warning("Skipping unsupported source: %s", source)
         return
 
     new_count = 0
@@ -29,28 +46,36 @@ def run_hunt(hunt: dict) -> None:
     for listing in listings:
         if not matches_rules(listing, rules):
             filtered_count += 1
-            print(f"FILTERED: {listing.link}")
+            log.info("FILTERED: %s", listing.link)
             continue
 
         was_inserted = save_listing(listing)
 
         if was_inserted:
             new_count += 1
-            print(f"NEW: {listing}")
+            log.info("NEW: %s", listing)
             send_discord_alert(listing)
         else:
             old_count += 1
-            print(f"OLD: {listing.link}")
+            log.info("OLD: %s", listing.link)
 
-    print(f"Done hunt '{name}'. New: {new_count}, Existing: {old_count}, Filtered: {filtered_count}")
+    log.info(
+        "Done hunt '%s'. New: %d, Existing: %d, Filtered: %d",
+        name, new_count, old_count, filtered_count,
+    )
 
 
 def main() -> None:
+    setup_logging()
+    log.info("Vulture starting")
     init_db()
     hunts = load_hunts()
 
     for hunt in hunts:
-        run_hunt(hunt)
+        try:
+            run_hunt(hunt)
+        except Exception:
+            log.exception("Hunt '%s' failed", hunt.get("name", "unknown"))
 
 
 if __name__ == "__main__":

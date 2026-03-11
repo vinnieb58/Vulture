@@ -1,27 +1,16 @@
 hunts:
-  - name: monitor_test_enabled
+  - name: gpu_numeric_keyword_test
     source: craigslist
     city: houston
-    query: monitor
-    limit: 5
+    query: gpu
+    limit: 15
     enabled: true
     rules:
-      max_price: 50
       include_keywords:
-        - monitor
+        - 3060
+        - 3070
+        - 6700
+        - 6800
       exclude_keywords:
         - broken
-        - parts only
-
-  - name: monitor_test_disabled
-    source: craigslist
-    city: houston
-    query: monitor
-    limit: 5
-    enabled: false
-
-  - name: monitor_test_no_flag
-    source: craigslist
-    city: houston
-    query: monitor
-    limit: 5
+        - parts
