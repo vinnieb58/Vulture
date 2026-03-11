@@ -13,4 +13,4 @@ def load_hunts() -> list[dict]:
     if not isinstance(hunts, list):
         raise ValueError("config/hunts.yaml must contain a top-level 'hunts' list")
 
-    return hunts
+    return [h for h in hunts if h.get("enabled", True)]

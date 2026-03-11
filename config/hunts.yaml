@@ -1,5 +1,19 @@
 hunts:
-  - name: monitor_test_houston
+  - name: monitor_test_enabled
+    source: craigslist
+    city: houston
+    query: monitor
+    limit: 5
+    enabled: true
+
+  - name: monitor_test_disabled
+    source: craigslist
+    city: houston
+    query: monitor
+    limit: 5
+    enabled: false
+
+  - name: monitor_test_no_flag
     source: craigslist
     city: houston
     query: monitor
