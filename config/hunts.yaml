@@ -5,6 +5,13 @@ hunts:
     query: monitor
     limit: 5
     enabled: true
+    rules:
+      max_price: 50
+      include_keywords:
+        - monitor
+      exclude_keywords:
+        - broken
+        - parts only
 
   - name: monitor_test_disabled
     source: craigslist
