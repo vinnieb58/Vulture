@@ -22,7 +22,7 @@ def setup_logging() -> None:
     )
 
 
-def run_hunt(hunt: dict) -> None:
+def run_hunt(hunt: dict) -> int:
     name = hunt["name"]
     source = hunt["source"]
     rules = hunt.get("rules") or {}
@@ -37,7 +37,7 @@ def run_hunt(hunt: dict) -> None:
         )
     else:
         log.warning("Skipping unsupported source: %s", source)
-        return
+        return 0
 
     new_count = 0
     old_count = 0
@@ -63,19 +63,25 @@ def run_hunt(hunt: dict) -> None:
         "Done hunt '%s'. New: %d, Existing: %d, Filtered: %d",
         name, new_count, old_count, filtered_count,
     )
+    return new_count
 
 
 def main() -> None:
     setup_logging()
-    log.info("Vulture starting")
+    log.info("Starting Vulture hunt cycle")
     init_db()
     hunts = load_hunts()
+    log.info("Loaded %d hunt(s)", len(hunts))
 
+    total_new = 0
     for hunt in hunts:
         try:
-            run_hunt(hunt)
+            total_new += run_hunt(hunt) or 0
         except Exception:
             log.exception("Hunt '%s' failed", hunt.get("name", "unknown"))
+
+    log.info("%d new listing(s) found", total_new)
+    log.info("Hunt cycle completed")
 
 
 if __name__ == "__main__":
