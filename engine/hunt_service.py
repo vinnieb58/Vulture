@@ -365,10 +365,11 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         rules["exclude_keywords"] = hunt.exclude_keywords
 
     return {
-        "name":   hunt.name,
-        "source": hunt.source_sites[0],
-        "query":  " ".join(hunt.search_terms),
-        "city":   hunt.location or "houston",
-        "limit":  hunt.adapter_options.get("limit", 10),
-        "rules":  rules,
+        "hunt_id": hunt.hunt_id,           # present only on DB-backed hunts; used for log traceability
+        "name":    hunt.name,
+        "source":  hunt.source_sites[0],
+        "query":   " ".join(hunt.search_terms),
+        "city":    hunt.location or "houston",
+        "limit":   hunt.adapter_options.get("limit", 10),
+        "rules":   rules,
     }

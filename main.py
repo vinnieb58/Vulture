@@ -1,11 +1,26 @@
 import logging
+import os
 from pathlib import Path
 
 from adapters.craigslist import search_craigslist
 from engine.database import init_db, save_listing
+from engine.hunt_repository import init_hunts_table
+from engine.hunt_service import HuntValidationError
+from engine.hunt_service import hunt_to_execution_dict
+from engine.hunt_service import list_hunts as list_db_hunts
 from engine.hunts import load_hunts
 from engine.notifier import send_discord_alert
 from engine.rules import matches_rules
+
+# ---------------------------------------------------------------------------
+# Hunt source selection
+#
+# Set VULTURE_HUNT_SOURCE in .env or the system environment:
+#   yaml   — load from config/hunts.yaml only   (default; v1.0 behavior)
+#   db     — load from the SQLite hunts table only
+#   mixed  — load from both; YAML takes priority on name collision
+# ---------------------------------------------------------------------------
+_VALID_HUNT_SOURCES = frozenset({"yaml", "db", "mixed"})
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +42,11 @@ def run_hunt(hunt: dict) -> int:
     source = hunt["source"]
     rules = hunt.get("rules") or {}
 
-    log.info("Starting hunt: %s (%s)", name, source)
+    # hunt_id is present on DB-backed hunts; absent on YAML hunts
+    hunt_id = hunt.get("hunt_id", "")
+    id_tag = f" [{hunt_id}]" if hunt_id else ""
+
+    log.info("Starting hunt: %s (%s)%s", name, source, id_tag)
 
     if source == "craigslist":
         listings = search_craigslist(
@@ -60,18 +79,89 @@ def run_hunt(hunt: dict) -> int:
             log.info("OLD: %s", listing.link)
 
     log.info(
-        "Done hunt '%s'. New: %d, Existing: %d, Filtered: %d",
-        name, new_count, old_count, filtered_count,
+        "Done hunt '%s'%s. New: %d, Existing: %d, Filtered: %d",
+        name, id_tag, new_count, old_count, filtered_count,
     )
     return new_count
+
+
+def _resolve_hunt_source() -> str:
+    """
+    Read VULTURE_HUNT_SOURCE from the environment and validate it.
+    Falls back to 'yaml' (v1.0 behavior) on missing or unrecognised values.
+    """
+    raw = os.getenv("VULTURE_HUNT_SOURCE", "yaml").strip().lower()
+    if raw not in _VALID_HUNT_SOURCES:
+        log.warning(
+            "Unknown VULTURE_HUNT_SOURCE '%s'; falling back to 'yaml'. "
+            "Valid values: %s",
+            raw, sorted(_VALID_HUNT_SOURCES),
+        )
+        return "yaml"
+    return raw
+
+
+def _load_db_hunts() -> list[dict]:
+    """
+    Load active hunts from the DB and convert them to execution dicts.
+
+    Hunts that fail conversion (missing search_terms or source_sites) are
+    logged as warnings and skipped; the cycle continues.
+    """
+    active = list_db_hunts(status="active")
+    result = []
+    for hunt in active:
+        try:
+            result.append(hunt_to_execution_dict(hunt))
+        except HuntValidationError as exc:
+            log.warning("Skipping DB hunt '%s': %s", hunt.name, exc)
+    return result
+
+
+def _merge_hunts(yaml_hunts: list[dict], db_hunts: list[dict]) -> list[dict]:
+    """
+    Combine YAML and DB hunt lists for mixed mode.
+
+    YAML entries take priority: if both sources define a hunt with the same
+    name the DB entry is skipped and a warning is logged.
+    """
+    seen = {h["name"] for h in yaml_hunts}
+    merged = list(yaml_hunts)
+    for hunt in db_hunts:
+        if hunt["name"] in seen:
+            log.warning(
+                "Skipping duplicate DB hunt '%s' (already present in YAML)",
+                hunt["name"],
+            )
+        else:
+            seen.add(hunt["name"])
+            merged.append(hunt)
+    return merged
 
 
 def main() -> None:
     setup_logging()
     log.info("Starting Vulture hunt cycle")
     init_db()
-    hunts = load_hunts()
-    log.info("Loaded %d hunt(s)", len(hunts))
+    init_hunts_table()
+
+    source = _resolve_hunt_source()
+    log.info("Hunt source: %s", source)
+
+    if source == "yaml":
+        hunts = load_hunts()
+        log.info("Loaded %d YAML hunt(s)", len(hunts))
+    elif source == "db":
+        hunts = _load_db_hunts()
+        log.info("Loaded %d DB hunt(s)", len(hunts))
+    else:  # mixed
+        yaml_hunts = load_hunts()
+        db_hunts = _load_db_hunts()
+        hunts = _merge_hunts(yaml_hunts, db_hunts)
+        log.info(
+            "Loaded %d YAML hunt(s) and %d DB hunt(s) -> %d after dedup",
+            len(yaml_hunts), len(db_hunts), len(hunts),
+        )
 
     total_new = 0
     for hunt in hunts:
