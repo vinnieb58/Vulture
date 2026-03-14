@@ -170,6 +170,7 @@ def cmd_show(args: dict) -> CommandResult:
     except HuntNotFoundError:
         return CommandResult(success=False, message=f"Hunt not found: `{hunt_id}`")
 
+    log.info("Resolved hunt '%s' [%s] status=%s", hunt.name, hunt_id[:8], hunt.status)
     return CommandResult(
         success=True,
         message=_fmt_detail(hunt),
@@ -238,6 +239,7 @@ def cmd_pause(args: dict) -> CommandResult:
     except HuntStateError as exc:
         return CommandResult(success=False, message=str(exc))
 
+    log.info("Paused hunt '%s' [%s]", hunt.name, hunt_id[:8])
     return CommandResult(
         success=True,
         message=f"Hunt **{hunt.name}** paused.",
@@ -263,6 +265,7 @@ def cmd_resume(args: dict) -> CommandResult:
     except HuntStateError as exc:
         return CommandResult(success=False, message=str(exc))
 
+    log.info("Resumed hunt '%s' [%s]", hunt.name, hunt_id[:8])
     return CommandResult(
         success=True,
         message=f"Hunt **{hunt.name}** resumed.",
@@ -288,6 +291,7 @@ def cmd_end(args: dict) -> CommandResult:
     except HuntStateError as exc:
         return CommandResult(success=False, message=str(exc))
 
+    log.info("Ended hunt '%s' [%s]", hunt.name, hunt_id[:8])
     return CommandResult(
         success=True,
         message=f"Hunt **{hunt.name}** has ended.",
@@ -339,23 +343,28 @@ def dispatch(command: str, args: Optional[dict] = None) -> CommandResult:
     command = (command or "").strip().lower()
     args = args or {}
 
+    log.info("Command received: %s | args: %s", command, list(args.keys()))
+
     handler = _COMMANDS.get(command)
     if handler is None:
-        return CommandResult(
-            success=False,
-            message=(
-                f"Unknown command '{command}'. "
-                f"Valid commands: {', '.join(KNOWN_COMMANDS)}"
-            ),
+        msg = (
+            f"Unknown command '{command}'. "
+            f"Valid commands: {', '.join(KNOWN_COMMANDS)}"
         )
+        log.warning("Command failed: %s", msg)
+        return CommandResult(success=False, message=msg)
 
     try:
-        return handler(args)
+        result = handler(args)
     except Exception:
-        # Last-resort guard — service exceptions should be caught per-handler,
-        # but this prevents any unexpected error from surfacing as a crash.
         log.exception("Unhandled error in command '%s'", command)
         return CommandResult(
             success=False,
             message="An unexpected error occurred. Check the logs for details.",
         )
+
+    if result.success:
+        log.info("Command '%s' succeeded", command)
+    else:
+        log.warning("Command '%s' failed: %s", command, result.message)
+    return result

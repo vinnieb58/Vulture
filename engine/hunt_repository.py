@@ -165,7 +165,7 @@ def update_hunt_status(hunt_id: str, status: str) -> bool:
         conn.commit()
     updated = cursor.rowcount > 0
     if updated:
-        log.debug("Hunt %s status -> %s", hunt_id, status)
+        log.info("Hunt %s status -> %s", hunt_id, status)
     return updated
 
 

@@ -39,7 +39,8 @@ def setup_logging() -> None:
 
 def run_hunt(hunt: dict) -> int:
     name = hunt["name"]
-    source = hunt["source"]
+    # Normalize to lowercase so "Craigslist" and "craigslist" both match
+    source = hunt["source"].lower()
     rules = hunt.get("rules") or {}
 
     # hunt_id is present on DB-backed hunts; absent on YAML hunts
