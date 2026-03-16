@@ -242,6 +242,38 @@ async def hunt_end(
 
 
 # ---------------------------------------------------------------------------
+# /hunt_from_intent
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(
+    name="hunt_from_intent",
+    description="Create a hunt from a natural-language description.",
+)
+@app_commands.describe(
+    intent=(
+        "What are you looking for?  "
+        "e.g. '75 inch 4K TV', 'RTX 3080 GPU', 'Honda Civic under $8000'"
+    ),
+    location="City or region to search (e.g. 'houston'). Optional — overrides any location in your intent.",
+    max_price="Maximum price in dollars. Optional — overrides any price in your intent.",
+)
+async def hunt_from_intent(
+    interaction: discord.Interaction,
+    intent: str,
+    location: str | None = None,
+    max_price: int | None = None,
+) -> None:
+    await interaction.response.defer(ephemeral=True)
+    result = dispatch("create_from_intent", {
+        "intent":     intent.strip(),
+        "location":   location.strip() if location else None,
+        "max_price":  max_price,
+        "created_by": str(interaction.user),
+    })
+    await interaction.followup.send(_reply_text(result), ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -251,6 +283,12 @@ def main() -> None:
     init_db()
     init_hunts_table()
     log.info("Starting Vulture Discord bot")
+    log.info(
+        "Config: GUILD=%s | HUNT_SOURCE=%s | WEBHOOK=%s",
+        GUILD.id if GUILD else "global (no DISCORD_GUILD_ID set)",
+        os.getenv("VULTURE_HUNT_SOURCE", "yaml (default)"),
+        "set" if os.getenv("DISCORD_WEBHOOK_URL") else "NOT SET — alerts disabled",
+    )
     bot.run(BOT_TOKEN, log_handler=None)  # log_handler=None — we manage our own
 
 

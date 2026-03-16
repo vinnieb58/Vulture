@@ -6,6 +6,12 @@ def matches_rules(listing: Listing, rules: dict) -> bool:
     if not rules:
         return True
 
+    min_price = rules.get("min_price")
+    if min_price is not None:
+        # Reject listings with no price or a suspiciously low placeholder price
+        if listing.price is None or listing.price < min_price:
+            return False
+
     max_price = rules.get("max_price")
     if max_price is not None:
         if listing.price is None or listing.price > max_price:

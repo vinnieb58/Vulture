@@ -334,6 +334,7 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         "city":   str,         # location, or "houston" fallback
         "limit":  int,         # adapter_options["limit"] or 10
         "rules": {
+          "min_price":        Optional[int],   # filters placeholder $0/$1 listings
           "max_price":        Optional[int],
           "include_keywords": list,
           "exclude_keywords": list,
@@ -344,6 +345,8 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     - Only the first source_site is used; multi-source support is a v2.0 concern.
     - Rules dict omits keys whose values are empty/None so the rule engine's
       existing early-exit logic (if not rules: return True) still works cleanly.
+    - min_price is read from adapter_options (set by the translator for vehicles
+      to filter placeholder $0/$1 ads).
     - Raises HuntValidationError if source_sites or search_terms are empty,
       since run_hunt() cannot function without them.
     """
@@ -357,6 +360,11 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         )
 
     rules: dict = {}
+    # min_price from adapter_options — translator sets this for verticals where
+    # placeholder/junk listings are common (e.g. vehicles with $0 / $1 price)
+    min_price = hunt.adapter_options.get("min_price")
+    if min_price is not None:
+        rules["min_price"] = int(min_price)
     if hunt.max_price is not None:
         rules["max_price"] = hunt.max_price
     if hunt.include_keywords:
@@ -364,12 +372,24 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     if hunt.exclude_keywords:
         rules["exclude_keywords"] = hunt.exclude_keywords
 
+    # Safety: Craigslist subdomains must be a single token.
+    # Multi-word strings (e.g. "mandeville louisiana") cause DNS failures.
+    raw_city = hunt.location or "houston"
+    import re as _re
+    if _re.search(r'\s', raw_city):
+        log.warning(
+            "Hunt '%s' has location %r which contains spaces — not a valid "
+            "Craigslist subdomain.  Falling back to 'houston'.",
+            hunt.name, raw_city,
+        )
+        raw_city = "houston"
+
     return {
         "hunt_id": hunt.hunt_id,           # present only on DB-backed hunts; used for log traceability
         "name":    hunt.name,
         "source":  hunt.source_sites[0],
         "query":   " ".join(hunt.search_terms),
-        "city":    hunt.location or "houston",
+        "city":    raw_city,
         "limit":   hunt.adapter_options.get("limit", 10),
         "rules":   rules,
     }

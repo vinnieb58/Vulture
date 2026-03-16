@@ -2,6 +2,10 @@ import logging
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()  # load .env before reading any os.getenv() calls below
+
 from adapters.craigslist import search_craigslist
 from engine.database import init_db, save_listing
 from engine.hunt_repository import init_hunts_table

@@ -29,6 +29,7 @@ from engine.hunt_service import (
     pause_hunt,
     resume_hunt,
 )
+from engine.llm_translator import TranslationError, translate
 from models.hunt import Hunt
 
 log = logging.getLogger(__name__)
@@ -299,17 +300,112 @@ def cmd_end(args: dict) -> CommandResult:
     )
 
 
+def cmd_create_from_intent(args: dict) -> CommandResult:
+    """
+    Create a hunt from a natural-language intent string.
+
+    The intent is passed to engine.llm_translator.translate() which returns a
+    validated HuntTranslation.  The translation is then persisted via
+    hunt_service.create_hunt() exactly as a normal creation would be.
+
+    args:
+      intent     (required) — e.g. "75 inch 4K TV under $500"
+      location   (optional) — city/region; takes priority over anything the
+                              translator might infer from the intent text
+      max_price  (optional) — integer price ceiling override
+      created_by (optional) — Discord user tag or ID
+    """
+    intent = (args.get("intent") or "").strip()
+    if not intent:
+        return CommandResult(
+            success=False,
+            message="'intent' is required — describe what you are looking for.",
+        )
+
+    # Capture the raw location input so we can warn the user if it was rejected.
+    location_input = (args.get("location") or "").strip() or None
+
+    # --- translate ---
+    try:
+        t = translate(
+            intent,
+            location  = location_input,
+            max_price = args.get("max_price"),
+        )
+    except TranslationError as exc:
+        log.warning("Translation failed for intent %r: %s", intent, exc)
+        return CommandResult(
+            success=False,
+            message=f"Could not interpret hunt intent: {exc}",
+        )
+
+    # --- persist via the service layer ---
+    try:
+        hunt = create_hunt(
+            name             = t.name,
+            search_terms     = t.search_terms,
+            source_sites     = t.source_sites,
+            category         = t.category,
+            include_keywords = t.include_keywords,
+            exclude_keywords = t.exclude_keywords,
+            max_price        = t.max_price,
+            location         = t.location,
+            radius           = t.radius,
+            created_by       = args.get("created_by"),
+            notes            = t.notes,
+            adapter_options  = t.adapter_options,
+        )
+    except HuntValidationError as exc:
+        return CommandResult(success=False, message=f"Cannot create hunt: {exc}")
+
+    # --- build a transparent reply so the operator can see what was decided ---
+    from engine.llm_translator import VERTICALS   # local to avoid circular at module level
+    v_display  = VERTICALS.get(t.vertical, {}).get("display_name", t.vertical)
+    include_str = ", ".join(t.include_keywords) if t.include_keywords else "—"
+    exclude_str = ", ".join(t.exclude_keywords) if t.exclude_keywords else "—"
+    price_str   = f"${hunt.max_price}" if hunt.max_price is not None else "—"
+    loc_str     = hunt.location or "— (defaults to houston at run time)"
+
+    # Warn the user when their location was rejected by the translator so the
+    # rejection is visible in Discord rather than only appearing in server logs.
+    loc_warning = ""
+    if location_input and not t.location:
+        loc_warning = (
+            f"\n\n**Warning:** Location `{location_input}` was rejected — "
+            f"it must be a single-word Craigslist subdomain (e.g. `houston`). "
+            f"Hunt will use default city at run time."
+        )
+
+    msg = (
+        f"Hunt created from: `{intent}`\n\n"
+        f"**Translation [{t.translated_by}]**\n"
+        f"Vertical: {v_display}\n"
+        f"Search query: `{'` `'.join(t.search_terms)}`\n"
+        f"Must appear in title: {include_str}\n"
+        f"Excluded from title: {exclude_str}\n"
+        f"Max price: {price_str}  |  Location: {loc_str}\n\n"
+        f"**Saved as:**\n{_fmt_detail(hunt)}"
+        f"{loc_warning}"
+    )
+    return CommandResult(
+        success=True,
+        message=msg,
+        data={"hunt": _hunt_to_dict(hunt)},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
 
 _COMMANDS: dict = {
-    "list":   cmd_list,
-    "show":   cmd_show,
-    "create": cmd_create,
-    "pause":  cmd_pause,
-    "resume": cmd_resume,
-    "end":    cmd_end,
+    "list":               cmd_list,
+    "show":               cmd_show,
+    "create":             cmd_create,
+    "create_from_intent": cmd_create_from_intent,
+    "pause":              cmd_pause,
+    "resume":             cmd_resume,
+    "end":                cmd_end,
 }
 
 KNOWN_COMMANDS = sorted(_COMMANDS)
