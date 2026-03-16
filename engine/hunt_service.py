@@ -371,6 +371,14 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         rules["include_keywords"] = hunt.include_keywords
     if hunt.exclude_keywords:
         rules["exclude_keywords"] = hunt.exclude_keywords
+    # Structured constraints stored by the translator — enforced by rules.py
+    # via title-text extraction (conservative: missing value = allow through).
+    max_miles = hunt.adapter_options.get("max_miles")
+    if max_miles is not None:
+        rules["max_miles"] = int(max_miles)
+    min_capacity_gb = hunt.adapter_options.get("min_capacity_gb")
+    if min_capacity_gb is not None:
+        rules["min_capacity_gb"] = int(min_capacity_gb)
 
     # Safety: Craigslist subdomains must be a single token.
     # Multi-word strings (e.g. "mandeville louisiana") cause DNS failures.
