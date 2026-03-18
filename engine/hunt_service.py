@@ -379,6 +379,21 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     min_capacity_gb = hunt.adapter_options.get("min_capacity_gb")
     if min_capacity_gb is not None:
         rules["min_capacity_gb"] = int(min_capacity_gb)
+    min_year = hunt.adapter_options.get("min_year")
+    if min_year is not None:
+        rules["min_year"] = int(min_year)
+    max_year = hunt.adapter_options.get("max_year")
+    if max_year is not None:
+        rules["max_year"] = int(max_year)
+    min_vram_gb = hunt.adapter_options.get("min_vram_gb")
+    if min_vram_gb is not None:
+        rules["min_vram_gb"] = int(min_vram_gb)
+    min_speed_mhz = hunt.adapter_options.get("min_speed_mhz")
+    if min_speed_mhz is not None:
+        rules["min_speed_mhz"] = int(min_speed_mhz)
+    require_all_keywords = hunt.adapter_options.get("require_all_keywords")
+    if require_all_keywords:
+        rules["require_all_keywords"] = list(require_all_keywords)
 
     # Safety: Craigslist subdomains must be a single token.
     # Multi-word strings (e.g. "mandeville louisiana") cause DNS failures.

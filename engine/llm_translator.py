@@ -18,6 +18,29 @@ Typical usage:
     except TranslationError as exc:
         return error_response(str(exc))   # never persist bad translations
     hunt = create_hunt(name=t.name, search_terms=t.search_terms, ...)
+
+What each vertical can extract and enforce at scan time
+-------------------------------------------------------
+tv_home_theater:
+  extracted    : size_inches, resolution, panel_type (oled/qled), brand, max_price
+  enforced     : brand + size via include_keywords title match; max_price
+  conservative : panel / brand only enforced if found in title; no title parse needed
+
+vehicles:
+  extracted    : make, model, max_price, max_miles, min_year, max_year
+  enforced     : make+model via include_keywords; max_miles, min_year, max_year
+                 from title parse; min_price (placeholder $0/$1 filter)
+  conservative : year/mileage only rejected when explicitly stated in title
+
+computer_parts (GPU):
+  extracted    : gpu_model, max_price, min_vram_gb (only when "vram" explicit)
+  enforced     : model number via include_keywords; min_vram_gb from title parse
+  conservative : VRAM only extracted when user says "vram" or "video memory"
+
+computer_parts (RAM):
+  extracted    : ram_type, min_capacity_gb, max_price
+  enforced     : ddr-type via include_keywords; min_capacity_gb from title parse
+  conservative : capacity only rejected when stated explicitly (e.g. "4GB DDR4")
 """
 
 from __future__ import annotations
@@ -41,13 +64,6 @@ _VALID_BACKENDS = {_BACKEND_RULES, _BACKEND_OPENAI}
 
 # ---------------------------------------------------------------------------
 # Vertical registry
-#
-# Each vertical defines:
-#   display_name    — shown in notes and Discord replies
-#   sources         — default source_sites for this vertical
-#   keywords        — tokens whose presence in the intent signals this vertical
-#   size_pattern    — whether to try extracting an inch-size measurement
-#   default_exclude — noise terms filtered by the rule engine at scan time
 # ---------------------------------------------------------------------------
 VERTICALS: dict[str, dict] = {
     "tv_home_theater": {
@@ -115,13 +131,12 @@ VERTICALS: dict[str, dict] = {
             # Popular models
             "civic", "accord", "corolla", "camry", "tacoma", "tundra",
             "mustang", "f150", "f-150", "silverado", "4runner",
-            "highlander", "rav4",
+            "highlander", "rav4", "miata", "mx-5",
             # Other vehicle types
             "motorcycle", "scooter", "moped",
             "rv", "motorhome", "camper",
         ],
         "size_pattern": False,
-        # Comprehensive exclusions based on live test results:
         "default_exclude": [
             # Parts / salvage
             "part out", "parts out", "parts only", "for parts",
@@ -343,10 +358,14 @@ def _expand_k_numbers(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Price: "under $500", "$500 max", "$500 or less", "< $500"
-# Note: k-suffix expansion is applied before this regex runs, so plain
-# \d patterns are sufficient.
+#
+# The negative lookahead (?!\s*(?:miles?|mi)\b) after the number prevents
+# "under 100000 miles" from being captured as a price when a mileage constraint
+# appears before a dollar constraint in the intent string.  The $-prefixed
+# alternative is already unambiguous and needs no lookahead.
 _PRICE_RE = re.compile(
-    r'(?:under|below|max(?:imum)?|less\s+than|up\s+to|at\s+most|<)\s*\$?\s*(\d{1,7}(?:,\d{3})*)'
+    r'(?:under|below|max(?:imum)?|less\s+than|up\s+to|at\s+most|<)\s*\$?\s*'
+    r'(\d{1,7}(?:,\d{3})*)(?!\s*(?:miles?|mi)\b)'
     r'|\$\s*(\d{1,7}(?:,\d{3})*)\s*(?:or\s+(?:less|under|below)|max(?:imum)?)?',
     re.IGNORECASE,
 )
@@ -358,10 +377,18 @@ _MILES_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Minimum GB: "more than 8gb", "at least 16gb", "minimum 16gb", ">8gb"
+# Minimum RAM speed: "more than 3000MHz", "at least 3200MHz", "3600MHz or faster"
+# Also matches MT/s (DDR5 spec sheets often use MT/s instead of MHz).
+_MIN_SPEED_MHZ_RE = re.compile(
+    r'(?:more\s+than|at\s+least|minimum|min|over|faster\s+than|>\s*|>=\s*)\s*(\d{3,5})\s*(?:mhz|mt/s)\b'
+    r'|(\d{3,5})\s*(?:mhz|mt/s)\s+(?:or\s+(?:more|faster|greater|higher))',
+    re.IGNORECASE,
+)
+
+# Minimum GB: "more than 8gb", "at least 16gb", "8gb or greater", ">8gb"
 _MIN_GB_RE = re.compile(
     r'(?:more\s+than|at\s+least|minimum|min|over|>\s*|>=\s*)\s*(\d+)\s*gb'
-    r'|(\d+)\s*gb\s+(?:or\s+more|minimum|min)',
+    r'|(\d+)\s*gb\s+(?:or\s+(?:more|greater|higher)|minimum|min)',
     re.IGNORECASE,
 )
 
@@ -377,9 +404,44 @@ _RESOLUTION_MAP: list[tuple[str, list[str]]] = [
     ("720p",  ["720p", "720", "hd ready"]),
 ]
 
-# Words that must NOT be treated as a vehicle model name even if they appear
-# immediately after a make and pass the isalpha() check.  Common constraint
-# words and stopwords that look like model names in naive word-by-word parsing.
+# TV brands — checked in order (longer/more-specific first)
+_TV_BRANDS = [
+    "samsung", "sony", "panasonic", "hisense", "toshiba",
+    "philips", "vizio", "insignia", "westinghouse",
+    "tcl", "onn", "lg",
+]
+
+# TV panel types — checked most-specific first (oled before led)
+_TV_PANELS = ["oled", "qled", "qned", "mini-led", "mini led", "neo qled", "led", "plasma"]
+
+# Vehicle year range patterns
+# "2016 or newer / later"  →  min_year = 2016
+# "newer / later than 2016"  →  min_year = 2016  (treated inclusive for simplicity)
+# "from / since / after / no older than 2016"  →  min_year = 2016
+_YEAR_MIN_RE = re.compile(
+    r'((?:19|20)\d{2})\s+(?:or\s+)?(?:newer|later|above)\b'
+    r'|(?:newer|later|more\s+recent)\s+than\s+((?:19|20)\d{2})'
+    r'|(?:from|since|after|no\s+older\s+than)\s+((?:19|20)\d{2})',
+    re.IGNORECASE,
+)
+
+# "before / older than / prior to / no newer than 2022"  →  max_year = 2022
+# "2022 or older / earlier"  →  max_year = 2022
+_YEAR_MAX_RE = re.compile(
+    r'(?:before|older\s+than|prior\s+to|no\s+newer\s+than)\s+((?:19|20)\d{2})'
+    r'|((?:19|20)\d{2})\s+(?:or\s+)?(?:older|earlier)\b',
+    re.IGNORECASE,
+)
+
+# GPU VRAM minimum — only fires when "vram" or "video memory" appears explicitly
+# "at least 8gb vram", "16gb vram", "vram 12gb or more"
+_VRAM_INTENT_RE = re.compile(
+    r'(?:at\s+least|minimum|min|over|>=?\s*)?\s*(\d+)\s*[gG][bB]\s*(?:vram|video\s+(?:memory|ram))'
+    r'|(?:vram|video\s+(?:memory|ram))\s*(?:of\s+)?(?:at\s+least\s+)?(\d+)\s*[gG][bB]',
+    re.IGNORECASE,
+)
+
+# Words that must NOT be treated as a vehicle model name
 _NOT_A_MODEL = {
     "less", "more", "than", "under", "over", "about", "around",
     "with", "without", "and", "or", "for", "the", "a", "an",
@@ -399,8 +461,7 @@ _VEHICLE_MAKES = {
     "audi", "porsche", "mitsubishi", "chrysler", "buick",
 }
 
-# Known model → canonical make.  Used so "find me a corolla" resolves
-# to "toyota corolla" without the user naming the make explicitly.
+# Known model → canonical make.
 _MODEL_TO_MAKE: dict[str, str] = {
     "civic":      "honda",
     "accord":     "honda",
@@ -444,6 +505,8 @@ _MODEL_TO_MAKE: dict[str, str] = {
     "impreza":    "subaru",
     "cx-5":       "mazda",
     "cx5":        "mazda",
+    "miata":      "mazda",
+    "mx-5":       "mazda",
     "golf":       "volkswagen",
     "jetta":      "volkswagen",
     "passat":     "volkswagen",
@@ -466,10 +529,19 @@ def _detect_vertical(intent_lower: str) -> tuple[str, dict]:
 
 def _is_ram_hunt(intent_lower: str) -> bool:
     """
-    Return True when a computer_parts intent is specifically about RAM / memory.
-    Used to branch into RAM-specific include/exclude logic instead of the GPU path.
+    Return True when a computer_parts intent is specifically about system RAM / memory.
+
+    'vram' contains 'ram' as a substring, so a plain 'in' check would misclassify
+    GPU intents like "RTX 4080 with 16gb vram" as RAM hunts.  Guard against this
+    by checking for GPU-specific VRAM keywords first.
     """
-    return any(kw in intent_lower for kw in ["ram", "memory", "ddr4", "ddr5", "ddr3", "dimm"])
+    # GPU-context indicators — "vram" / "video memory" always mean a GPU hunt
+    if "vram" in intent_lower or "video memory" in intent_lower:
+        return False
+    # Word-boundary match for "ram" so "vram" can't sneak through
+    if re.search(r'\bram\b', intent_lower):
+        return True
+    return any(kw in intent_lower for kw in ["memory", "ddr4", "ddr5", "ddr3", "dimm"])
 
 
 def _extract_size(intent_lower: str) -> Optional[int]:
@@ -482,6 +554,64 @@ def _extract_resolution(intent_lower: str) -> Optional[str]:
         if any(alias in intent_lower for alias in aliases):
             return label
     return None
+
+
+def _extract_tv_brand(intent_lower: str) -> Optional[str]:
+    """Return the first recognised TV brand found in the intent."""
+    for brand in _TV_BRANDS:
+        if brand in intent_lower:
+            return brand
+    return None
+
+
+def _extract_tv_panel(intent_lower: str) -> Optional[str]:
+    """
+    Return a panel-type label if explicitly requested.
+
+    Checked most-specific first so 'oled' is never swallowed by 'led'.
+    Returns the canonical lowercase token, e.g. 'oled', 'qled', 'mini-led'.
+    """
+    for panel in _TV_PANELS:
+        if panel in intent_lower:
+            # Normalise "mini led" → "mini-led"
+            return panel.replace(" ", "-")
+    return None
+
+
+def _extract_year_range(intent_lower: str) -> tuple[Optional[int], Optional[int]]:
+    """
+    Extract a vehicle model-year range from the intent.
+
+    Handles:
+      "2016 or newer"          → (2016, None)
+      "newer than 2018"        → (2018, None)   inclusive
+      "from / since 2015"      → (2015, None)
+      "no older than 2017"     → (2017, None)
+      "before 2022"            → (None, 2022)
+      "2020 or older"          → (None, 2020)
+
+    Returns (min_year, max_year); either may be None.
+    Year must be in range 1960–2030 to be valid.
+    """
+    def _valid(yr: int) -> Optional[int]:
+        return yr if 1960 <= yr <= 2030 else None
+
+    min_yr: Optional[int] = None
+    max_yr: Optional[int] = None
+
+    m = _YEAR_MIN_RE.search(intent_lower)
+    if m:
+        raw = m.group(1) or m.group(2) or m.group(3)
+        if raw:
+            min_yr = _valid(int(raw))
+
+    m = _YEAR_MAX_RE.search(intent_lower)
+    if m:
+        raw = m.group(1) or m.group(2)
+        if raw:
+            max_yr = _valid(int(raw))
+
+    return min_yr, max_yr
 
 
 def _extract_price(intent_lower: str, override: Optional[int]) -> Optional[int]:
@@ -499,9 +629,6 @@ def _extract_price(intent_lower: str, override: Optional[int]) -> Optional[int]:
 def _extract_miles(intent_lower: str) -> Optional[int]:
     """
     Extract a maximum mileage constraint.
-
-    'less than 100000 miles'  → 100000
-    '80000 miles or less'     → 80000
 
     Expects k-suffix expansion to have been applied first (so '100k miles'
     becomes '100000 miles' before this runs).
@@ -523,14 +650,48 @@ def _extract_ram_type(intent_lower: str) -> Optional[str]:
 
 
 def _extract_min_gb(intent_lower: str) -> Optional[int]:
-    """
-    Extract a minimum capacity in GB.
-
-    'more than 8gb'   → 8
-    'at least 16gb'   → 16
-    '8gb or more'     → 8
-    """
+    """Extract a minimum GB capacity for RAM hunts."""
     m = _MIN_GB_RE.search(intent_lower)
+    if m:
+        raw = m.group(1) or m.group(2)
+        if raw:
+            return int(raw)
+    return None
+
+
+def _extract_min_speed_mhz(intent_lower: str) -> Optional[int]:
+    """
+    Extract a minimum RAM speed constraint in MHz (or MT/s, treated as equivalent).
+
+    Examples:
+      "more than 3000mhz"       → 3000
+      "at least 3200mhz"        → 3200
+      "3600mhz or faster"       → 3600
+      "minimum 4800mt/s"        → 4800
+    """
+    m = _MIN_SPEED_MHZ_RE.search(intent_lower)
+    if m:
+        raw = m.group(1) or m.group(2)
+        if raw:
+            return int(raw)
+    return None
+
+
+def _extract_min_vram_gb(intent_lower: str) -> Optional[int]:
+    """
+    Extract a minimum VRAM requirement for GPU hunts.
+
+    Conservative: only fires when 'vram' or 'video memory' is explicitly
+    present in the intent.  A bare 'at least 8gb' in a GPU context is NOT
+    treated as VRAM — the user must say 'vram' to avoid ambiguity with
+    system RAM.
+
+    Examples:
+      "at least 8gb vram"       → 8
+      "16gb vram or more"       → 16
+      "vram of at least 12gb"   → 12
+    """
+    m = _VRAM_INTENT_RE.search(intent_lower)
     if m:
         raw = m.group(1) or m.group(2)
         if raw:
@@ -540,25 +701,52 @@ def _extract_min_gb(intent_lower: str) -> Optional[int]:
 
 def _extract_gpu_model(intent_lower: str) -> Optional[str]:
     """
-    Extract a GPU model identifier like 'RTX 3080', 'RTX 4090 Ti', 'RX 6800 XT'.
-    Returns the model in uppercase, e.g. 'RTX 3080 TI'.
+    Extract a GPU model identifier and return it in uppercase.
+
+    Handles three cases in priority order:
+
+    1. NVIDIA  : rtx 3080, rtx 4090 ti, gtx 1080 super
+    2. AMD (rx prefix): rx 6800 xt, rx 7900 xtx
+    3. AMD (bare number): 6700xt, 6700 xt, 7800xt, 7900xtx
+       — requires an explicit xt/xtx suffix to avoid false-positive matches
+         on prices like "$6700" or years like "2019".
+
+    Unresolved edge case: bare "6800" with no prefix and no xt/xtx suffix
+    cannot be detected without false-positive risk.  Users should write "rx 6800".
     """
-    m = re.search(
-        r'\b(rtx|gtx)\s*(\d{3,4})\s*(ti|super|xt)?\b'
-        r'|\b(rx)\s*(\d{3,4})\s*(xt|xtx)?\b',
-        intent_lower,
-    )
-    if not m:
-        return None
-    if m.group(1):
+    # NVIDIA: rtx/gtx + 3-4 digit number + optional tier (ti / super / xt)
+    m = re.search(r'\b(rtx|gtx)\s*(\d{3,4})\s*(ti|super|xt)?\b', intent_lower)
+    if m:
+        prefix = m.group(1)
+        number = m.group(2)
+        tier   = m.group(3)
+        # GTX ended with the 10xx generation; 20xx and above are RTX.
+        # Silently correct "gtx 3080" → "RTX 3080" instead of creating an
+        # invalid model string that would produce zero search results.
+        if prefix == "gtx" and int(number) >= 2000:
+            prefix = "rtx"
+        parts = [prefix, number]
+        if tier:
+            parts.append(tier)
+        return " ".join(parts).upper()
+
+    # AMD with explicit "rx" prefix: rx 6800, rx 6800 xt, rx 7900 xtx
+    m = re.search(r'\b(rx)\s*(\d{3,4})\s*(xtx|xt)?\b', intent_lower)
+    if m:
         parts = [m.group(1), m.group(2)]
         if m.group(3):
             parts.append(m.group(3))
-    else:
-        parts = [m.group(4), m.group(5)]
-        if m.group(6):
-            parts.append(m.group(6))
-    return " ".join(parts).upper()
+        return " ".join(parts).upper()
+
+    # AMD bare number with mandatory xt/xtx suffix.
+    # Covers RX 6xxx (6500–6999) and RX 7xxx (7500–7999) series.
+    # The mandatory suffix prevents matching prices ("$6700" → no suffix → skip).
+    m = re.search(r'\b(6[5-9]\d{2}|7[5-9]\d{2})\s*(xtx|xt)\b', intent_lower)
+    if m:
+        parts = ["rx", m.group(1), m.group(2)]
+        return " ".join(parts).upper()
+
+    return None
 
 
 def _extract_vehicle_make_model(intent_lower: str) -> Optional[tuple[str, str]]:
@@ -566,7 +754,7 @@ def _extract_vehicle_make_model(intent_lower: str) -> Optional[tuple[str, str]]:
     Return (make, model) for the vehicle detected in the intent.
 
     Checks:
-      1. Explicit make + following word as model ("honda civic")
+      1. Explicit make + following word as model ("honda civic", "toyota rav4")
       2. Known model with inferred make ("corolla" → ("toyota", "corolla"))
       3. Make alone ("honda")
 
@@ -579,11 +767,8 @@ def _extract_vehicle_make_model(intent_lower: str) -> Optional[tuple[str, str]]:
     for i, word in enumerate(words):
         if word in _VEHICLE_MAKES:
             make = word
-            # Try to get the next word as a model name.
-            #
-            # Accept: "civic" (alpha), "rav4" (alphanum), "4runner" (alphanum),
-            #         "f150" (alphanum), "f-150" (has letter + hyphen)
-            # Reject: "2019" (pure digit year), "15k" (number+k), "less" (stopword)
+            # Accept alphanumeric model names (rav4, 4runner, f150) but reject
+            # pure-digit years (2019) and k-suffix values (15k).
             nxt = words[i + 1] if i + 1 < len(words) else ""
             nxt_has_letter = bool(re.search(r'[a-z]', nxt))
             nxt_is_num_k   = bool(re.match(r'^\d+[kK]?$', nxt))
@@ -596,7 +781,6 @@ def _extract_vehicle_make_model(intent_lower: str) -> Optional[tuple[str, str]]:
             return make, ""
 
     # Pass 2: look for a known model name (infer make from _MODEL_TO_MAKE)
-    # Check multi-word models first (e.g. "4runner", "cr-v")
     for model, make in sorted(_MODEL_TO_MAKE.items(), key=lambda kv: -len(kv[0])):
         if model in intent_lower:
             return make, model
@@ -624,7 +808,6 @@ def _sanitize_craigslist_location(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
 
-    # Reject anything containing whitespace
     if re.search(r'\s', raw):
         log.warning(
             "Location %r contains spaces and is not a valid Craigslist subdomain.  "
@@ -634,7 +817,6 @@ def _sanitize_craigslist_location(raw: Optional[str]) -> Optional[str]:
         )
         return None
 
-    # Must be reasonable length and all alphanumeric (hyphens allowed for e.g. 'new-york')
     if len(raw) > 30 or not re.match(r'^[a-z0-9-]+$', raw, re.IGNORECASE):
         log.warning(
             "Location %r does not look like a valid Craigslist subdomain.  "
@@ -653,25 +835,56 @@ def _sanitize_craigslist_location(raw: Optional[str]) -> Optional[str]:
 def _build_tv_translation(
     size: Optional[int],
     resolution: Optional[str],
-) -> tuple[list[str], list[str]]:
+    brand: Optional[str] = None,
+    panel: Optional[str] = None,
+) -> tuple[list[str], list[str], list[str]]:
     """
     TV / Home Theater.
 
+    Returns (search_terms, include_kw, require_all_kw).
+
     Strategy:
-      - Tight Craigslist phrase ("75 inch 4K TV") for better raw results.
-      - include_keywords = [str(size)]: the size digit must appear in the
-        listing title ("75" matches "75\"", "75 inch", "75-inch", "75in").
+      - Build a specific Craigslist phrase from brand + size + panel + resolution,
+        e.g. "Samsung 75 inch OLED 4K TV".
+      - Single discriminator (size only, or brand only): put it in include_kw so
+        it is evaluated with the standard OR/any() rule — backward compatible.
+      - Multiple discriminators (size + brand, or size + panel, etc.): put all of
+        them in require_all_kw so that ALL must appear in the listing title.
+        This prevents "LG 75 OLED" from passing a Samsung-specific hunt just
+        because "75" alone matches.
     """
     parts: list[str] = []
+    if brand:
+        parts.append(brand.title())     # "Samsung"
     if size:
         parts.append(f"{size} inch")
+    if panel:
+        parts.append(panel.upper())     # "OLED", "QLED"
     if resolution:
-        parts.append(resolution.upper())   # "4K", "8K", "1080P"
+        parts.append(resolution.upper())
     parts.append("TV")
 
-    search_terms = [" ".join(parts)]       # e.g. ["75 inch 4K TV"]
-    include_kw   = [str(size)] if size else []
-    return search_terms, include_kw
+    search_terms = [" ".join(parts)]
+
+    # Collect all active discriminators
+    strict_kw: list[str] = []
+    if size:
+        strict_kw.append(str(size))
+    if brand:
+        strict_kw.append(brand)
+    if panel:
+        strict_kw.append(panel)
+
+    if len(strict_kw) <= 1:
+        # Single discriminator: standard include_keywords (any/OR semantics)
+        include_kw     = strict_kw
+        require_all_kw = []
+    else:
+        # Multiple discriminators: strict require_all_keywords (all/AND semantics)
+        include_kw     = []
+        require_all_kw = strict_kw
+
+    return search_terms, include_kw, require_all_kw
 
 
 def _build_gpu_translation(
@@ -690,7 +903,19 @@ def _build_gpu_translation(
         num_m = re.search(r'(\d{3,4})', gpu_model)
         include_kw = [num_m.group(1)] if num_m else []
     else:
-        search_terms = [intent]
+        # No specific model detected — strip price constraints and query-noise
+        # words so Craigslist gets a clean search phrase instead of raw intent.
+        clean = re.sub(
+            r'(?:under|below|less\s+than|at\s+most|up\s+to|max(?:imum)?)\s*\$?\s*\d[\d,]*'
+            r'|\$\s*\d[\d,]*',
+            '', intent.lower(), flags=re.IGNORECASE,
+        )
+        clean = re.sub(
+            r'\b(?:dollars?|bucks?|usd|for|with|and|or|the|a|an)\b',
+            '', clean, flags=re.IGNORECASE,
+        )
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        search_terms = [(clean.title() if clean else intent)]
         include_kw   = []
     return search_terms, include_kw
 
@@ -713,10 +938,10 @@ def _build_ram_translation(
     """
     phrase_parts = []
     if ram_type:
-        phrase_parts.append(ram_type.upper())  # "DDR4"
+        phrase_parts.append(ram_type.upper())   # "DDR4"
     phrase_parts.extend(["desktop", "RAM"])
 
-    search_terms = [" ".join(phrase_parts)]  # e.g. ["DDR4 desktop RAM"]
+    search_terms = [" ".join(phrase_parts)]     # e.g. ["DDR4 desktop RAM"]
     include_kw   = [ram_type] if ram_type else []
     return search_terms, include_kw, list(_RAM_EXCLUDE)
 
@@ -732,17 +957,13 @@ def _build_vehicle_translation(
     Strategy:
       - If both make and model are known, search for the combined phrase
         ("Honda Civic") and set include_keywords to the phrase itself.
-        Using the full "honda civic" phrase as the include keyword enforces
-        that BOTH tokens appear together in the listing title, which filters
-        out loose make-only or unrelated model listings.
       - If only make: search and include on the make alone.
       - Fallback: use the cleaned intent as the search phrase.
     """
     if make and model:
-        phrase      = f"{make} {model}".title()   # "Honda Civic"
+        phrase       = f"{make} {model}".title()
         search_terms = [phrase]
-        # Phrase-as-substring check enforces make+model co-occurrence in title
-        include_kw   = [f"{make} {model}"]        # "honda civic" — both must appear together
+        include_kw   = [f"{make} {model}"]
     elif make:
         search_terms = [make.title()]
         include_kw   = [make]
@@ -772,25 +993,30 @@ def _generate_name(
     model: Optional[str],
     ram_type: Optional[str],
     search_terms: list[str],
+    brand: Optional[str] = None,
+    panel: Optional[str] = None,
 ) -> str:
     """
     Auto-generate a short, slug-style hunt name.
 
     Examples
     --------
-    TV 75" 4K             → "75in_4k_tv"
-    GPU RTX 3080          → "rtx3080_gpu"
-    GPU generic           → first 3 search-term words
-    DDR4 RAM              → "ddr4_desktop_ram"
-    DDR4 RAM 8GB+         → "ddr4_desktop_ram"   (min_gb in notes)
-    Vehicle honda civic   → "honda_civic"
-    Vehicle honda only    → "honda_car"
+    Samsung 75" OLED 4K TV  → "samsung_75in_oled_4k_tv"
+    75" 4K TV               → "75in_4k_tv"
+    GPU RTX 3080            → "rtx3080_gpu"
+    DDR4 RAM                → "ddr4_desktop_ram"
+    Vehicle honda civic     → "honda_civic"
+    Vehicle honda only      → "honda_car"
     """
     parts: list[str] = []
 
     if vertical == "tv_home_theater":
+        if brand:
+            parts.append(brand)
         if size:
             parts.append(f"{size}in")
+        if panel:
+            parts.append(panel.replace("-", ""))    # "miniled" not "mini-led"
         if resolution:
             parts.append(resolution)
         parts.append("tv")
@@ -800,7 +1026,7 @@ def _generate_name(
             parts.append(re.sub(r'\s+', '', gpu_model.lower()))  # "rtx3080ti"
             parts.append("gpu")
         elif ram_type:
-            parts.append(ram_type)       # "ddr4"
+            parts.append(ram_type)
             parts.extend(["desktop", "ram"])
         else:
             words = [w for w in search_terms[0].lower().split()
@@ -849,43 +1075,67 @@ def _translate_rules_based(
     intent_lower_orig = intent.lower()
 
     # Expand k-suffix numbers for numeric extractions ONLY.
-    # "under 10k dollars" → "under 10000 dollars"
-    # "less than 100k miles" → "less than 100000 miles"
     # We do NOT apply this to the original intent so that "4k" and "8k"
     # are still recognised as resolutions, not converted to 4000/8000.
     intent_lower_num = _expand_k_numbers(intent_lower_orig)
 
-    # 1. Identify vertical (use original — vertical keywords are not numbers)
+    # 1. Identify vertical
     vertical, v_cfg = _detect_vertical(intent_lower_orig)
+
+    # Pre-compute RAM flag once; reused in several branches below.
+    _is_ram = _is_ram_hunt(intent_lower_orig)
+
+    # Early GPU detection: bare AMD model numbers (e.g. "6700xt") score zero
+    # against the keyword-based vertical scorer, so they fall through to
+    # "general".  Detect the GPU model upfront and override the vertical when
+    # a model is found but the scorer missed it.
+    _pre_gpu = _extract_gpu_model(intent_lower_orig) if not _is_ram else None
+    if _pre_gpu and vertical != "computer_parts":
+        vertical = "computer_parts"
+        v_cfg    = VERTICALS["computer_parts"]
 
     # 2. Extract structured attributes
     #    Resolution + vertical keywords → original text
     #    Prices, mileage, capacity       → k-expanded text
     size       = _extract_size(intent_lower_orig)       if v_cfg.get("size_pattern") else None
     resolution = _extract_resolution(intent_lower_orig) if vertical == "tv_home_theater" else None
-    ram_type   = _extract_ram_type(intent_lower_orig)   if vertical == "computer_parts" else None
-    gpu_model  = (_extract_gpu_model(intent_lower_orig)
-                  if vertical == "computer_parts" and not _is_ram_hunt(intent_lower_orig)
-                  else None)
-    min_gb     = _extract_min_gb(intent_lower_num)      if vertical == "computer_parts" else None
+    tv_brand   = _extract_tv_brand(intent_lower_orig)   if vertical == "tv_home_theater" else None
+    tv_panel   = _extract_tv_panel(intent_lower_orig)   if vertical == "tv_home_theater" else None
+
+    ram_type    = _extract_ram_type(intent_lower_orig)  if vertical == "computer_parts" else None
+    # Reuse _pre_gpu to avoid calling _extract_gpu_model a second time.
+    gpu_model   = _pre_gpu if (vertical == "computer_parts" and not _is_ram) else None
+    min_gb      = _extract_min_gb(intent_lower_num)     if vertical == "computer_parts" else None
+    min_speed_mhz = (
+        _extract_min_speed_mhz(intent_lower_num)
+        if vertical == "computer_parts" and _is_ram
+        else None
+    )
+    min_vram_gb = (_extract_min_vram_gb(intent_lower_orig)
+                   if vertical == "computer_parts" and not _is_ram
+                   else None)
 
     veh_pair   = _extract_vehicle_make_model(intent_lower_orig) if vertical == "vehicles" else None
     make       = veh_pair[0] if veh_pair else None
     model      = veh_pair[1] if veh_pair else None
+    miles      = _extract_miles(intent_lower_num)       if vertical == "vehicles" else None
+    min_year, max_year = (
+        _extract_year_range(intent_lower_orig) if vertical == "vehicles" else (None, None)
+    )
 
-    miles      = _extract_miles(intent_lower_num)  if vertical == "vehicles" else None
-    price      = _extract_price(intent_lower_num, max_price)
-
-    # Location: validate any override; never extract from free text
-    loc = _sanitize_craigslist_location(location)
+    price = _extract_price(intent_lower_num, max_price)
+    loc   = _sanitize_craigslist_location(location)
 
     # 3. Build search terms, include_keywords, and (for RAM) exclude_keywords
     ram_specific_exclude: list[str] = []
+    tv_require_all:       list[str] = []   # populated by TV branch; empty for all others
 
     if vertical == "tv_home_theater":
-        search_terms, include_kw = _build_tv_translation(size, resolution)
+        search_terms, include_kw, tv_require_all = _build_tv_translation(
+            size, resolution, brand=tv_brand, panel=tv_panel
+        )
 
-    elif vertical == "computer_parts" and _is_ram_hunt(intent_lower_orig):
+    elif vertical == "computer_parts" and _is_ram:
         search_terms, include_kw, ram_specific_exclude = _build_ram_translation(ram_type, min_gb)
 
     elif vertical == "computer_parts":
@@ -895,20 +1145,14 @@ def _translate_rules_based(
         search_terms, include_kw = _build_vehicle_translation(make or "", model or "", intent)
 
     else:
-        # Generic: clean up the k-expanded text so we don't leave "k" or
-        # unit-word fragments behind.
-        # Example: "road bike under 500 dollars"
-        #   _PRICE_RE strips "under 500" → "road bike  dollars"
-        #   unit-word strip removes "dollars" → "road bike"
         clean = _PRICE_RE.sub("", intent_lower_num).strip()
         clean = _MILES_RE.sub("", clean).strip()
-        # Remove orphaned unit words left after numeric extraction
         clean = re.sub(r'\b(?:dollars?|bucks?|usd|miles?|km)\b', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'\s+', ' ', clean).strip()
         search_terms = [clean.title() if clean else intent]
         include_kw   = []
 
-    # 4. Exclude keywords: vertical defaults + any vertical-specific overrides
+    # 4. Exclude keywords
     exclude_kw: list[str] = (
         ram_specific_exclude
         if ram_specific_exclude
@@ -918,37 +1162,60 @@ def _translate_rules_based(
     # 5. Category label
     category = vertical.replace("_", " ")
 
-    # 6. adapter_options: carry non-rule structured constraints forward
+    # 6. adapter_options: structured constraints forwarded to the rule engine
     adapter_opts: dict = {}
+
+    if tv_require_all:
+        # Store multi-discriminator TV constraints for AND-semantics title check.
+        # Kept in adapter_options so existing Hunt schema requires no changes.
+        adapter_opts["require_all_keywords"] = tv_require_all
 
     if vertical == "vehicles":
         # Filter out $0/$1 placeholder listings automatically.
-        # A real vehicle listing should cost at least $200.
         adapter_opts["min_price"] = 200
         if miles:
-            # Cannot enforce mileage via the current rule engine (mileage isn't
-            # in the Listing model).  Store it so the operator can see it in
-            # /hunt_show and future versions can enforce it.
             adapter_opts["max_miles"] = miles
+        if min_year:
+            adapter_opts["min_year"] = min_year
+        if max_year:
+            adapter_opts["max_year"] = max_year
 
-    if vertical == "computer_parts" and min_gb:
-        # min_gb likewise cannot be enforced by the rule engine today — stored
-        # for operator reference only.
-        adapter_opts["min_capacity_gb"] = min_gb
+    if vertical == "computer_parts":
+        if _is_ram:
+            if min_gb:
+                adapter_opts["min_capacity_gb"] = min_gb
+            if min_speed_mhz:
+                adapter_opts["min_speed_mhz"] = min_speed_mhz
+        else:
+            # GPU hunt: min_vram_gb only set when "vram" / "video memory" explicit.
+            if min_vram_gb:
+                adapter_opts["min_vram_gb"] = min_vram_gb
 
     # 7. Auto-generate name
-    name = _generate_name(vertical, size, resolution, gpu_model, make, model, ram_type, search_terms)
+    name = _generate_name(
+        vertical, size, resolution, gpu_model, make, model, ram_type, search_terms,
+        brand=tv_brand, panel=tv_panel,
+    )
 
     # 8. Notes / reasoning summary
     constraint_parts: list[str] = []
+    if tv_brand:   constraint_parts.append(f"brand={tv_brand}")
+    if tv_panel:   constraint_parts.append(f"panel={tv_panel}")
     if size:       constraint_parts.append(f'size={size}"')
     if resolution: constraint_parts.append(f"resolution={resolution}")
     if gpu_model:  constraint_parts.append(f"model={gpu_model}")
     if ram_type:   constraint_parts.append(f"ram_type={ram_type}")
-    if min_gb:     constraint_parts.append(f"min_capacity={min_gb}GB (stored; not yet enforced by rule engine)")
+    if min_gb and _is_ram:
+        constraint_parts.append(f"min_capacity={min_gb}GB")
+    if min_speed_mhz and _is_ram:
+        constraint_parts.append(f"min_speed={min_speed_mhz}MHz")
+    if min_vram_gb:
+        constraint_parts.append(f"min_vram={min_vram_gb}GB")
     if make:       constraint_parts.append(f"make={make}")
     if model:      constraint_parts.append(f"model={model}")
-    if miles:      constraint_parts.append(f"max_miles={miles:,} (stored; not yet enforced by rule engine)")
+    if miles:      constraint_parts.append(f"max_miles={miles:,}")
+    if min_year:   constraint_parts.append(f"min_year={min_year}")
+    if max_year:   constraint_parts.append(f"max_year={max_year}")
     if price:      constraint_parts.append(f"max_price=${price}")
     if loc:        constraint_parts.append(f"location={loc}")
     if adapter_opts.get("min_price"):
