@@ -14,7 +14,7 @@ from engine.hunt_service import hunt_to_execution_dict
 from engine.hunt_service import list_hunts as list_db_hunts
 from engine.hunts import load_hunts
 from engine.notifier import send_discord_alert
-from engine.rules import matches_rules
+from engine.rules import rejection_reason
 
 # ---------------------------------------------------------------------------
 # Hunt source selection
@@ -68,9 +68,10 @@ def run_hunt(hunt: dict) -> int:
     filtered_count = 0
 
     for listing in listings:
-        if not matches_rules(listing, rules):
+        reason = rejection_reason(listing, rules)
+        if reason is not None:
             filtered_count += 1
-            log.info("FILTERED: %s", listing.link)
+            log.info("FILTERED %r: %s", listing.title[:60], reason)
             continue
 
         was_inserted = save_listing(listing)

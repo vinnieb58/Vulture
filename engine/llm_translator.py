@@ -441,6 +441,27 @@ _VRAM_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Whole-system / non-standalone-card terms excluded from all GPU hunts.
+#
+# Design principles:
+#   - Only terms that unambiguously indicate a complete system, not a bare card.
+#   - Bare words like "pc", "desktop", "computer", "tower" are intentionally
+#     omitted: sellers routinely write "desktop GPU" or "great for gaming pc"
+#     in standalone-card titles.
+#   - Compound phrases (e.g. "gaming pc") are safe because they are far less
+#     likely to appear in a pure GPU listing title.
+#   - "prebuilt" is omitted: sellers sometimes write "pulled from prebuilt"
+#     when selling a card they removed from a system.
+_GPU_SYSTEM_EXCLUDE: list[str] = [
+    "laptop",           # "ASUS TUF Gaming Laptop RTX 3070" — most common false positive
+    "notebook",         # synonym for laptop
+    "gaming pc",        # complete gaming system
+    "gaming desktop",   # complete gaming desktop
+    "gaming computer",  # complete gaming computer
+    "complete system",  # explicit full-system phrase
+    "full system",      # explicit full-system phrase
+]
+
 # Words that must NOT be treated as a vehicle model name
 _NOT_A_MODEL = {
     "less", "more", "than", "under", "over", "about", "around",
@@ -890,18 +911,51 @@ def _build_tv_translation(
 def _build_gpu_translation(
     gpu_model: Optional[str],
     intent: str,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """
     GPU hunt.
 
-    Strategy:
-      - Model-specific: search for model directly; require numeric part in title.
-      - Generic: use intent text as search phrase.
+    Returns (search_terms, include_keywords, model_exclude_keywords).
+
+    Strategy
+    --------
+    Model-specific:
+      - Search for the full model string (e.g. "RTX 3080 TI GPU").
+      - include_keywords enforces that the title contains the right model/tier:
+          No tier  → require the model number alone ("3080").
+          With tier → require BOTH the spaced ("3080 ti") AND the run-together
+                       ("3080ti") forms as OR alternatives, so sellers who write
+                       "3080Ti" without a space are still matched correctly.
+      - model_exclude_keywords: when hunting an XT model (not XTX), add the XTX
+        variants to exclude so "RX 7900 XTX" is not matched by an "RX 7900 XT"
+        hunt (the substring "7900 xt" is present in "7900 xtx").
+
+    Generic (no model detected):
+      - Clean price/noise words from the raw intent and use the remainder.
     """
     if gpu_model:
         search_terms = [f"{gpu_model} GPU"]
-        num_m = re.search(r'(\d{3,4})', gpu_model)
-        include_kw = [num_m.group(1)] if num_m else []
+        num_m  = re.search(r'(\d{3,4})',              gpu_model)
+        tier_m = re.search(r'\b(TI|SUPER|XT|XTX)\b', gpu_model)
+        number = num_m.group(1)          if num_m  else None
+        tier   = tier_m.group(1).lower() if tier_m else None
+
+        if number and tier:
+            # Require both the spaced and run-together forms so titles like
+            # "RTX 3080 Ti 12GB" and "RTX 3080Ti" both match.
+            include_kw = [f"{number} {tier}", f"{number}{tier}"]
+        elif number:
+            include_kw = [number]
+        else:
+            include_kw = []
+
+        # Guard: "XT" is a substring of "XTX".  When hunting an XT model,
+        # explicitly exclude XTX listings so "RX 7900 XTX" is not returned
+        # by an "RX 7900 XT" hunt.  XTX hunts need no guard (XTX ⊄ XT).
+        xtx_guard = [f"{number} xtx", f"{number}xtx"] if (tier == "xt" and number) else []
+        # Combine XTX guard with the system-type exclusions that apply to
+        # every GPU hunt (standalone-card hunts should never match laptops etc.)
+        model_excl = xtx_guard + _GPU_SYSTEM_EXCLUDE
     else:
         # No specific model detected — strip price constraints and query-noise
         # words so Craigslist gets a clean search phrase instead of raw intent.
@@ -917,7 +971,8 @@ def _build_gpu_translation(
         clean = re.sub(r'\s+', ' ', clean).strip()
         search_terms = [(clean.title() if clean else intent)]
         include_kw   = []
-    return search_terms, include_kw
+        model_excl   = list(_GPU_SYSTEM_EXCLUDE)
+    return search_terms, include_kw, model_excl
 
 
 def _build_ram_translation(
@@ -1128,6 +1183,7 @@ def _translate_rules_based(
 
     # 3. Build search terms, include_keywords, and (for RAM) exclude_keywords
     ram_specific_exclude: list[str] = []
+    gpu_model_excl:       list[str] = []   # XTX guard; empty for all non-GPU branches
     tv_require_all:       list[str] = []   # populated by TV branch; empty for all others
 
     if vertical == "tv_home_theater":
@@ -1139,7 +1195,7 @@ def _translate_rules_based(
         search_terms, include_kw, ram_specific_exclude = _build_ram_translation(ram_type, min_gb)
 
     elif vertical == "computer_parts":
-        search_terms, include_kw = _build_gpu_translation(gpu_model, intent)
+        search_terms, include_kw, gpu_model_excl = _build_gpu_translation(gpu_model, intent)
 
     elif vertical == "vehicles":
         search_terms, include_kw = _build_vehicle_translation(make or "", model or "", intent)
@@ -1153,11 +1209,10 @@ def _translate_rules_based(
         include_kw   = []
 
     # 4. Exclude keywords
-    exclude_kw: list[str] = (
-        ram_specific_exclude
-        if ram_specific_exclude
-        else list(v_cfg.get("default_exclude", []))
-    )
+    if ram_specific_exclude:
+        exclude_kw: list[str] = ram_specific_exclude
+    else:
+        exclude_kw = list(v_cfg.get("default_exclude", [])) + gpu_model_excl
 
     # 5. Category label
     category = vertical.replace("_", " ")

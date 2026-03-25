@@ -149,95 +149,115 @@ def _extract_vram_gb_from_title(title: str) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
-# Public rule evaluator
+# Rule evaluator
 # ---------------------------------------------------------------------------
 
-def matches_rules(listing: Listing, rules: dict) -> bool:
-    """Return True if the listing passes all rules defined in the hunt config."""
+def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
+    """
+    Core rule evaluator.  Returns a short human-readable string describing
+    the FIRST rule that rejects the listing, or None if all rules pass.
+
+    Evaluation order mirrors the original matches_rules logic so results
+    are identical; only the return type changes.
+    """
     if not rules:
-        return True
+        return None
 
     # --- price bounds ---
     min_price = rules.get("min_price")
     if min_price is not None:
-        # Reject listings with no price or a suspiciously low placeholder price
-        if listing.price is None or listing.price < min_price:
-            return False
+        p = listing.price
+        if p is None or p < min_price:
+            return f"price ${p if p is not None else 'n/a'} < min_price ${min_price}"
 
     max_price = rules.get("max_price")
     if max_price is not None:
-        if listing.price is None or listing.price > max_price:
-            return False
+        p = listing.price
+        if p is None or p > max_price:
+            return f"price ${p if p is not None else 'n/a'} > max_price ${max_price}"
 
     # --- keyword filters ---
 
-    # include_keywords  — OR / any() semantics (backward-compatible).
-    # At least one keyword in the list must appear in the title.
-    # Used by YAML hunts and simple single-discriminator translator hunts.
+    # include_keywords — OR / any() semantics (backward-compatible).
     include_keywords = rules.get("include_keywords") or []
     if include_keywords:
         title_lower = listing.title.lower()
         if not any(str(kw).lower() in title_lower for kw in include_keywords):
-            return False
+            shown = ", ".join(f'"{kw}"' for kw in include_keywords[:4])
+            if len(include_keywords) > 4:
+                shown += f" +{len(include_keywords)-4} more"
+            return f"title missing include keyword (any of: {shown})"
 
     # require_all_keywords — AND / all() semantics (strict, opt-in).
-    # Every keyword in the list must appear in the title.
-    # Set by the translator via adapter_options for hunts that need multiple
-    # co-occurring discriminators, e.g. TV brand + size + panel type.
-    # Never set by v1.0 YAML hunts; does not affect existing hunts.
     require_all_keywords = rules.get("require_all_keywords") or []
     if require_all_keywords:
         title_lower = listing.title.lower()
-        if not all(str(kw).lower() in title_lower for kw in require_all_keywords):
-            return False
+        for kw in require_all_keywords:
+            if str(kw).lower() not in title_lower:
+                return f'title missing required keyword "{kw}"'
 
+    # exclude_keywords — any match rejects.
     exclude_keywords = rules.get("exclude_keywords") or []
     if exclude_keywords:
         title_lower = listing.title.lower()
-        if any(str(kw).lower() in title_lower for kw in exclude_keywords):
-            return False
+        for kw in exclude_keywords:
+            if str(kw).lower() in title_lower:
+                return f'excluded keyword "{kw}"'
 
     # --- structured constraints extracted from title ---
-    # For all of these: if the value cannot be parsed from the title, the
-    # listing is allowed through (conservative / no-match = pass).
+    # Conservative: if the value cannot be parsed from the title, pass through.
 
-    # max_miles: reject only when mileage is explicitly stated AND over the limit.
     max_miles = rules.get("max_miles")
     if max_miles is not None:
         miles = _extract_miles_from_title(listing.title)
         if miles is not None and miles > max_miles:
-            return False
+            return f"mileage {miles:,} > max_miles {max_miles:,}"
 
-    # min_capacity_gb: reject only when capacity is stated AND under the threshold.
     min_capacity_gb = rules.get("min_capacity_gb")
     if min_capacity_gb is not None:
         capacity_gb = _extract_ram_gb_from_title(listing.title)
         if capacity_gb is not None and capacity_gb < min_capacity_gb:
-            return False
+            return f"capacity {capacity_gb}GB < min_capacity_gb {min_capacity_gb}GB"
 
-    # min_year / max_year: reject only when a year is stated AND out of range.
     min_year = rules.get("min_year")
     max_year = rules.get("max_year")
     if min_year is not None or max_year is not None:
         year = _extract_year_from_title(listing.title)
         if year is not None:
             if min_year is not None and year < min_year:
-                return False
+                return f"year {year} < min_year {min_year}"
             if max_year is not None and year > max_year:
-                return False
+                return f"year {year} > max_year {max_year}"
 
-    # min_vram_gb: reject only when VRAM is explicitly stated AND under the threshold.
     min_vram_gb = rules.get("min_vram_gb")
     if min_vram_gb is not None:
         vram_gb = _extract_vram_gb_from_title(listing.title)
         if vram_gb is not None and vram_gb < min_vram_gb:
-            return False
+            return f"vram {vram_gb}GB < min_vram_gb {min_vram_gb}GB"
 
-    # min_speed_mhz: reject only when speed is explicitly stated AND below the threshold.
     min_speed_mhz = rules.get("min_speed_mhz")
     if min_speed_mhz is not None:
         speed_mhz = _extract_speed_mhz_from_title(listing.title)
         if speed_mhz is not None and speed_mhz < min_speed_mhz:
-            return False
+            return f"speed {speed_mhz}MHz < min_speed_mhz {min_speed_mhz}MHz"
 
-    return True
+    return None
+
+
+def matches_rules(listing: Listing, rules: dict) -> bool:
+    """Return True if the listing passes all rules defined in the hunt config."""
+    return _find_rejection_reason(listing, rules) is None
+
+
+def rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
+    """
+    Return a human-readable rejection reason string, or None if the listing
+    passes all rules.
+
+    Use this in run_hunt to log exactly why a listing was filtered:
+
+        reason = rejection_reason(listing, rules)
+        if reason is not None:
+            log.info("FILTERED %r: %s", listing.title[:60], reason)
+    """
+    return _find_rejection_reason(listing, rules)
