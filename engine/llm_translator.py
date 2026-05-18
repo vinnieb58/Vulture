@@ -128,10 +128,21 @@ VERTICALS: dict[str, dict] = {
             "bmw", "mercedes", "audi", "volkswagen", "vw",
             "porsche", "lexus", "acura", "infiniti", "volvo",
             "cadillac", "gmc", "buick", "mitsubishi", "chrysler",
-            # Popular models
+            # Popular models — keep in sync with _MODEL_TO_MAKE below
             "civic", "accord", "corolla", "camry", "tacoma", "tundra",
             "mustang", "f150", "f-150", "silverado", "4runner",
             "highlander", "rav4", "miata", "mx-5",
+            "prius", "supra", "sienna", "venza", "sequoia",
+            "ridgeline", "passport", "hrv",
+            "ranger", "explorer", "expedition", "escape", "edge", "maverick",
+            "equinox", "malibu", "traverse",
+            "wrx", "crosstrek", "legacy",
+            "rogue", "murano", "armada", "xterra",
+            "sorento", "telluride", "stinger",
+            "palisade", "ioniq",
+            "durango", "gladiator",
+            "sierra", "yukon", "acadia",
+            "escalade",
             # Other vehicle types
             "motorcycle", "scooter", "moped",
             "rv", "motorhome", "camper",
@@ -142,9 +153,22 @@ VERTICALS: dict[str, dict] = {
             "part out", "parts out", "parts only", "for parts",
             "parting out", "parts car", "salvage",
             "rebuilt title", "flood damage",
-            # Components (not whole vehicle)
+            # Generic body components (broad terms already present)
             "wheel", "wheels", "rim", "rims",
             "tire", "tires", "bumper", "door", "hood", "fender",
+            # Specific auto components — rarely stated in whole-vehicle titles.
+            # Risk: a seller might mention a recently replaced part as a selling
+            # point ("new alternator installed"), but the tradeoff is worth it
+            # given how frequently these appear in pure-parts listings.
+            "headlight", "headlamp",
+            "taillight", "tail light", "taillamp",
+            "tailgate", "tail gate", "liftgate", "lift gate",
+            "catalytic converter",
+            "alternator",
+            "radiator",
+            "control arm",
+            "cv axle", "cv joint",
+            "brake caliper",
             # Non-vehicle merchandise: collectibles, memorabilia, decor
             "sculpture", "figurine", "collectable", "collectible",
             "miniature", "diecast", "die cast", "die-cast",
@@ -462,6 +486,54 @@ _GPU_SYSTEM_EXCLUDE: list[str] = [
     "full system",      # explicit full-system phrase
 ]
 
+# Curated misspelling map: wrong lowercase form → canonical lowercase make.
+# Only include make names that are commonly mistyped and would otherwise fall
+# through to the "general" vertical.  Keep this list small and deterministic.
+_MAKE_ALIASES: dict[str, str] = {
+    # Hyundai — most-misspelled Korean make
+    "hyndai":     "hyundai",
+    "hundai":     "hyundai",
+    "hyunday":    "hyundai",
+    "hunday":     "hyundai",
+    # Volkswagen
+    "volkswagon": "volkswagen",
+    "vokswagen":  "volkswagen",
+    # Mitsubishi — long name, easy to mangle
+    "mitsubichi": "mitsubishi",
+    "mitzubishi": "mitsubishi",
+    # Subaru
+    "suburu":     "subaru",
+    "suabru":     "subaru",
+    # Porsche
+    "porshe":     "porsche",
+    "porche":     "porsche",
+    # Mercedes
+    "mercades":   "mercedes",
+    # Nissan
+    "nisaan":     "nissan",
+    # Acura
+    "accura":     "acura",
+    # Chevrolet
+    "cheverlet":  "chevrolet",
+    "chevorlet":  "chevrolet",
+}
+
+
+def _normalize_makes(text: str) -> str:
+    """
+    Correct common vehicle-make misspellings in a lowercased intent string.
+
+    Applied before vertical detection and attribute extraction so that the
+    canonical make flows through the entire translation pipeline.  Word-boundary
+    matching avoids replacing make substrings inside unrelated words.
+    The fast ``in`` pre-check skips the regex when the misspelling is absent.
+    """
+    for misspelled, canonical in _MAKE_ALIASES.items():
+        if misspelled in text:
+            text = re.sub(r'\b' + re.escape(misspelled) + r'\b', canonical, text)
+    return text
+
+
 # Words that must NOT be treated as a vehicle model name
 _NOT_A_MODEL = {
     "less", "more", "than", "under", "over", "about", "around",
@@ -531,6 +603,61 @@ _MODEL_TO_MAKE: dict[str, str] = {
     "golf":       "volkswagen",
     "jetta":      "volkswagen",
     "passat":     "volkswagen",
+    # Toyota (additional)
+    "prius":      "toyota",
+    "supra":      "toyota",
+    "sienna":     "toyota",
+    "venza":      "toyota",
+    "sequoia":    "toyota",
+    # Honda (additional)
+    "ridgeline":  "honda",
+    "passport":   "honda",
+    "hr-v":       "honda",
+    "hrv":        "honda",
+    # Ford (additional)
+    "ranger":     "ford",
+    "explorer":   "ford",
+    "expedition": "ford",
+    "escape":     "ford",
+    "edge":       "ford",
+    "maverick":   "ford",
+    "f-250":      "ford",
+    "f250":       "ford",
+    # Chevrolet (additional)
+    "equinox":    "chevrolet",
+    "malibu":     "chevrolet",
+    "traverse":   "chevrolet",
+    # Subaru (additional)
+    "wrx":        "subaru",
+    "crosstrek":  "subaru",
+    "legacy":     "subaru",
+    # Nissan (additional)
+    "rogue":      "nissan",
+    "murano":     "nissan",
+    "armada":     "nissan",
+    "xterra":     "nissan",
+    # Kia (additional)
+    "sorento":    "kia",
+    "telluride":  "kia",
+    "stinger":    "kia",
+    # Hyundai (additional)
+    "palisade":   "hyundai",
+    "ioniq":      "hyundai",
+    "santa fe":   "hyundai",
+    # Dodge (additional)
+    "durango":    "dodge",
+    # Jeep (additional)
+    "gladiator":  "jeep",
+    "grand cherokee": "jeep",
+    # GMC
+    "sierra":     "gmc",
+    "yukon":      "gmc",
+    "acadia":     "gmc",
+    # Cadillac
+    "escalade":   "cadillac",
+    # Ram (additional)
+    "ram 2500":   "ram",
+    "ram 3500":   "ram",
 }
 
 
@@ -864,15 +991,25 @@ def _build_tv_translation(
 
     Returns (search_terms, include_kw, require_all_kw).
 
-    Strategy:
-      - Build a specific Craigslist phrase from brand + size + panel + resolution,
-        e.g. "Samsung 75 inch OLED 4K TV".
-      - Single discriminator (size only, or brand only): put it in include_kw so
-        it is evaluated with the standard OR/any() rule — backward compatible.
-      - Multiple discriminators (size + brand, or size + panel, etc.): put all of
-        them in require_all_kw so that ALL must appear in the listing title.
-        This prevents "LG 75 OLED" from passing a Samsung-specific hunt just
-        because "75" alone matches.
+    Strategy
+    --------
+    Structural discriminators (size, brand, panel) are placed in require_all_kw
+    when 2+ are present, or a single one goes into require_all_kw when resolution
+    is also specified (so the include_kw slot is available for resolution aliases).
+
+    Resolution — when specified — is enforced via include_kw (OR semantics) using
+    all known aliases.  This ensures "4K", "UHD", "2160p", etc. all satisfy the
+    constraint, while a plain "Smart TV" listing without any resolution mention
+    is correctly rejected.
+
+    Rules
+    -----
+    • 2+ structural + resolution  → require_all=structural,  include=res_aliases
+    • 2+ structural, no resolution → require_all=structural,  include=[]
+    • 1  structural + resolution  → require_all=structural,  include=res_aliases
+    • 1  structural, no resolution → include=structural (OR, backward-compatible)
+    • 0  structural + resolution  → include=res_aliases (OR)
+    • 0  structural, no resolution → include=[], require_all=[]
     """
     parts: list[str] = []
     if brand:
@@ -887,7 +1024,7 @@ def _build_tv_translation(
 
     search_terms = [" ".join(parts)]
 
-    # Collect all active discriminators
+    # Structural discriminators — each must appear verbatim in the title (AND).
     strict_kw: list[str] = []
     if size:
         strict_kw.append(str(size))
@@ -896,14 +1033,27 @@ def _build_tv_translation(
     if panel:
         strict_kw.append(panel)
 
-    if len(strict_kw) <= 1:
-        # Single discriminator: standard include_keywords (any/OR semantics)
+    # Resolution aliases — title must contain at least one of these (OR).
+    res_aliases: list[str] = []
+    if resolution:
+        for label, aliases in _RESOLUTION_MAP:
+            if label == resolution:
+                res_aliases = list(aliases)
+                break
+
+    if not strict_kw:
+        # Nothing structural: enforce resolution only (OR), or nothing.
+        include_kw     = res_aliases
+        require_all_kw = []
+    elif len(strict_kw) == 1 and not res_aliases:
+        # Single structural, no resolution — original OR behaviour.
         include_kw     = strict_kw
         require_all_kw = []
     else:
-        # Multiple discriminators: strict require_all_keywords (all/AND semantics)
-        include_kw     = []
+        # 1+ structural AND/OR resolution: put structural in require_all so the
+        # include_kw slot is free for resolution aliases (OR).
         require_all_kw = strict_kw
+        include_kw     = res_aliases   # empty list when resolution not specified
 
     return search_terms, include_kw, require_all_kw
 
@@ -1125,9 +1275,10 @@ def _translate_rules_based(
     """
     Deterministic pattern-matching translator.  No external calls.
     """
-    # Keep the original lowercased intent for keyword-based detection
-    # (resolution "4k", RAM type "ddr4", vertical keywords, etc.).
-    intent_lower_orig = intent.lower()
+    # Lowercase and apply make-spelling normalization so that common typos
+    # (e.g. "hyndai" → "hyundai") flow through vertical detection, make/model
+    # extraction, search terms, and include_keywords correctly.
+    intent_lower_orig = _normalize_makes(intent.lower())
 
     # Expand k-suffix numbers for numeric extractions ONLY.
     # We do NOT apply this to the original intent so that "4k" and "8k"

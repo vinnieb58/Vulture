@@ -142,6 +142,8 @@ CASES = [
             ("Samsung 75 OLED TV 4K UHD Smart",             1500, True),
             # FAIL: price over limit
             ("Samsung 75 OLED TV 4K brand new",             1600, False),
+            # FAIL: no resolution keyword in title — resolution enforcement (new behaviour)
+            ("Samsung 75 OLED Smart TV 2022 model",         900,  False),
         ],
     ),
 
@@ -169,6 +171,10 @@ CASES = [
             ("75 inch 4K TV mount bracket",     30,  False),  # excluded
             ("75 inch 4K TV",                   500, True),
             ("75 inch 4K TV",                   501, False),  # over price
+            # Resolution-enforcement tests (new behaviour):
+            ("75 inch Smart TV",                400, False),  # no 4K/UHD/2160p → FAIL
+            ("75 inch UHD Smart TV",            400, True),   # UHD is a 4K alias → PASS
+            ("75 inch 2160p TV",                400, True),   # 2160p is a 4K alias → PASS
         ],
     ),
 
@@ -206,6 +212,35 @@ CASES = [
             ("2008 Porsche 911 70k miles",  32000, False),  # price too high
             ("Porsche 911 mini sculpture",  250,   False),  # collectible excluded
             ("2007 Porsche 911 Carrera",    26000, True),   # no mileage → pass
+        ],
+    ),
+
+    # ------------------------------------------------------------------
+    # Vehicles — make misspelling + parts rejection
+    # ------------------------------------------------------------------
+    (
+        "hyndai elantra under 15000",   # intentional typo: hyndai → hyundai
+        [
+            ("2019 Hyundai Elantra 60k miles",       14000, True),
+            ("2017 Hyundai Elantra SE 80k miles",    11000, True),
+            # FAIL: year mismatch is NOT tested here; focus is on vertical + include
+            ("2020 Kia Soul",                        13000, False),  # wrong make/model
+            ("Hyundai Elantra headlight assembly",    120,  False),  # parts excluded
+            ("Hyundai Elantra part out 2020",         500,  False),  # parts out excluded
+        ],
+    ),
+
+    (
+        "kia telluride under 40000",
+        [
+            ("2021 Kia Telluride EX AWD 45k miles",  38000, True),
+            ("2020 Kia Telluride SX Limited",         39000, True),
+            # FAIL: parts listings that previously slipped through
+            ("2020/2022 Kia Telluride Front Right Passenger Headlight Led",
+                                                       150,  False),  # headlight excluded
+            ("Kia Telluride Catalytic Converter OEM",  280,  False),  # cat conv excluded
+            ("Kia Telluride Alternator 2021",          95,   False),  # alternator excluded
+            ("Kia Telluride Tailgate Handle",          45,   False),  # tailgate excluded
         ],
     ),
 
