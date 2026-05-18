@@ -6,3 +6,5 @@ __pycache__/
 .env
 .vscode/
 logs/
+.DS_Store
+Thumbs.db
