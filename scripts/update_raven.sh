@@ -115,7 +115,7 @@ section "Running one hunt cycle (main.py)"
 # 9. Restart discord bot
 # ---------------------------------------------------------------------------
 section "Starting discord_bot.py in tmux session: bot"
-tmux new-session -d -s bot "$PYTHON_BIN discord_bot.py"
+tmux new-session -d -s bot -c "$APP_DIR" "$PYTHON_BIN discord_bot.py"
 echo "  Session 'bot' started"
 
 # ---------------------------------------------------------------------------
