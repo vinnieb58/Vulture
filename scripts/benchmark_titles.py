@@ -3,8 +3,8 @@ benchmark_titles.py
 
 Manual review harness for the title-intelligence translator + rule engine.
 
-Usage:
-    python benchmark_titles.py
+Usage (run from the project root):
+    python scripts/benchmark_titles.py
 
 Shows, for each example prompt:
   - Extracted attributes (vertical, search terms, include/exclude keywords,
@@ -16,8 +16,10 @@ This is a dev tool — not part of the production runtime.
 
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
+# Insert repo root so engine/models imports work regardless of CWD
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("VULTURE_TRANSLATOR", "rules")
 
 from engine.llm_translator import translate, TranslationError

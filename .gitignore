@@ -1,10 +1,20 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# Runtime data — data/.gitkeep is tracked to preserve the directory in git
 *.sqlite
+*.sqlite3
 *.db
+
+# Secrets
 .env
+
+# Editor / OS
 .vscode/
-logs/
 .DS_Store
 Thumbs.db
+
+# Runtime logs (auto-created by main.py)
+logs/
