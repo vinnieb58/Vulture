@@ -5,12 +5,15 @@ Lightweight validation script for the Hunt model and hunt_repository.
 Uses a temporary SQLite database so it never touches data/vulture.db.
 
 Run from the project root with the venv active:
-    python validate_step1.py
+    python scripts/validate_step1.py
 """
 
 import sys
 import tempfile
 from pathlib import Path
+
+# Insert repo root so engine/models imports work regardless of CWD
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
 # Redirect engine.database to a temp DB *before* any repository imports
