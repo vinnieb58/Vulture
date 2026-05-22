@@ -51,8 +51,19 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # Adapter registry
 # Maps normalized source name -> callable that returns list[Listing].
-# All registered functions must accept keyword arguments:
-#   query (str), city (str), limit (int)
+#
+# CURRENT CALLABLE CONTRACT (Craigslist-shaped):
+#   adapter_fn(query=str, city=str, limit=int) -> list[Listing]
+#
+# All registered adapters must match this signature for the time being.
+# run_hunt() in main.py calls every adapter with these three keyword args.
+#
+# TODO: When a second adapter is added, evaluate one of:
+#   1. A shared AdapterContext / execution-dict approach so run_hunt() passes
+#      a single structured object instead of unpacked kwargs.
+#   2. Per-adapter thin wrappers registered here that translate from the
+#      common (query, city, limit) call into whatever the adapter needs.
+# Do not change this contract in the current PR.
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
