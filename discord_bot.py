@@ -242,12 +242,44 @@ async def hunt_end(
 
 
 # ---------------------------------------------------------------------------
-# /hunt_from_intent
+# /hunt  (preferred — natural-language hunt creation)
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(
+    name="hunt",
+    description="Create a hunt from a natural-language description. e.g. /hunt rtx 3080 under 300",
+)
+@app_commands.describe(
+    intent=(
+        "What are you looking for?  "
+        "e.g. 'rtx 3080 under 300', '75 inch 4K TV under 500', 'Toyota Sequoia under 25000'"
+    ),
+    location="City or region to search (e.g. 'houston'). Optional — overrides any location in your intent.",
+    max_price="Maximum price in dollars. Optional — overrides any price in your intent.",
+)
+async def hunt(
+    interaction: discord.Interaction,
+    intent: str,
+    location: str | None = None,
+    max_price: int | None = None,
+) -> None:
+    await interaction.response.defer(ephemeral=True)
+    result = dispatch("create_from_intent", {
+        "intent":     intent.strip(),
+        "location":   location.strip() if location else None,
+        "max_price":  max_price,
+        "created_by": str(interaction.user),
+    })
+    await interaction.followup.send(_reply_text(result), ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /hunt_from_intent  (legacy alias — kept for backwards compatibility)
 # ---------------------------------------------------------------------------
 
 @bot.tree.command(
     name="hunt_from_intent",
-    description="Create a hunt from a natural-language description.",
+    description="[Alias for /hunt] Create a hunt from a natural-language description.",
 )
 @app_commands.describe(
     intent=(
