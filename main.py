@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # load .env before reading any os.getenv() calls below
 
-from adapters.craigslist import search_craigslist
+from adapters.registry import get_adapter
 from engine.database import init_db, save_listing
 from engine.hunt_repository import init_hunts_table
 from engine.hunt_service import HuntValidationError
@@ -53,15 +53,16 @@ def run_hunt(hunt: dict) -> int:
 
     log.info("Starting hunt: %s (%s)%s", name, source, id_tag)
 
-    if source == "craigslist":
-        listings = search_craigslist(
-            query=hunt["query"],
-            city=hunt.get("city", "houston"),
-            limit=hunt.get("limit", 10),
-        )
-    else:
-        log.warning("Skipping unsupported source: %s", source)
+    adapter_fn = get_adapter(source)
+    if adapter_fn is None:
+        # Warning already logged by get_adapter; skip this hunt gracefully.
         return 0
+
+    listings = adapter_fn(
+        query=hunt["query"],
+        city=hunt.get("city", "houston"),
+        limit=hunt.get("limit", 10),
+    )
 
     new_count = 0
     old_count = 0
