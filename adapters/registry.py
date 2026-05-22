@@ -21,6 +21,7 @@ import logging
 from typing import Callable, Optional
 
 from adapters.craigslist import search_craigslist
+from adapters.offerup import search_offerup
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ _CAPABILITIES: dict[str, dict] = {
         "requires_browser": False,
         "requires_login": False,
         "supports_location": True,
+        "location_control": "verified",
         "supports_radius": False,
         "supports_price_filter_in_url": False,
         "verticals": [
@@ -44,6 +46,38 @@ _CAPABILITIES: dict[str, dict] = {
             "computer_parts",
             "vehicles",
             "home_theater",
+        ],
+    },
+    # -------------------------------------------------------------------------
+    # OfferUp — experimental first pass
+    #
+    # Parsing: requests + BeautifulSoup + __NEXT_DATA__ JSON (Next.js SSR).
+    # No browser automation required.  No login required for basic search.
+    #
+    # Location caveat: results are geo-resolved by server GeoIP of the
+    # requesting IP, not by the city parameter.  location_control is
+    # "unverified" until Houston (or any specific city) targeting is validated.
+    #
+    # TODO: Test ?location_slug= or session-based location cookies to determine
+    # whether the city parameter can be made to control result geography.
+    # Only after that validation should stable be set to True and
+    # location_control promoted to "verified".
+    # -------------------------------------------------------------------------
+    "offerup": {
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "unverified",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "general_marketplace",
+            "computer_parts",
+            "vehicles",
+            "home_theater",
+            "gaming",
         ],
     },
 }
@@ -68,6 +102,7 @@ _CAPABILITIES: dict[str, dict] = {
 
 _REGISTRY: dict[str, Callable] = {
     "craigslist": search_craigslist,
+    "offerup": search_offerup,
 }
 
 
