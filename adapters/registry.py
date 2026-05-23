@@ -49,19 +49,23 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # OfferUp — experimental first pass
+    # OfferUp — experimental
     #
     # Parsing: requests + BeautifulSoup + __NEXT_DATA__ JSON (Next.js SSR).
     # No browser automation required.  No login required for basic search.
     #
-    # Location caveat: results are geo-resolved by server GeoIP of the
-    # requesting IP, not by the city parameter.  location_control is
-    # "unverified" until Houston (or any specific city) targeting is validated.
+    # Location: NOT controllable from URL parameters or cookies.
+    # A probe (experiments/adapters/offerup_location_probe.py, May 2026)
+    # tested ?lat/lng, ?zip, ?location, ?location_slug, path slugs, and
+    # multiple cookie injection strategies for Houston TX, Dallas TX, and
+    # Arlington VA.  Every strategy returned identical results regardless
+    # of requested city — results are determined solely by the requesting
+    # IP's GeoIP.  supports_location remains False; location_control remains
+    # "unverified" until a reliable server-side mechanism is found.
     #
-    # TODO: Test ?location_slug= or session-based location cookies to determine
-    # whether the city parameter can be made to control result geography.
-    # Only after that validation should stable be set to True and
-    # location_control promoted to "verified".
+    # Candidates for future investigation:
+    #   - OfferUp internal GraphQL/REST API (reverse-engineer mobile/web app)
+    #   - Browser automation that sets location interactively in the session
     # -------------------------------------------------------------------------
     "offerup": {
         "stable": False,
