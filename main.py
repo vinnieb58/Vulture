@@ -86,10 +86,30 @@ def run_hunt(hunt: dict) -> int:
             log.info("OLD: %s", listing.link)
 
     log.info(
-        "Done hunt '%s'%s. New: %d, Existing: %d, Filtered: %d",
-        name, id_tag, new_count, old_count, filtered_count,
+        "Done hunt '%s' [%s]%s. New: %d, Existing: %d, Filtered: %d",
+        name, source, id_tag, new_count, old_count, filtered_count,
     )
     return new_count
+
+
+def _expand_hunt_sources(hunt: dict) -> list[dict]:
+    """
+    Expand a hunt dict into one dict per source in source_sites.
+
+    - DB hunts produced by hunt_to_execution_dict() carry a "source_sites"
+      list.  Each site becomes its own execution dict with "source" set to
+      that site.  This lets the main loop run every source independently and
+      isolate failures per source.
+    - YAML hunts carry only "source" (singular) and no "source_sites" key.
+      They pass through unchanged, preserving v1.0 single-source behaviour.
+    - A DB hunt with exactly one source_site is also returned unchanged (no
+      extra allocation, identical behaviour to today).
+    """
+    source_sites = hunt.get("source_sites")
+    if not source_sites or len(source_sites) <= 1:
+        return [hunt]
+    # Fan out: shallow-copy the shared dict, override "source" for each site.
+    return [{**hunt, "source": site} for site in source_sites]
 
 
 def _resolve_hunt_source() -> str:
@@ -170,12 +190,29 @@ def main() -> None:
             len(yaml_hunts), len(db_hunts), len(hunts),
         )
 
-    total_new = 0
+    # Expand multi-source hunts into one execution unit per source so that
+    # each source runs independently and a failure in one does not prevent
+    # the others from executing.  YAML hunts (single "source" key, no
+    # "source_sites") pass through _expand_hunt_sources unchanged.
+    expanded: list[dict] = []
     for hunt in hunts:
+        expanded.extend(_expand_hunt_sources(hunt))
+    if len(expanded) != len(hunts):
+        log.info(
+            "Expanded %d hunt(s) into %d source-run(s)",
+            len(hunts), len(expanded),
+        )
+
+    total_new = 0
+    for hunt in expanded:
         try:
             total_new += run_hunt(hunt) or 0
         except Exception:
-            log.exception("Hunt '%s' failed", hunt.get("name", "unknown"))
+            log.exception(
+                "Hunt '%s' [%s] failed unexpectedly",
+                hunt.get("name", "unknown"),
+                hunt.get("source", "?"),
+            )
 
     log.info("%d new listing(s) found", total_new)
     log.info("Hunt cycle completed")
