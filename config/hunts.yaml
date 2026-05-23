@@ -14,3 +14,42 @@ hunts:
       exclude_keywords:
         - broken
         - parts
+
+  # ---------------------------------------------------------------------------
+  # OfferUp example hunts (disabled by default — set enabled: true to activate)
+  #
+  # IMPORTANT — Location behaviour:
+  #   OfferUp location is GeoIP-only.  The "city" field below is logged for
+  #   observability but does NOT control which city's listings are returned.
+  #   Results reflect the GeoIP of the machine running main.py.
+  #   On Raven (residential Houston-area IP) results will be Houston-metro.
+  #   On a cloud/datacenter machine results will be that datacenter's region.
+  #
+  # To enable: change "enabled: false" to "enabled: true"
+  # ---------------------------------------------------------------------------
+
+  - name: offerup_rtx3080
+    source: offerup
+    city: houston        # advisory only — does not control location
+    query: rtx 3080
+    limit: 10
+    enabled: false
+    rules:
+      max_price: 500
+      exclude_keywords:
+        - broken
+        - parts only
+        - laptop
+
+  - name: offerup_75in_tv
+    source: offerup
+    city: houston        # advisory only — does not control location
+    query: 75 inch tv
+    limit: 10
+    enabled: false
+    rules:
+      max_price: 800
+      exclude_keywords:
+        - stand
+        - mount
+        - wanted

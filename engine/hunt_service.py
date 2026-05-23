@@ -395,8 +395,10 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     if require_all_keywords:
         rules["require_all_keywords"] = list(require_all_keywords)
 
-    # Safety: Craigslist subdomains must be a single token.
-    # Multi-word strings (e.g. "mandeville louisiana") cause DNS failures.
+    # city is used as the Craigslist subdomain; multi-word values cause DNS
+    # failures (e.g. "mandeville louisiana").  For non-Craigslist adapters
+    # (e.g. OfferUp) city is advisory only — the adapter logs it but does
+    # not use it to control location (GeoIP drives results instead).
     raw_city = hunt.location or "houston"
     import re as _re
     if _re.search(r'\s', raw_city):

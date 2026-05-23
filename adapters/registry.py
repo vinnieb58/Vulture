@@ -49,23 +49,24 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # OfferUp — experimental
+    # OfferUp — experimental (usable on residential IP hosts like Raven)
     #
     # Parsing: requests + BeautifulSoup + __NEXT_DATA__ JSON (Next.js SSR).
     # No browser automation required.  No login required for basic search.
     #
-    # Location: NOT controllable from URL parameters or cookies.
-    # A probe (experiments/adapters/offerup_location_probe.py, May 2026)
-    # tested ?lat/lng, ?zip, ?location, ?location_slug, path slugs, and
-    # multiple cookie injection strategies for Houston TX, Dallas TX, and
-    # Arlington VA.  Every strategy returned identical results regardless
-    # of requested city — results are determined solely by the requesting
-    # IP's GeoIP.  supports_location remains False; location_control remains
-    # "unverified" until a reliable server-side mechanism is found.
+    # Location: GeoIP-only — results are determined by the requesting IP's
+    # geographic location, not by any URL parameter or cookie.
+    # A systematic probe (experiments/adapters/offerup_location_probe.py,
+    # May 2026) tested 9 strategies (lat/lng, zip, location string,
+    # location_slug, path slugs, multiple cookie injections) for Houston TX,
+    # Dallas TX, and Arlington VA — every strategy returned identical results.
     #
-    # Candidates for future investigation:
-    #   - OfferUp internal GraphQL/REST API (reverse-engineer mobile/web app)
-    #   - Browser automation that sets location interactively in the session
+    # Recommended runtime: a residential IP in the target city (e.g. Raven
+    # running from the user's home Houston-area connection).  Do NOT rely on
+    # OfferUp for city-targeted hunts from cloud/datacenter IPs.
+    #
+    # The city argument accepted by search_offerup() is advisory only — it is
+    # logged for observability but does not affect which listings are returned.
     # -------------------------------------------------------------------------
     "offerup": {
         "stable": False,
@@ -73,15 +74,16 @@ _CAPABILITIES: dict[str, dict] = {
         "requires_browser": False,
         "requires_login": False,
         "supports_location": False,
-        "location_control": "unverified",
+        "location_control": "geoip_only",
+        "recommended_runtime": "residential_ip",
         "supports_radius": False,
         "supports_price_filter_in_url": False,
         "verticals": [
             "general_marketplace",
             "computer_parts",
-            "vehicles",
-            "home_theater",
             "gaming",
+            "home_theater",
+            "vehicles",
         ],
     },
 }
