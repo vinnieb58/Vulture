@@ -326,23 +326,31 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     """
     Convert a v2.0 Hunt into the dict shape expected by main.py's run_hunt().
 
-    The v1.0 engine expects:
+    The returned dict contains:
       {
-        "name":   str,
-        "source": str,         # first entry of source_sites
-        "query":  str,         # search_terms joined by space
-        "city":   str,         # location, or "houston" fallback
-        "limit":  int,         # adapter_options["limit"] or 10
+        "hunt_id":     str,        # DB hunt UUID (for log traceability)
+        "name":        str,
+        "source_sites": list[str], # all configured sources; used by
+                                   # _expand_hunt_sources() in main.py
+        "source":      str,        # source_sites[0] — kept for YAML-consumer compat
+        "query":       str,        # search_terms joined by space
+        "city":        str,        # location, or "houston" fallback
+        "limit":       int,        # adapter_options["limit"] or 10
         "rules": {
           "min_price":        Optional[int],   # filters placeholder $0/$1 listings
           "max_price":        Optional[int],
           "include_keywords": list,
           "exclude_keywords": list,
+          ...                                  # structured constraints from adapter_options
         }
       }
 
+    Multi-source execution is handled in main.py by _expand_hunt_sources(),
+    which fans out the source_sites list into one execution dict per source.
+    This function's responsibility is only to build the shared dict; it does
+    not loop over sources.
+
     Notes:
-    - Only the first source_site is used; multi-source support is a v2.0 concern.
     - Rules dict omits keys whose values are empty/None so the rule engine's
       existing early-exit logic (if not rules: return True) still works cleanly.
     - min_price is read from adapter_options (set by the translator for vehicles
@@ -410,11 +418,12 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         raw_city = "houston"
 
     return {
-        "hunt_id": hunt.hunt_id,           # present only on DB-backed hunts; used for log traceability
-        "name":    hunt.name,
-        "source":  hunt.source_sites[0],
-        "query":   " ".join(hunt.search_terms),
-        "city":    raw_city,
-        "limit":   hunt.adapter_options.get("limit", 10),
-        "rules":   rules,
+        "hunt_id":      hunt.hunt_id,          # present only on DB-backed hunts; used for log traceability
+        "name":         hunt.name,
+        "source_sites": hunt.source_sites,     # full list; _expand_hunt_sources() fans these out
+        "source":       hunt.source_sites[0],  # first site kept for YAML-consumer compat
+        "query":        " ".join(hunt.search_terms),
+        "city":         raw_city,
+        "limit":        hunt.adapter_options.get("limit", 10),
+        "rules":        rules,
     }
