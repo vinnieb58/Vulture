@@ -3,11 +3,18 @@ adapters/offerup.py
 
 OfferUp search adapter for Vulture.
 
+Status: EXPERIMENTAL
+---------------------
+Do not set ``stable=True`` in the registry capability metadata until
+Houston (or any specific city) location targeting has been validated.
+See "Location limitation" below.
+
 Parsing strategy
 ----------------
-OfferUp is a Next.js SPA.  Every search result page server-renders a full
-``__NEXT_DATA__`` JSON blob into the initial HTML.  The blob contains GraphQL
-feed nodes typed as ``"ModularFeedListing"`` with the following fields:
+``requests`` + ``__NEXT_DATA__`` currently works.  OfferUp is a Next.js
+SPA that server-renders a full ``__NEXT_DATA__`` JSON blob into the initial
+HTML.  The blob contains GraphQL feed nodes typed as ``"ModularFeedListing"``
+with the following fields:
 
     listingId    (str, UUID)  — used to build the canonical item URL
     title        (str)
@@ -19,21 +26,39 @@ is sufficient.
 
 Location limitation (IMPORTANT)
 ---------------------------------
-OfferUp geo-resolves results by the server's GeoIP of the requesting IP,
-**not** by the ``city`` argument.  The ``city`` parameter is accepted for
-registry interface compatibility and is logged, but it does NOT currently
-control which city's listings are returned.
+Location targeting is NOT solved.  Returned locations are GeoIP- and
+session-dependent: OfferUp resolves results by the server's GeoIP of the
+requesting IP and/or any location stored in its session cookies — **not** by
+the ``city`` argument.  The same query from different IPs or sessions returns
+results from completely different cities.
 
-TODO: Validate whether OfferUp's ``?location_slug=`` or session-based
-location cookies can reliably target Houston (or any other specific city)
-before marking this adapter ``stable`` or promoting ``location_control``
-from ``"unverified"`` to ``"verified"`` in the capability metadata.
+The ``city`` parameter is accepted for registry interface compatibility and
+is logged on every call, but it does NOT currently control which city's
+listings are returned.
 
-Validated during reconnaissance (experiments/adapters/offerup_probe.py):
-    - requests works; HTTP 200 without bot block (May 2026)
+Do NOT mark this adapter ``stable=True`` until a reliable mechanism for
+targeting a specific city (e.g. ``?location_slug=``, session-based location
+cookies, or a location API call) has been validated for Houston and at least
+one other target city.  Until then ``location_control`` must remain
+``"unverified"`` in ``adapters/registry.py``.
+
+Validated during reconnaissance (experiments/adapters/offerup_probe.py,
+May 2026):
+    - requests works; HTTP 200 without bot block
     - No login or session required for basic search
     - __NEXT_DATA__ carries full listing payload server-side
     - ModularFeedListing nodes contain title, price, locationName, listingId
+
+Quick manual smoke test
+-----------------------
+Run from the project root (no .env required)::
+
+    python3 -c "from adapters.offerup import search_offerup; print(search_offerup('rtx 3080', limit=5))"
+
+Expected output: a list of up to 5 Listing objects with source='offerup',
+non-empty title, integer price, city+state location, and a canonical
+offerup.com item URL.  Log output (INFO level) shows requested_city vs
+actual_locations_observed so the GeoIP gap is visible.
 """
 
 import json
