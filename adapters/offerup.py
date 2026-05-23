@@ -3,11 +3,11 @@ adapters/offerup.py
 
 OfferUp search adapter for Vulture.
 
-Status: EXPERIMENTAL
----------------------
+Status: EXPERIMENTAL — usable on residential-IP hosts (e.g. Raven)
+----------------------------------------------------------------------
 Do not set ``stable=True`` in the registry capability metadata until
-Houston (or any specific city) location targeting has been validated.
-See "Location limitation" below.
+the adapter has passed multiple runtime smoke tests over an extended
+period.  Location is GeoIP-only — see "Location limitation" below.
 
 Parsing strategy
 ----------------
@@ -24,23 +24,46 @@ with the following fields:
 No browser automation is required; ``requests`` + BeautifulSoup + ``json``
 is sufficient.
 
-Location limitation (IMPORTANT)
----------------------------------
-Location targeting is NOT solved.  Returned locations are GeoIP- and
-session-dependent: OfferUp resolves results by the server's GeoIP of the
-requesting IP and/or any location stored in its session cookies — **not** by
-the ``city`` argument.  The same query from different IPs or sessions returns
-results from completely different cities.
+Location limitation (IMPORTANT — probe results May 2026)
+---------------------------------------------------------
+Location targeting is NOT possible via URL parameters or cookies.
+A systematic probe (experiments/adapters/offerup_location_probe.py) tested
+all of the following strategies for Houston TX, Dallas TX, and Arlington VA:
+
+    1. Baseline (no location param)
+    2. ?lat=<lat>&lng=<lng>
+    3. ?lat=<lat>&lng=<lng>&radius=30
+    4. ?location=<City, ST>
+    5. ?location_slug=<city-st>
+    6. ?zip=<zip>
+    7. /search/<city-slug>?q=...  (→ HTTP 404, route does not exist)
+    8. ou_location cookie injection (URL-encoded JSON)
+    9. separate ou_lat / ou_lng cookies
+
+Result: every strategy returned identical results for all three cities.
+The server resolved results entirely from the requesting IP's GeoIP.
+A cloud/datacenter IP (AWS Northern Virginia) returned DMV-area listings
+(Arlington VA, Burke VA, Washington DC, Chantilly VA) for all strategies
+regardless of what city was requested.  The ``__NEXT_DATA__`` JSON confirmed
+the GeoIP resolution via ``city = 'Ashburn'`` (a Loudoun County, VA
+datacenter hub).
+
+Houston and Katy TX results observed during earlier Raven runs were caused by
+Raven's residential IP being GeoIP'd to Houston — NOT by the city parameter.
+
+Conclusion: ``supports_location`` remains ``False`` and
+``location_control`` is ``"geoip_only"`` in ``adapters/registry.py``.
+The adapter is usable as-is on Raven (residential Houston-area IP) because
+the GeoIP resolves to the Houston metro.  Do NOT use it for explicit
+city-targeted hunts from cloud/datacenter IPs — those will reflect the
+datacenter's geographic location, not the intended city.
+
+If true city control is ever needed, candidates for future investigation:
+  - OfferUp's internal GraphQL/REST API (reverse-engineering mobile traffic)
+  - Browser automation that stores a user-set location in the OfferUp session
 
 The ``city`` parameter is accepted for registry interface compatibility and
-is logged on every call, but it does NOT currently control which city's
-listings are returned.
-
-Do NOT mark this adapter ``stable=True`` until a reliable mechanism for
-targeting a specific city (e.g. ``?location_slug=``, session-based location
-cookies, or a location API call) has been validated for Houston and at least
-one other target city.  Until then ``location_control`` must remain
-``"unverified"`` in ``adapters/registry.py``.
+is logged on every call so the GeoIP gap remains visible in Vulture logs.
 
 Validated during reconnaissance (experiments/adapters/offerup_probe.py,
 May 2026):
@@ -49,16 +72,57 @@ May 2026):
     - __NEXT_DATA__ carries full listing payload server-side
     - ModularFeedListing nodes contain title, price, locationName, listingId
 
-Quick manual smoke test
------------------------
-Run from the project root (no .env required)::
+Manual smoke tests
+------------------
+Direct adapter smoke (no .env required)::
 
-    python3 -c "from adapters.offerup import search_offerup; print(search_offerup('rtx 3080', limit=5))"
+    python3 -c "
+    from adapters.offerup import search_offerup
+    results = search_offerup('rtx 3080', city='houston', limit=5)
+    for r in results: print(r)
+    "
 
-Expected output: a list of up to 5 Listing objects with source='offerup',
-non-empty title, integer price, city+state location, and a canonical
-offerup.com item URL.  Log output (INFO level) shows requested_city vs
-actual_locations_observed so the GeoIP gap is visible.
+Expected: up to 5 Listing objects with source='offerup'.  The INFO log line
+shows ``requested_city='houston'`` and ``actual_locations_observed=[...]``.
+On Raven (residential TX IP) those observed locations will be Houston/Katy/
+Sugar Land/etc.  On a cloud/datacenter IP they will reflect that datacenter's
+GeoIP region instead — this is expected and correct behaviour.
+
+Run main.py on Raven::
+
+    python3 main.py
+
+Ensure ``VULTURE_HUNT_SOURCE`` is set to ``db`` or ``mixed`` and that at
+least one active OfferUp hunt exists in the DB.  Inspect
+``logs/vulture.log`` for the OfferUp INFO lines.
+
+Location probe (exhaustive — 9 strategies × 3 cities)::
+
+    python3 experiments/adapters/offerup_location_probe.py
+    python3 experiments/adapters/offerup_location_probe.py --query "75 inch tv"
+    python3 experiments/adapters/offerup_location_probe.py --query "toyota sequoia"
+
+GeoIP comparison on Raven (confirms that city arg has no effect — both
+calls will return the same Houston-area listings from the residential IP)::
+
+    python3 -c "
+    from adapters.offerup import search_offerup
+    h = search_offerup('rtx 3080', city='houston', limit=10)
+    d = search_offerup('rtx 3080', city='dallas', limit=10)
+    h_locs = sorted({l.location for l in h if l.location})
+    d_locs = sorted({l.location for l in d if l.location})
+    print('Houston call locations:', h_locs)
+    print('Dallas  call locations:', d_locs)
+    print('Same results (expected True)?', h_locs == d_locs)
+    "
+
+Expected: ``Same results? True`` — confirming GeoIP-only behaviour.
+Notes:
+  - Windows or cloud machines will show non-Houston locations; that is correct.
+  - Dallas/Austin/other TX cities should NOT be expected to produce different
+    results from Raven — they will all return the same Houston-area GeoIP set.
+  - OfferUp supports_location=False in the registry; do not interpret
+    Houston results from Raven as proof of city targeting.
 """
 
 import json
@@ -230,17 +294,19 @@ def search_offerup(query: str, city: str = "houston", limit: int = 10) -> list[L
     """
     Search OfferUp for *query* and return up to *limit* ``Listing`` objects.
 
-    *city* is accepted for registry interface compatibility (all registered
-    adapters share the ``(query, city, limit)`` signature) but does NOT
-    currently control the geographic scope of results.  OfferUp resolves
-    listings by the server's GeoIP of the requesting IP.  The requested city
-    and the actual listing locations are both logged so this gap is visible
-    during Raven runs.
+    *city* is advisory only (registry interface compatibility).  OfferUp
+    resolves results by the requesting IP's GeoIP — no URL parameter, path
+    slug, or cookie can override this from a server-side requests call.
+    From Raven (residential TX IP) results will be Houston-area; from a cloud
+    or datacenter IP results will reflect that IP's GeoIP region.
+
+    The requested city and the actual listing locations are both logged at
+    INFO level so the GeoIP behaviour is visible in every Vulture log cycle.
 
     Does not write to SQLite, does not send Discord alerts.
     """
     log.info(
-        "OfferUp search: query=%r, requested_city=%r (location_control=unverified), limit=%d",
+        "OfferUp search: query=%r requested_city=%r (advisory — location_control=geoip_only) limit=%d",
         query, city, limit,
     )
 
