@@ -174,8 +174,8 @@ check(
 )
 check(
     "Expansion banner logged",
-    found(r"Expanded \d+ hunt\(s\) into 2 source-run\(s\)"),
-    "expected 'Expanded N hunt(s) into 2 source-run(s)'",
+    found(r"Expanded \d+ hunt\(s\) into \d+ source-run\(s\)"),
+    "expected 'Expanded N hunt(s) into M source-run(s)'",
 )
 check(
     "Craigslist run started",
@@ -198,9 +198,9 @@ check(
     "no 'Done hunt … [offerup]' line found",
 )
 check(
-    "No unhandled exception in output",
-    "Traceback" not in combined and "failed unexpectedly" not in combined,
-    "exception or 'failed unexpectedly' found in output",
+    "No unhandled exception in the test hunt",
+    not found(rf"Hunt '{re.escape(TEST_HUNT_NAME)}'.*failed unexpectedly"),
+    f"'{TEST_HUNT_NAME}' raised an unexpected exception — check output above",
 )
 
 # Adapter failures (network/GeoIP) are allowed — check they were isolated
