@@ -38,8 +38,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from dotenv import load_dotenv
-load_dotenv(ROOT / ".env")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ModuleNotFoundError:
+    pass  # dotenv not installed; rely on env vars already being set
 
 from engine.database import get_connection, init_db
 from engine.hunt_repository import init_hunts_table
