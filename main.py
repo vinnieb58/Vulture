@@ -2,9 +2,11 @@ import logging
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()  # load .env before reading any os.getenv() calls below
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # load .env before reading any os.getenv() calls below
+except ModuleNotFoundError:
+    pass  # dotenv not installed; rely on env vars already being set
 
 from adapters.registry import get_adapter
 from engine.database import init_db, save_listing
