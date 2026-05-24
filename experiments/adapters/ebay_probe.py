@@ -2,8 +2,9 @@
 eBay Recon Probe — Vulture 2.0 Experimental Reconnaissance
 ===========================================================
 
-Phase 1: requests-only fetch analysis
-Phase 2: browser escalation assessment (recommendation only, no implementation)
+Phase 1:  requests-only fetch analysis
+Phase 1b: curl_cffi TLS-impersonation assessment (recommendation only)
+Phase 2:  Playwright browser escalation assessment (recommendation only)
 
 Pipeline contract being evaluated:
     hunt -> adapter -> normalized Listing -> deterministic rules -> dedupe -> alert
@@ -16,10 +17,16 @@ It does NOT:
   - modify Discord behavior
   - connect to any Vulture runtime
 
+Known findings (2026-05-23 / 2026-05-24):
+  - Cloud agent (datacenter egress): HTTP 403 / 535 bytes / "Access Denied"
+  - Raven (residential IP, basic UA):  HTTP 403 / crash on old probe
+  Both environments are blocked. Root cause is most likely TLS fingerprinting
+  by eBay's HUMAN Defense (PerimeterX) layer — see Phase 1b below.
+
 Usage:
-    python experiments/adapters/ebay_probe.py
-    python experiments/adapters/ebay_probe.py "rtx 3080"
-    python experiments/adapters/ebay_probe.py "rtx 3080" --limit 5
+    python3 experiments/adapters/ebay_probe.py
+    python3 experiments/adapters/ebay_probe.py "rtx 3080"
+    python3 experiments/adapters/ebay_probe.py "rtx 3080" --limit 5
 """
 
 import re
@@ -79,6 +86,10 @@ REQUEST_TIMEOUT = 20
 # ---------------------------------------------------------------------------
 # Challenge / anti-bot detection heuristics
 # ---------------------------------------------------------------------------
+
+# HTML body size threshold below which a 403 is almost certainly a TLS/IP
+# block rather than a CAPTCHA challenge page (no form content).
+BARE_BLOCK_THRESHOLD_BYTES = 2_000
 
 CHALLENGE_SIGNALS = [
     "captcha",
@@ -202,6 +213,48 @@ def detect_listing_cards(soup: BeautifulSoup) -> dict:
     }
 
 
+def diagnose_403(html: str) -> dict:
+    """
+    When eBay returns HTTP 403 we distinguish two cases:
+
+    1. Bare block (< BARE_BLOCK_THRESHOLD_BYTES):
+       Almost certainly a TLS fingerprint or IP-level reject before any HTML
+       is served. Python's requests/urllib3 uses a TLS ClientHello that differs
+       from a real Chrome browser — eBay's HUMAN Defense (PerimeterX) checks
+       this fingerprint and rejects non-browser clients outright.
+
+    2. Challenge page (>= threshold, has captcha/challenge form):
+       eBay served a full challenge page. The IP passed the TLS check but
+       triggered behavioral or IP-reputation detection.
+
+    The distinction matters for choosing the next step:
+    - Bare block     → try curl_cffi (Chrome TLS impersonation) first
+    - Challenge page → curl_cffi may also help; Playwright needed if it does not
+    """
+    size = len(html)
+    bare_block = size < BARE_BLOCK_THRESHOLD_BYTES
+    return {
+        "html_size_bytes": size,
+        "bare_block": bare_block,
+        "likely_root_cause": (
+            "tls_fingerprint_or_ip_level_reject" if bare_block
+            else "challenge_page_served"
+        ),
+        "explanation": (
+            "Response body is very small — eBay rejected the connection before "
+            "serving real content. Most likely cause: Python requests/urllib3 TLS "
+            "ClientHello does not match a real Chrome browser fingerprint. "
+            "HUMAN Defense (PerimeterX) checks JA3/JA4 TLS fingerprint among other "
+            "signals. curl_cffi (Chrome TLS impersonation) is the lowest-cost next "
+            "step before committing to full Playwright."
+            if bare_block else
+            "eBay served a challenge/CAPTCHA page. TLS fingerprint may have passed "
+            "but IP reputation or behavioral signals triggered the challenge. "
+            "curl_cffi may help; Playwright with stealth is the stronger fallback."
+        ),
+    }
+
+
 def fetch_ebay(query: str) -> dict:
     url = build_search_url(query)
     redirect_chain = []
@@ -316,20 +369,48 @@ def extract_candidates(soup: BeautifulSoup, source_query: str, limit: int = 20) 
 # ---------------------------------------------------------------------------
 
 BROWSER_ASSESSMENT = {
+    # -----------------------------------------------------------------------
+    # Phase 1b: curl_cffi — TLS impersonation without a browser
+    # -----------------------------------------------------------------------
+    "phase_1b_curl_cffi_recommended": True,
+    "curl_cffi_rationale": (
+        "Both the cloud agent (datacenter IP) and Raven (residential IP) returned "
+        "HTTP 403 with ~535 bytes — a bare block, not a CAPTCHA page. "
+        "This strongly indicates TLS fingerprint rejection, not just IP reputation. "
+        "Python requests/urllib3 sends a TLS ClientHello that HUMAN Defense recognizes "
+        "as non-browser. curl_cffi wraps libcurl with BoringSSL and can impersonate "
+        "Chrome's exact TLS handshake (JA3/JA4 fingerprint). It is a pure pip install "
+        "with no browser binary. If curl_cffi returns HTTP 200 with listing cards, "
+        "a lightweight requests-like adapter becomes viable — no Playwright needed."
+    ),
+    "curl_cffi_install": "pip install curl_cffi",
+    "curl_cffi_disk_impact": "~5 MB — negligible on Raven",
+    "curl_cffi_usage_sketch": (
+        "from curl_cffi import requests as cffi_requests; "
+        "r = cffi_requests.get(url, impersonate='chrome124'); "
+        "# then parse r.text with BeautifulSoup as normal"
+    ),
+    # -----------------------------------------------------------------------
+    # Phase 2: Playwright — full browser automation
+    # -----------------------------------------------------------------------
     "playwright_likely_viable_on_raven": True,
-    "rationale": (
+    "playwright_rationale": (
         "eBay's search page does not structurally require JavaScript rendering for "
         "the listing cards themselves — the anti-bot layer (PerimeterX / HUMAN Defense) "
         "is the real barrier. Playwright with a stealth-configured Chromium context can "
-        "bypass this, but introduces several trade-offs described below."
+        "bypass this, but introduces several trade-offs described below. "
+        "Only pursue Playwright if curl_cffi Phase 1b also fails."
     ),
-    "complexity_estimate": "medium",
-    "complexity_detail": (
+    "playwright_complexity_estimate": "medium",
+    "playwright_complexity_detail": (
         "Playwright is already present in requirements.txt. "
         "The main work is: (1) launching Chromium with stealth headers and a real viewport, "
         "(2) waiting for the SRP (Search Results Page) to hydrate, "
         "(3) extracting the same .s-item cards. "
-        "No login is required for basic eBay search."
+        "No login is required for basic eBay search. "
+        "A bare headless Playwright launch will likely also be blocked — "
+        "a stealth plugin (playwright-stealth or similar) is needed to pass "
+        "canvas/WebGL/navigator fingerprint checks."
     ),
     "maintenance_burden": "medium-high",
     "maintenance_detail": (
@@ -342,10 +423,11 @@ BROWSER_ASSESSMENT = {
     "anti_bot_risk": "high",
     "anti_bot_detail": (
         "eBay uses PerimeterX (now HUMAN Defense) for bot detection. "
-        "Basic requests with a real UA may work transiently or in some network environments. "
-        "IP reputation, TLS fingerprint, browser fingerprint, and behavioral signals are all checked. "
-        "A headless Playwright browser without extra stealth (playwright-stealth or equivalent) "
-        "will likely be blocked on production eBay within seconds. "
+        "IP reputation, TLS fingerprint (JA3/JA4), browser canvas/WebGL fingerprint, "
+        "and behavioral timing signals are all checked. "
+        "Raven's residential IP still got 403 with a basic Python UA, confirming "
+        "that IP alone is not the only signal — TLS fingerprint is the likely blocker. "
+        "A headless Playwright browser without extra stealth will likely also be blocked. "
         "Even with stealth, rate limits and CAPTCHA escalation are possible."
     ),
     "memory_runtime_impact_on_raven": "moderate",
@@ -365,16 +447,20 @@ BROWSER_ASSESSMENT = {
         "Avoid installing the full playwright browser suite (firefox, webkit)."
     ),
     "recommendation": (
-        "Do NOT implement Playwright integration yet. "
-        "Evaluate requests-only behavior first across multiple search terms and network environments. "
-        "If requests returns consistent HTTP 200 with extractable listing cards, "
-        "a production adapter may not need browser automation at all. "
-        "Only escalate to Playwright if requests consistently fails or returns challenge pages. "
-        "If Playwright is pursued, implement it as a separate optional code path "
-        "behind a flag in the adapter, not as the default execution path."
+        "Step 1 (immediate): install curl_cffi on Raven and re-run the probe with "
+        "Chrome TLS impersonation — `pip install curl_cffi`. "
+        "If curl_cffi returns HTTP 200 with listing cards, a lightweight requests-like "
+        "adapter is viable and Playwright is not needed. "
+        "Step 2 (if curl_cffi also fails): evaluate ebay_playwright_probe.py on Raven "
+        "with a stealth Chromium config. "
+        "Do NOT implement Playwright integration until curl_cffi is ruled out. "
+        "If Playwright is eventually pursued, implement it as a separate optional code "
+        "path behind an experimental flag, not as the default execution path."
     ),
     "verdict_for_vulture": (
         "eBay should remain EXPERIMENTAL. "
+        "Confirmed blocked on both datacenter and residential IPs with plain requests. "
+        "TLS fingerprinting is the most likely root cause — test curl_cffi next. "
         "Do not promote to a stable adapter until at least 5 independent runs across "
         "different search terms confirm consistent listings. "
         "Maintenance cost is real. Schedule periodic re-probing after any eBay layout change."
@@ -452,7 +538,26 @@ def run_probe(query: str, limit: int = 20) -> None:
                 print(f"    {k:10s}: {v}")
 
     print_section("Phase 1 Verdict")
-    if challenge["challenge_detected"]:
+    if fetch["status_code"] == 403:
+        diagnosis = diagnose_403(fetch["html"])
+        print(f"  BLOCKED — HTTP 403 received.")
+        print(f"  Bare block (tiny body): {diagnosis['bare_block']}")
+        print(f"  Likely root cause     : {diagnosis['likely_root_cause']}")
+        print()
+        words = diagnosis["explanation"].split()
+        line = "  "
+        for word in words:
+            if len(line) + len(word) + 1 > 72:
+                print(line)
+                line = "  " + word
+            else:
+                line += (" " if line.strip() else "") + word
+        if line.strip():
+            print(line)
+        print()
+        print("  requests-only is NOT viable. See Phase 1b (curl_cffi) below.")
+        requests_viable = False
+    elif challenge["challenge_detected"]:
         print("  BLOCKED — challenge / anti-bot page detected.")
         print("  requests-only is NOT viable in this environment.")
         requests_viable = False
@@ -470,8 +575,37 @@ def run_probe(query: str, limit: int = 20) -> None:
         print("  Possible selector drift or empty result set.")
         requests_viable = False
 
-    print_section("Phase 2: Browser Escalation Assessment")
+    print_section("Phase 1b: curl_cffi TLS Impersonation — Next Step")
+    print(f"  Recommended : {BROWSER_ASSESSMENT['phase_1b_curl_cffi_recommended']}")
+    print(f"  Install     : {BROWSER_ASSESSMENT['curl_cffi_install']}")
+    print(f"  Disk impact : {BROWSER_ASSESSMENT['curl_cffi_disk_impact']}")
+    print()
+    print("  Rationale:")
+    words = BROWSER_ASSESSMENT["curl_cffi_rationale"].split()
+    line = "    "
+    for word in words:
+        if len(line) + len(word) + 1 > 74:
+            print(line)
+            line = "    " + word
+        else:
+            line += (" " if line.strip() else "") + word
+    if line.strip():
+        print(line)
+    print()
+    print("  Usage sketch:")
+    print(f"    {BROWSER_ASSESSMENT['curl_cffi_usage_sketch']}")
+
+    print_section("Phase 2: Playwright Browser Escalation Assessment")
+    skip_keys = {
+        "phase_1b_curl_cffi_recommended",
+        "curl_cffi_rationale",
+        "curl_cffi_install",
+        "curl_cffi_disk_impact",
+        "curl_cffi_usage_sketch",
+    }
     for key, val in BROWSER_ASSESSMENT.items():
+        if key in skip_keys:
+            continue
         if isinstance(val, str) and len(val) > 80:
             print(f"\n  [{key}]")
             # Word-wrap at ~70 chars
@@ -490,17 +624,167 @@ def run_probe(query: str, limit: int = 20) -> None:
 
     print_section("Summary for Engineering Decision")
     print(f"  requests_only_viable     : {requests_viable}")
-    print(f"  browser_required         : {not requests_viable}")
+    print(f"  curl_cffi_next_step      : {BROWSER_ASSESSMENT['phase_1b_curl_cffi_recommended']}")
+    print(f"  playwright_if_needed     : {BROWSER_ASSESSMENT['playwright_likely_viable_on_raven']}")
     print(f"  anti_bot_risk            : {BROWSER_ASSESSMENT['anti_bot_risk']}")
     print(f"  maintenance_burden       : {BROWSER_ASSESSMENT['maintenance_burden']}")
     print(f"  memory_impact_on_raven   : {BROWSER_ASSESSMENT['memory_runtime_impact_on_raven']}")
     print(f"  should_stay_experimental : True")
     print()
     print("  RECOMMENDATION:")
-    for line in BROWSER_ASSESSMENT["recommendation"].split(". "):
-        if line.strip():
-            print(f"    - {line.strip()}.")
+    for step in BROWSER_ASSESSMENT["recommendation"].split(". "):
+        if step.strip():
+            print(f"    - {step.strip()}.")
     print()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b: curl_cffi TLS-impersonation probe
+# ---------------------------------------------------------------------------
+
+def fetch_ebay_cffi(query: str) -> dict:
+    """
+    Attempt the same fetch using curl_cffi, which impersonates Chrome's TLS
+    ClientHello (JA3/JA4 fingerprint). This is the lowest-cost escalation
+    from plain requests — no browser binary required.
+
+    Returns the same shape as fetch_ebay() so run_probe_cffi() can reuse
+    the existing parsing/reporting logic.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests  # type: ignore[import]
+    except ImportError:
+        return {
+            "query": query,
+            "url": build_search_url(query),
+            "final_url": None,
+            "status_code": None,
+            "redirected": False,
+            "redirect_chain": [],
+            "html": "",
+            "html_length": 0,
+            "error": "curl_cffi_not_installed: run `pip install curl_cffi` first",
+            "elapsed_ms": 0,
+        }
+
+    url = build_search_url(query)
+    redirect_chain = []
+    status_code = None
+    final_url = url
+    html = ""
+    error = None
+    elapsed_ms = None
+
+    t0 = time.monotonic()
+    try:
+        response = cffi_requests.get(
+            url,
+            impersonate="chrome124",
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+        )
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        status_code = response.status_code
+        final_url = str(response.url)
+        # curl_cffi response.history is a list of responses
+        redirect_chain = [str(r.url) for r in getattr(response, "history", [])]
+        html = response.text
+    except Exception as exc:
+        error = f"cffi_error: {exc}"
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    return {
+        "query": query,
+        "url": url,
+        "final_url": final_url,
+        "status_code": status_code,
+        "redirected": bool(redirect_chain),
+        "redirect_chain": redirect_chain,
+        "html": html,
+        "html_length": len(html),
+        "error": error,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def run_probe_cffi(query: str, limit: int = 20) -> None:
+    """Run Phase 1b: same diagnostic flow using curl_cffi impersonation."""
+    print_section("Phase 1b: curl_cffi TLS Impersonation Probe")
+    print(f"  Query     : {query!r}")
+    print(f"  Limit     : {limit}")
+    print(f"  Impersonate: chrome124")
+
+    fetch = fetch_ebay_cffi(query)
+
+    print_section("HTTP Diagnostics (curl_cffi)")
+    print(f"  URL        : {fetch['url']}")
+    print(f"  Status     : {fetch['status_code']}")
+    print(f"  Final URL  : {fetch['final_url']}")
+    print(f"  Redirected : {fetch['redirected']}")
+    if fetch["redirect_chain"]:
+        for i, r in enumerate(fetch["redirect_chain"], 1):
+            print(f"    hop {i}   : {r}")
+    print(f"  HTML len   : {fetch['html_length']:,} bytes")
+    print(f"  Elapsed    : {fetch['elapsed_ms']} ms")
+    if fetch["error"]:
+        print(f"  ERROR      : {fetch['error']}")
+        if "not_installed" in (fetch["error"] or ""):
+            print()
+            print("  To install: pip install curl_cffi")
+        return
+
+    soup = BeautifulSoup(fetch["html"], "lxml")
+    challenge = detect_challenge(fetch["html"], soup)
+    cards_info = detect_listing_cards(soup)
+
+    print_section("Challenge Detection (curl_cffi)")
+    print(f"  Challenge detected : {challenge['challenge_detected']}")
+    print(f"  Page title         : {challenge['page_title']!r}")
+    if challenge["triggered_signals"]:
+        print(f"  Triggered signals  : {challenge['triggered_signals']}")
+
+    print_section("Listing Cards (curl_cffi)")
+    print(f"  Cards accessible : {cards_info['cards_accessible']}")
+    print(f"  Selector used    : {cards_info['selector_used']}")
+    print(f"  Card count       : {cards_info['card_count']}")
+
+    candidates = extract_candidates(soup, query, limit=limit)
+    print_section(f"Candidate Listings — curl_cffi ({len(candidates)} extracted)")
+    if not candidates:
+        print("  No candidates extracted.")
+    else:
+        for i, c in enumerate(candidates, 1):
+            d = asdict(c)
+            print(f"\n  [{i}]")
+            for k, v in d.items():
+                print(f"    {k:10s}: {v}")
+
+    print_section("Phase 1b Verdict")
+    if fetch["status_code"] == 200 and candidates:
+        print(f"  SUCCESS — curl_cffi TLS impersonation bypassed the block.")
+        print(f"  {len(candidates)} candidates extracted.")
+        print("  A curl_cffi-based adapter is viable. Playwright not needed.")
+    elif fetch["status_code"] == 200 and cards_info["cards_accessible"]:
+        print("  PARTIAL — HTTP 200 but no candidates normalized.")
+        print("  Selector drift or empty result set. Needs selector review.")
+    elif fetch["status_code"] == 200:
+        print("  PARTIAL — HTTP 200 but no listing cards found.")
+        print("  Possible JS rendering still required. Escalate to Playwright.")
+    elif fetch["status_code"] == 403:
+        print("  STILL BLOCKED (from this host) — curl_cffi also returned 403.")
+        print()
+        print("  IMPORTANT: if this result was produced from a datacenter/cloud IP,")
+        print("  it is NOT conclusive for Raven. eBay's IP blocklist flags datacenter")
+        print("  ranges regardless of TLS fingerprint. The meaningful test is:")
+        print()
+        print("    On Raven (residential IP):")
+        print("      pip install curl_cffi")
+        print("      python3 experiments/adapters/ebay_probe.py 'rtx 3080' --cffi")
+        print()
+        print("  If Raven + curl_cffi also returns 403, TLS alone is insufficient")
+        print("  and Playwright with stealth config is the next step.")
+    else:
+        print(f"  UNKNOWN — status {fetch['status_code']}. Manual review required.")
 
 
 # ---------------------------------------------------------------------------
@@ -523,8 +807,19 @@ def main() -> None:
         default=20,
         help="Maximum number of candidate listings to extract (default: 20)",
     )
+    parser.add_argument(
+        "--cffi",
+        action="store_true",
+        help=(
+            "Run Phase 1b: use curl_cffi Chrome TLS impersonation instead of "
+            "plain requests. Requires: pip install curl_cffi"
+        ),
+    )
     args = parser.parse_args()
-    run_probe(query=args.query, limit=args.limit)
+    if args.cffi:
+        run_probe_cffi(query=args.query, limit=args.limit)
+    else:
+        run_probe(query=args.query, limit=args.limit)
 
 
 if __name__ == "__main__":
