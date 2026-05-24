@@ -1,3 +1,13 @@
+# Bootstrap: if not already running inside the project venv, re-exec with it.
+# This must come before any third-party imports so that bs4, requests, etc.
+# are available even when the user runs the script with bare python3.
+import os as _os, sys as _sys
+from pathlib import Path as _Path
+_ROOT_BOOTSTRAP = _Path(__file__).resolve().parent.parent
+_VENV_PY = _ROOT_BOOTSTRAP / ".venv" / "bin" / "python"
+if _VENV_PY.exists() and not str(_sys.executable).startswith(str(_ROOT_BOOTSTRAP / ".venv")):
+    _os.execv(str(_VENV_PY), [str(_VENV_PY)] + _sys.argv)
+
 """
 scripts/test_multi_source.py
 
