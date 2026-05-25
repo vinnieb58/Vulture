@@ -1,12 +1,29 @@
+import logging
 import re
 from typing import Optional
 
 from models.listing import Listing
 
+log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Structured-constraint helpers
 # ---------------------------------------------------------------------------
+
+# TV screen size: "75 inch", "75-inch", '75"', "75in" (no-space variant).
+# Two alternatives:
+#   A — digit(s) followed by "inch" or literal " (with optional dash/space).
+#   B — digits immediately adjacent to "in" (no space), e.g. "55in".
+#       Requires word boundary on both sides to avoid "65 in good condition".
+# Sanity check: only accept 20–120 inches (realistic TV range).
+_TV_SIZE_TITLE_RE = re.compile(
+    r'\b(\d{2,3})\s*[-]?\s*(?:inch(?:es?)?|")'  # "75 inch", "75-inch", '75"'
+    r'|\b(\d{2,3})in\b',                          # "75in" (no space before "in")
+    re.IGNORECASE,
+)
+_TV_SIZE_MIN = 20
+_TV_SIZE_MAX = 120
 
 # Mileage: "89k miles", "89,000 miles", "89k mi", "65K mi.", "120000 miles"
 # Requires "miles" or "mi" word — bare "87K" is intentionally ignored (could be price).
@@ -148,6 +165,55 @@ def _extract_vram_gb_from_title(title: str) -> Optional[int]:
     return None
 
 
+def _extract_tv_size_from_title(title: str) -> Optional[int]:
+    """
+    Try to extract a TV screen size in inches from a listing title.
+    Returns None if size cannot be confidently determined.
+
+    Matches:
+      "75 inch TV"   → 75
+      "75-inch TV"   → 75
+      '75" TV'       → 75
+      "75in TV"      → 75  (no-space shorthand)
+
+    Conservative: bare numbers without an inch/in/" suffix are NOT matched
+    (e.g. "Samsung 75 OLED TV" → None, "65 in good condition" → None).
+    Only values in the realistic TV range (20–120 inches) are returned.
+    """
+    m = _TV_SIZE_TITLE_RE.search(title)
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    if raw is None:
+        return None
+    size = int(raw)
+    return size if _TV_SIZE_MIN <= size <= _TV_SIZE_MAX else None
+
+
+def _extract_gpu_tier_rank_from_title(title: str) -> Optional[int]:
+    """
+    Return the highest GPU tier rank found in a listing title, or None.
+
+    Checks every model in GPU_TIER_RANK against the title (uppercase) and
+    returns the maximum rank.  Taking the maximum means a title containing
+    both "RTX 3080" and "RTX 3080 TI" (as substrings) resolves to the
+    higher-tier TI rank — correct behaviour.
+
+    Conservative: if no recognised GPU model is found → returns None, and
+    the caller must pass the listing through (never false-reject on unknown
+    hardware).
+    """
+    from engine.verticals import GPU_TIER_RANK  # local import to avoid circular deps
+
+    title_upper = title.upper()
+    best_rank: Optional[int] = None
+    for model_upper, rank in GPU_TIER_RANK.items():
+        if model_upper in title_upper:
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+    return best_rank
+
+
 # ---------------------------------------------------------------------------
 # Rule evaluator
 # ---------------------------------------------------------------------------
@@ -157,24 +223,42 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
     Core rule evaluator.  Returns a short human-readable string describing
     the FIRST rule that rejects the listing, or None if all rules pass.
 
-    Evaluation order mirrors the original matches_rules logic so results
-    are identical; only the return type changes.
+    Evaluation order:
+      1. min_price / max_price
+      2. include_keywords  (OR — any match required)
+      3. require_all_keywords  (AND — all must be present)
+      4. exclude_keywords  (any match rejects)
+      5. Structured title-parsed constraints (conservative: missing = pass)
+         a. max_miles (vehicles)
+         b. min_capacity_gb (RAM)
+         c. min_year / max_year (vehicles)
+         d. min_vram_gb (GPU — only when user said "vram" explicitly)
+         e. min_speed_mhz (RAM)
+         f. min_size_inches / max_size_inches (TV)
+         g. min_gpu_class (GPU — tier-based, conservative)
+
+    The optional "vertical" key in the rules dict is metadata only; it is
+    included in log/debug messages to clarify which vertical's logic fired.
     """
     if not rules:
         return None
+
+    # Vertical label for contextual log messages (metadata only, not enforced).
+    _vertical = rules.get("vertical", "")
+    _vpfx = f"[{_vertical}] " if _vertical else ""
 
     # --- price bounds ---
     min_price = rules.get("min_price")
     if min_price is not None:
         p = listing.price
         if p is None or p < min_price:
-            return f"price ${p if p is not None else 'n/a'} < min_price ${min_price}"
+            return f"{_vpfx}price ${p if p is not None else 'n/a'} < min_price ${min_price}"
 
     max_price = rules.get("max_price")
     if max_price is not None:
         p = listing.price
         if p is None or p > max_price:
-            return f"price ${p if p is not None else 'n/a'} > max_price ${max_price}"
+            return f"{_vpfx}price ${p if p is not None else 'n/a'} > max_price ${max_price}"
 
     # --- keyword filters ---
 
@@ -186,7 +270,7 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
             shown = ", ".join(f'"{kw}"' for kw in include_keywords[:4])
             if len(include_keywords) > 4:
                 shown += f" +{len(include_keywords)-4} more"
-            return f"title missing include keyword (any of: {shown})"
+            return f"{_vpfx}title missing include keyword (any of: {shown})"
 
     # require_all_keywords — AND / all() semantics (strict, opt-in).
     require_all_keywords = rules.get("require_all_keywords") or []
@@ -194,7 +278,7 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
         title_lower = listing.title.lower()
         for kw in require_all_keywords:
             if str(kw).lower() not in title_lower:
-                return f'title missing required keyword "{kw}"'
+                return f'{_vpfx}title missing required keyword "{kw}"'
 
     # exclude_keywords — any match rejects.
     exclude_keywords = rules.get("exclude_keywords") or []
@@ -202,44 +286,92 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
         title_lower = listing.title.lower()
         for kw in exclude_keywords:
             if str(kw).lower() in title_lower:
-                return f'excluded keyword "{kw}"'
+                return f'{_vpfx}excluded keyword "{kw}"'
 
     # --- structured constraints extracted from title ---
     # Conservative: if the value cannot be parsed from the title, pass through.
 
+    # vehicles: mileage cap
     max_miles = rules.get("max_miles")
     if max_miles is not None:
         miles = _extract_miles_from_title(listing.title)
         if miles is not None and miles > max_miles:
-            return f"mileage {miles:,} > max_miles {max_miles:,}"
+            return f"{_vpfx}mileage {miles:,} > max_miles {max_miles:,}"
 
+    # RAM: minimum capacity
     min_capacity_gb = rules.get("min_capacity_gb")
     if min_capacity_gb is not None:
         capacity_gb = _extract_ram_gb_from_title(listing.title)
         if capacity_gb is not None and capacity_gb < min_capacity_gb:
-            return f"capacity {capacity_gb}GB < min_capacity_gb {min_capacity_gb}GB"
+            return f"{_vpfx}capacity {capacity_gb}GB < min_capacity_gb {min_capacity_gb}GB"
 
+    # vehicles: model-year range
     min_year = rules.get("min_year")
     max_year = rules.get("max_year")
     if min_year is not None or max_year is not None:
         year = _extract_year_from_title(listing.title)
         if year is not None:
             if min_year is not None and year < min_year:
-                return f"year {year} < min_year {min_year}"
+                return f"{_vpfx}year {year} < min_year {min_year}"
             if max_year is not None and year > max_year:
-                return f"year {year} > max_year {max_year}"
+                return f"{_vpfx}year {year} > max_year {max_year}"
 
+    # GPU: VRAM minimum (only set when user explicitly said "vram")
     min_vram_gb = rules.get("min_vram_gb")
     if min_vram_gb is not None:
         vram_gb = _extract_vram_gb_from_title(listing.title)
         if vram_gb is not None and vram_gb < min_vram_gb:
-            return f"vram {vram_gb}GB < min_vram_gb {min_vram_gb}GB"
+            return f"{_vpfx}vram {vram_gb}GB < min_vram_gb {min_vram_gb}GB"
 
+    # RAM: speed minimum
     min_speed_mhz = rules.get("min_speed_mhz")
     if min_speed_mhz is not None:
         speed_mhz = _extract_speed_mhz_from_title(listing.title)
         if speed_mhz is not None and speed_mhz < min_speed_mhz:
-            return f"speed {speed_mhz}MHz < min_speed_mhz {min_speed_mhz}MHz"
+            return f"{_vpfx}speed {speed_mhz}MHz < min_speed_mhz {min_speed_mhz}MHz"
+
+    # TV: screen size range (structured check, more precise than substring match)
+    # Conservative: if size cannot be extracted from the title → pass through.
+    min_size_inches = rules.get("min_size_inches")
+    max_size_inches = rules.get("max_size_inches")
+    if min_size_inches is not None or max_size_inches is not None:
+        size_in = _extract_tv_size_from_title(listing.title)
+        if size_in is not None:
+            if min_size_inches is not None and size_in < min_size_inches:
+                return (
+                    f'{_vpfx}TV size {size_in}" < min_size_inches {min_size_inches}"'
+                )
+            if max_size_inches is not None and size_in > max_size_inches:
+                return (
+                    f'{_vpfx}TV size {size_in}" > max_size_inches {max_size_inches}"'
+                )
+        else:
+            log.debug(
+                "%s[vertical-filter] TV size not found in title — passing through: %r",
+                _vpfx,
+                listing.title[:80],
+            )
+
+    # GPU: tier-based minimum class (conservative — unknown GPU in title → pass)
+    min_gpu_class = rules.get("min_gpu_class")
+    if min_gpu_class is not None:
+        from engine.verticals import GPU_TIER_RANK  # local import — avoids circular dep
+
+        min_rank = GPU_TIER_RANK.get(min_gpu_class.upper())
+        if min_rank is not None:
+            title_rank = _extract_gpu_tier_rank_from_title(listing.title)
+            if title_rank is not None and title_rank < min_rank:
+                return (
+                    f"{_vpfx}GPU in title is below min_gpu_class "
+                    f'"{min_gpu_class}" (tier {title_rank} < {min_rank})'
+                )
+            if title_rank is None:
+                log.debug(
+                    "%s[vertical-filter] GPU model not identified in title — "
+                    "passing through: %r",
+                    _vpfx,
+                    listing.title[:80],
+                )
 
     return None
 
