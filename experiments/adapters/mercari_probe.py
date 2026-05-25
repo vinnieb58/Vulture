@@ -1,0 +1,1021 @@
+"""
+Mercari candidate-source probe
+===============================
+Reconnaissance only. Does NOT write to SQLite, send Discord alerts,
+or touch the production adapter registry.
+
+Usage:
+    python experiments/adapters/mercari_probe.py "rtx 3080"
+    python experiments/adapters/mercari_probe.py "75 inch tv"
+    python experiments/adapters/mercari_probe.py "nintendo switch"
+
+Goal: determine whether Mercari is a viable future Vulture adapter for
+general used-goods deals (electronics, gaming, home, etc.).
+
+Probe strategy (progressive):
+    Strategy A — plain requests + BeautifulSoup
+    Strategy B — browser-like session with enriched headers + cookies
+    Strategy C — lightweight Playwright check (isolated; not wired to production)
+
+Viability questions answered:
+    1. Can results be fetched reliably with plain requests?
+    2. Is content server-rendered or JS-rendered?
+    3. Can we extract title / price / link / image / location?
+    4. Does Mercari aggressively block scraping?
+    5. Are listings stable enough for link-based dedupe?
+    6. Would Playwright / cookies / anti-bot mitigation be required?
+    7. Is Mercari realistic as stable, experimental, or not-worth-pursuing?
+"""
+
+import json
+import re
+import sys
+import time
+from urllib.parse import quote_plus
+
+import requests
+from bs4 import BeautifulSoup
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+SEARCH_URL = "https://www.mercari.com/search/"
+
+# Strategy A — minimal but plausible UA
+HEADERS_PLAIN = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+# Strategy B — enriched browser-like headers that better mimic Chrome
+HEADERS_BROWSER = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.6367.155 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "DNT": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Connection": "keep-alive",
+}
+
+# SPA / JS-framework fingerprints
+SPA_MARKERS = [
+    "__NEXT_DATA__",
+    "__NUXT__",
+    "data-reactroot",
+    "__REDUX_STORE__",
+    "window.__INITIAL_STATE__",
+    "window.__PRELOADED_STATE__",
+    "window.__APP_STATE__",
+    "window.INITIAL_STATE",
+]
+
+# Known anti-bot service fingerprints
+ANTIBOT_MARKERS = {
+    "Cloudflare": [
+        "cf-ray",              # response header
+        "cloudflare",          # body text
+        "cf-browser-verification",
+        "checking your browser",
+        "please wait while we check",
+        "__cf_chl",
+        "cf_chl_prog",
+    ],
+    "DataDome": [
+        "datadome",
+        "dd_referrer",
+        "dd_cookie",
+        "_dd_s",
+    ],
+    "Akamai": [
+        "akamai",
+        "_abck",
+        "ak_bmsc",
+    ],
+    "reCAPTCHA": [
+        "recaptcha",
+        "www.google.com/recaptcha",
+    ],
+    "PerimeterX": [
+        "perimeterx",
+        "_pxhd",
+        "_px3",
+    ],
+}
+
+# CSS selectors likely to match Mercari listing cards
+# Mercari uses React with class-hashed names; data-testid is more stable
+LISTING_SELECTORS = [
+    "[data-testid='ItemCell']",
+    "[data-testid='item-cell']",
+    "[data-testid='SearchResults'] li",
+    "li[data-testid]",
+    "[class*='ItemThumbnail']",
+    "[class*='item-thumbnail']",
+    "[class*='SearchResult']",
+    "[class*='ProductThumbnail']",
+    "[class*='merListItem']",
+    "ul[class*='search'] li",
+    "div[class*='list'] > div[class*='item']",
+    "article",
+]
+
+MAX_DISPLAY = 5
+REQUEST_TIMEOUT = 25
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _log(level: str, msg: str) -> None:
+    """Emit a tagged log line — mirrors the output format in the task spec."""
+    print(f"[{level}] {msg}")
+
+
+def _detect_antibot(html: str, headers: dict) -> list[str]:
+    """Return list of detected anti-bot service signals."""
+    signals = []
+    html_lower = html.lower()
+    headers_lower = {k.lower(): v.lower() for k, v in headers.items()}
+
+    for service, markers in ANTIBOT_MARKERS.items():
+        for marker in markers:
+            m = marker.lower()
+            if m in html_lower or m in str(headers_lower):
+                signals.append(f"{service} ({marker})")
+                break
+    return signals
+
+
+def _detect_spa_markers(html: str) -> list[str]:
+    """Return SPA framework markers found in the page source."""
+    return [m for m in SPA_MARKERS if m in html]
+
+
+def _extract_next_data(soup: BeautifulSoup) -> dict | None:
+    """Pull Next.js embedded JSON from the __NEXT_DATA__ script tag."""
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if tag and tag.string:
+        try:
+            return json.loads(tag.string)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _extract_inline_json_blobs(soup: BeautifulSoup) -> list[dict]:
+    """Return parsed JSON from all application/json script tags."""
+    blobs = []
+    for tag in soup.find_all("script", type="application/json"):
+        try:
+            blobs.append(json.loads(tag.string or ""))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return blobs
+
+
+def _walk_for_listings(obj, depth: int = 0, max_depth: int = 10) -> list[dict]:
+    """
+    Recursively walk a JSON blob looking for objects shaped like marketplace
+    listings (have title/name + price and/or a URL-like key).
+
+    Mercari API shapes seen in the wild:
+      {"id": "m123456789", "name": "RTX 3080 10GB", "price": 55000,
+       "thumbnails": ["https://..."], "seller": {...}}
+    """
+    if depth > max_depth:
+        return []
+    results = []
+
+    if isinstance(obj, dict):
+        keys_lower = {k.lower() for k in obj}
+        has_title = "name" in keys_lower or "title" in keys_lower
+        has_price = "price" in keys_lower or "amount" in keys_lower
+        has_id = "id" in keys_lower
+
+        # Accept if it looks listing-shaped: (title/name) + (price or id)
+        if has_title and (has_price or has_id):
+            candidate: dict = {}
+            for k, v in obj.items():
+                lk = k.lower()
+                if lk == "name" and "title" not in candidate:
+                    candidate["title"] = v
+                elif lk == "title":
+                    candidate["title"] = v
+                elif lk == "price":
+                    candidate["price"] = v
+                elif lk == "amount" and "price" not in candidate:
+                    candidate["price"] = v
+                elif lk == "id":
+                    candidate["item_id"] = v
+                elif lk in ("url", "link", "href"):
+                    candidate["link"] = v
+                elif lk == "thumbnails":
+                    # Mercari stores thumbnail URLs as a list
+                    if isinstance(v, list) and v:
+                        candidate["image"] = v[0]
+                elif lk in ("thumbnail", "image", "photo", "imageurl", "image_url"):
+                    candidate.setdefault("image", v)
+                elif lk in ("sellercity", "city", "region", "location"):
+                    candidate.setdefault("location", v)
+                elif lk == "seller" and isinstance(v, dict):
+                    # Mercari seller object may carry location
+                    seller_loc = v.get("sellercity") or v.get("region") or v.get("city")
+                    if seller_loc:
+                        candidate.setdefault("location", seller_loc)
+            if candidate.get("title"):
+                results.append(candidate)
+
+        for v in obj.values():
+            results.extend(_walk_for_listings(v, depth + 1, max_depth))
+
+    elif isinstance(obj, list):
+        for item in obj:
+            results.extend(_walk_for_listings(item, depth + 1, max_depth))
+
+    return results
+
+
+def _try_dom_selectors(soup: BeautifulSoup) -> list[dict]:
+    """Attempt CSS-selector extraction from the rendered HTML."""
+    for selector in LISTING_SELECTORS:
+        items = soup.select(selector)
+        if items:
+            _log("INFO", f"DOM selector matched: {selector!r} ({len(items)} nodes)")
+            results = []
+            for item in items[:MAX_DISPLAY]:
+                title_el = item.select_one(
+                    "h2, h3, [class*='title'], [class*='Title'], [class*='name'], [class*='Name']"
+                )
+                price_el = item.select_one(
+                    "[class*='price'], [class*='Price'], [class*='amount'], [class*='Amount']"
+                )
+                link_el = item.select_one("a[href]")
+                img_el = item.select_one("img")
+                loc_el = item.select_one(
+                    "[class*='location'], [class*='Location'], [class*='city'], [class*='seller']"
+                )
+
+                results.append({
+                    "title": title_el.get_text(strip=True) if title_el else None,
+                    "price": price_el.get_text(strip=True) if price_el else None,
+                    "link": link_el.get("href") if link_el else None,
+                    "image": img_el.get("src") or img_el.get("data-src") if img_el else None,
+                    "location": loc_el.get_text(strip=True) if loc_el else None,
+                })
+            return results
+    return []
+
+
+def _normalize(raw: dict, query: str) -> dict:
+    """Produce a normalized candidate dict in Vulture adapter shape."""
+    title = str(raw.get("title") or raw.get("name") or "").strip() or None
+
+    # Mercari stores prices as integers (JPY cents or USD cents); handle both
+    raw_price = raw.get("price")
+    price: int | None = None
+    if raw_price is not None:
+        price_str = str(raw_price).replace("$", "").replace(",", "").strip()
+        m = re.search(r"\d+", price_str)
+        if m:
+            try:
+                price = int(m.group())
+            except ValueError:
+                price = None
+
+    # Construct canonical link from item_id if no explicit URL was found
+    link = str(raw.get("link") or raw.get("url") or "").strip() or None
+    if link and link.startswith("/"):
+        link = "https://www.mercari.com" + link
+    item_id = raw.get("item_id") or raw.get("id")
+    if not link and item_id:
+        link = f"https://www.mercari.com/item/{item_id}/"
+
+    image = str(raw.get("image") or "").strip() or None
+    location = str(raw.get("location") or "").strip() or None
+
+    return {
+        "source": "mercari",
+        "query": query,
+        "title": title,
+        "price": price,
+        "link": link,
+        "image": image,
+        "location": location,
+    }
+
+
+def _try_api_endpoint(query: str) -> list[dict]:
+    """
+    Attempt Mercari's internal search API directly.
+
+    Mercari has a v2 search endpoint used by their SPA. Headers must
+    include the DPOP token and other auth material for prod, but a
+    basic probe can determine whether the endpoint is accessible at all.
+    """
+    api_url = "https://api.mercari.com/v2/entities:search"
+    payload = {
+        "pageSize": 10,
+        "searchSessionId": "probe_session_001",
+        "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
+        "searchCondition": {
+            "keyword": query,
+            "excludeKeyword": "",
+            "sort": "SORT_SCORE",
+            "order": "ORDER_DESC",
+            "status": ["STATUS_ON_SALE"],
+            "itemTypes": [],
+            "skuIds": [],
+        },
+        "defaultDatasets": ["DATASET_TYPE_MERCARI", "DATASET_TYPE_BEYOND"],
+        "serviceFrom": "suruga",
+        "withItemBrand": True,
+        "withItemSize": False,
+        "withItemPromotions": True,
+        "withSearchConditionId": True,
+        "useDynamicAttribute": True,
+        "withOfferOptions": False,
+    }
+    api_headers = {
+        "User-Agent": HEADERS_BROWSER["User-Agent"],
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Origin": "https://www.mercari.com",
+        "Referer": f"https://www.mercari.com/search/?keyword={quote_plus(query)}",
+        "X-Platform": "web",
+    }
+    try:
+        resp = requests.post(api_url, json=payload, headers=api_headers, timeout=REQUEST_TIMEOUT)
+        return resp.status_code, resp.text
+    except requests.exceptions.RequestException as exc:
+        return None, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Strategy runners
+# ---------------------------------------------------------------------------
+
+
+def _strategy_a(query: str) -> tuple:
+    """
+    Strategy A: plain requests with a generic Chrome UA.
+    Returns (status_code, html_or_err, response_headers, final_url, cookies).
+    On network failure: (None, error_msg, None, url, None).
+    """
+    url = f"{SEARCH_URL}?keyword={quote_plus(query)}"
+    try:
+        session = requests.Session()
+        resp = session.get(url, headers=HEADERS_PLAIN, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        return resp.status_code, resp.text, dict(resp.headers), resp.url, session.cookies
+    except requests.exceptions.ConnectionError as exc:
+        return None, f"CONNECTION ERROR: {exc}", None, url, None
+    except requests.exceptions.Timeout:
+        return None, "TIMEOUT", None, url, None
+    except requests.exceptions.RequestException as exc:
+        return None, str(exc), None, url, None
+
+
+def _strategy_b(query: str) -> tuple:
+    """
+    Strategy B: enriched browser-like session with Sec-Fetch-* headers and
+    a warm-up request to mercari.com homepage before the search.
+    Returns (status_code, html_or_err, response_headers, final_url, cookies).
+    On network failure: (None, error_msg, None, url, None).
+    """
+    url = f"{SEARCH_URL}?keyword={quote_plus(query)}"
+    try:
+        session = requests.Session()
+        # Warm-up visit to the homepage to establish session cookies
+        try:
+            session.get("https://www.mercari.com/", headers=HEADERS_BROWSER,
+                        timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            time.sleep(1.0)
+        except requests.exceptions.RequestException:
+            pass  # If warm-up fails, continue anyway
+
+        # Now fetch the search page with a Referer header
+        search_headers = dict(HEADERS_BROWSER)
+        search_headers["Referer"] = "https://www.mercari.com/"
+        resp = session.get(url, headers=search_headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        return resp.status_code, resp.text, dict(resp.headers), resp.url, session.cookies
+    except requests.exceptions.ConnectionError as exc:
+        return None, f"CONNECTION ERROR: {exc}", None, url, None
+    except requests.exceptions.Timeout:
+        return None, "TIMEOUT", None, url, None
+    except requests.exceptions.RequestException as exc:
+        return None, str(exc), None, url, None
+
+
+def _strategy_c_playwright(query: str) -> dict:
+    """
+    Strategy C: lightweight Playwright probe.
+    Isolated to this function — not wired into production runtime.
+    Returns a result dict summarising what Playwright found.
+
+    When Cloudflare blocks plain requests but Playwright reaches a 200, this
+    function also extracts the __NEXT_DATA__ JSON blob from the rendered DOM
+    and walks it for listing-shaped objects, giving us the most actionable
+    raw data from this run.
+    """
+    result = {
+        "available": False,
+        "status": None,
+        "title": None,
+        "final_url": None,
+        "body_word_count": None,
+        "found_markers": [],
+        "candidate_count": 0,
+        "raw_candidates": [],
+        "next_data_found": False,
+        "error": None,
+    }
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: PLC0415
+    except ImportError:
+        result["error"] = "playwright not installed"
+        return result
+
+    result["available"] = True
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=HEADERS_BROWSER["User-Agent"],
+                locale="en-US",
+                viewport={"width": 1280, "height": 800},
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "DNT": "1",
+                },
+            )
+            page = context.new_page()
+
+            # Intercept XHR/fetch responses to capture Mercari's search API calls
+            intercepted_api_responses: list[dict] = []
+
+            def _on_response(response):
+                url = response.url
+                if (
+                    "mercari.com" in url
+                    and any(kw in url for kw in ("search", "items", "entities", "v2", "api"))
+                    and "application/json" in (response.headers.get("content-type") or "")
+                ):
+                    try:
+                        body = response.json()
+                        intercepted_api_responses.append({"url": url, "body": body})
+                    except Exception:
+                        pass
+
+            page.on("response", _on_response)
+
+            nav_url = f"{SEARCH_URL}?keyword={quote_plus(query)}"
+            resp = page.goto(nav_url, wait_until="domcontentloaded", timeout=45_000)
+            result["status"] = resp.status if resp else None
+            result["final_url"] = page.url
+
+            # Wait for network to settle so XHR listing calls complete
+            try:
+                page.wait_for_load_state("networkidle", timeout=12_000)
+            except Exception:
+                # networkidle can time out on busy SPAs; proceed with what we have
+                pass
+
+            result["title"] = page.title()
+            content = page.content()
+            soup = BeautifulSoup(content, "lxml")
+
+            body_text = soup.body.get_text(" ", strip=True) if soup.body else ""
+            result["body_word_count"] = len(body_text.split())
+            result["found_markers"] = _detect_spa_markers(content)
+
+            # Record intercepted API calls for diagnosis
+            result["intercepted_api_urls"] = [r["url"] for r in intercepted_api_responses]
+
+            # Walk intercepted API response bodies for listing data first
+            api_candidates: list[dict] = []
+            for api_resp in intercepted_api_responses:
+                api_candidates.extend(_walk_for_listings(api_resp["body"]))
+            if api_candidates:
+                seen_api: set[str] = set()
+                unique_api: list[dict] = []
+                for rc in api_candidates:
+                    t = str(rc.get("title") or "")
+                    if t and t not in seen_api:
+                        seen_api.add(t)
+                        unique_api.append(rc)
+                result["raw_candidates"] = unique_api
+                result["candidate_count"] = len(unique_api)
+                result["extraction_source"] = "intercepted_xhr"
+
+            # Fall back to __NEXT_DATA__ from the rendered DOM
+            if not result["raw_candidates"]:
+                next_data = _extract_next_data(soup)
+                if next_data:
+                    result["next_data_found"] = True
+                    result["next_data_top_keys"] = list(next_data.keys()) if isinstance(next_data, dict) else []
+                    raw_candidates = _walk_for_listings(next_data)
+                    seen_titles: set[str] = set()
+                    unique: list[dict] = []
+                    for rc in raw_candidates:
+                        t = str(rc.get("title") or "")
+                        if t and t not in seen_titles:
+                            seen_titles.add(t)
+                            unique.append(rc)
+                    result["raw_candidates"] = unique
+                    result["candidate_count"] = len(unique)
+                    result["extraction_source"] = "next_data"
+                    # Shallow structure sample for diagnosis when walker yields nothing
+                    if not unique and isinstance(next_data, dict):
+                        sample: dict = {}
+                        for k, v in list(next_data.items())[:5]:
+                            if isinstance(v, dict):
+                                sample[k] = {kk: "..." for kk in list(v.keys())[:6]}
+                            elif isinstance(v, list):
+                                sample[k] = f"[list len={len(v)}]"
+                            else:
+                                sample[k] = v
+                        result["next_data_sample"] = sample
+                else:
+                    # Last fallback: inline JSON blobs
+                    blobs = _extract_inline_json_blobs(soup)
+                    blob_candidates: list[dict] = []
+                    for blob in blobs[:8]:
+                        blob_candidates.extend(_walk_for_listings(blob))
+                    result["raw_candidates"] = blob_candidates
+                    result["candidate_count"] = len(blob_candidates)
+                    result["extraction_source"] = "json_blobs"
+
+            # CSS selector matching — secondary check
+            if result["candidate_count"] == 0:
+                for selector in LISTING_SELECTORS:
+                    try:
+                        count = len(page.query_selector_all(selector))
+                        if count > 0:
+                            result["candidate_count"] = count
+                            result["matched_selector"] = selector
+                            result["extraction_source"] = "css_selector"
+                            break
+                    except Exception:
+                        pass
+
+            browser.close()
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main probe
+# ---------------------------------------------------------------------------
+
+
+def probe(query: str) -> None:
+    separator = "=" * 70
+    print(separator)
+    print(f"MERCARI PROBE  query={query!r}")
+    print(separator)
+
+    # -----------------------------------------------------------------------
+    # Strategy A — plain requests
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Strategy A: plain requests")
+    print(f"{'─' * 60}")
+
+    status_a, html_or_err_a, headers_a, final_url_a, cookies_a = _strategy_a(query)
+
+    if status_a is None:
+        _log("ERROR", f"Strategy A failed: {html_or_err_a}")
+        html_a = None
+    else:
+        html_a = html_or_err_a
+        _log("INFO", f"HTTP {status_a}")
+        _log("INFO", f"Final URL: {final_url_a}")
+        ct = headers_a.get("Content-Type", headers_a.get("content-type", "unknown"))
+        _log("INFO", f"Content-Type: {ct}")
+        _log("INFO", f"Response size: {len(html_a):,} chars")
+
+        if cookies_a:
+            cookie_names = [c.name for c in cookies_a]
+            _log("INFO", f"Cookies set: {cookie_names}")
+
+        # Anti-bot check
+        antibot_signals = _detect_antibot(html_a, headers_a)
+        if antibot_signals:
+            for sig in antibot_signals:
+                _log("WARN", f"Anti-bot signal detected: {sig}")
+        else:
+            _log("INFO", "No known anti-bot markers detected")
+
+        if status_a in (403, 429):
+            _log("WARN", f"HTTP {status_a} — IP/bot block likely")
+        elif status_a == 401:
+            _log("WARN", "401 Unauthorized — login required at HTTP layer")
+        elif status_a not in (200, 206):
+            _log("WARN", f"Non-200 status ({status_a})")
+
+    # -----------------------------------------------------------------------
+    # Strategy B — browser-like session
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Strategy B: browser-like session (warm-up + enriched headers)")
+    print(f"{'─' * 60}")
+
+    status_b, html_or_err_b, headers_b, final_url_b, cookies_b = _strategy_b(query)
+
+    if status_b is None:
+        _log("ERROR", f"Strategy B failed: {html_or_err_b}")
+        html_b = None
+    else:
+        html_b = html_or_err_b
+        _log("INFO", f"HTTP {status_b}")
+        _log("INFO", f"Final URL: {final_url_b}")
+        ct_b = headers_b.get("Content-Type", headers_b.get("content-type", "unknown"))
+        _log("INFO", f"Content-Type: {ct_b}")
+        _log("INFO", f"Response size: {len(html_b):,} chars")
+
+        if cookies_b:
+            cookie_names_b = [c.name for c in cookies_b]
+            _log("INFO", f"Cookies set: {cookie_names_b}")
+
+        antibot_b = _detect_antibot(html_b, headers_b)
+        if antibot_b:
+            for sig in antibot_b:
+                _log("WARN", f"Anti-bot signal detected: {sig}")
+        else:
+            _log("INFO", "No known anti-bot markers detected")
+
+        if status_b in (403, 429):
+            _log("WARN", f"HTTP {status_b} — browser session did not bypass block")
+
+    # Choose the best HTML for further analysis (prefer 200, prefer B)
+    if status_b == 200 and html_b:
+        html = html_b
+        status = status_b
+        _log("INFO", "Using Strategy B response for analysis")
+    elif status_a == 200 and html_a:
+        html = html_a
+        status = status_a
+        _log("INFO", "Using Strategy A response for analysis")
+    else:
+        html = html_a or html_b
+        status = status_a or status_b
+
+    if not html or status not in (200, 206):
+        _log("WARN", "No usable HTML from requests strategies — analysis limited")
+        html = html or ""
+
+    soup = BeautifulSoup(html, "lxml") if html else None
+
+    # -----------------------------------------------------------------------
+    # Page title + server-render heuristics
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Rendering analysis")
+    print(f"{'─' * 60}")
+
+    if soup:
+        page_title = soup.title.get_text(strip=True) if soup.title else None
+        _log("INFO", f"Search page title: {page_title or '(none)'}")
+
+        if page_title:
+            lower_title = page_title.lower()
+            if any(w in lower_title for w in ("sign in", "log in", "login", "captcha")):
+                _log("WARN", "Login-wall or CAPTCHA page detected in title")
+
+        spa_markers = _detect_spa_markers(html)
+        if spa_markers:
+            for m in spa_markers:
+                _log("INFO", f"SPA marker found: {m}")
+            _log("WARN", "Listings appear JS-rendered (SPA detected)")
+        else:
+            _log("INFO", "No SPA markers found — content may be server-rendered")
+
+        body_text = soup.body.get_text(" ", strip=True) if soup.body else ""
+        body_word_count = len(body_text.split())
+        _log("INFO", f"Body word count (visible text): {body_word_count}")
+        if body_word_count < 150:
+            _log("WARN", "Very thin visible body — likely a JS-only shell")
+        else:
+            _log("INFO", "Body has substantial visible text")
+
+        script_count = len(soup.find_all("script"))
+        json_blob_count = len(soup.find_all("script", type="application/json"))
+        _log("INFO", f"<script> tags: {script_count}  |  application/json blobs: {json_blob_count}")
+
+        # Check for Mercari's React root
+        react_root = soup.find(id="__NEXT_DATA__") or soup.find("div", id="root") or soup.find("div", id="app")
+        if react_root:
+            _log("INFO", f"React/SPA root element found: id={react_root.get('id')!r}")
+    else:
+        _log("WARN", "No HTML to parse — rendering analysis skipped")
+        body_word_count = 0
+        json_blob_count = 0
+
+    # -----------------------------------------------------------------------
+    # JSON data extraction (Strategy A/B result)
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Embedded JSON extraction (__NEXT_DATA__ / application/json blobs)")
+    print(f"{'─' * 60}")
+
+    json_candidates: list[dict] = []
+
+    if soup:
+        next_data = _extract_next_data(soup)
+        if next_data:
+            _log("INFO", "__NEXT_DATA__ found — walking JSON tree for listing-shaped objects")
+            raw = _walk_for_listings(next_data)
+            seen: set[str] = set()
+            for rc in raw:
+                t = str(rc.get("title") or "")
+                if t and t not in seen:
+                    seen.add(t)
+                    json_candidates.append(rc)
+            _log("INFO", f"Distinct listing-shaped objects found: {len(json_candidates)}")
+        else:
+            _log("INFO", "No __NEXT_DATA__ tag — trying inline application/json blobs")
+            for blob in _extract_inline_json_blobs(soup)[:8]:
+                raw = _walk_for_listings(blob)
+                json_candidates.extend(raw)
+            if json_candidates:
+                _log("INFO", f"Listing-shaped objects from JSON blobs: {len(json_candidates)}")
+            else:
+                _log("WARN", "No listing data found in inline JSON blobs")
+
+    # -----------------------------------------------------------------------
+    # DOM selector extraction (fallback)
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "DOM selector extraction")
+    print(f"{'─' * 60}")
+
+    dom_candidates: list[dict] = []
+    if soup and body_word_count >= 150:
+        dom_candidates = _try_dom_selectors(soup)
+        if dom_candidates:
+            _log("INFO", f"DOM extraction yielded {len(dom_candidates)} raw candidates")
+        else:
+            _log("WARN", "No CSS selectors matched — DOM extraction failed")
+    elif soup:
+        _log("INFO", "DOM extraction skipped (body too thin — JS shell)")
+    else:
+        _log("INFO", "DOM extraction skipped (no HTML)")
+
+    # -----------------------------------------------------------------------
+    # Direct API probe
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Direct API probe (Mercari internal v2 search endpoint)")
+    print(f"{'─' * 60}")
+
+    api_status, api_body = _try_api_endpoint(query)
+    if api_status is None:
+        _log("WARN", f"API probe failed: {api_body}")
+        if "NameResolutionError" in str(api_body) or "Name or service not known" in str(api_body):
+            _log("INFO", "DNS failure on api.mercari.com — likely a cloud VM network restriction, not a definitive block finding")
+            _log("INFO", "Re-run from a residential IP or unrestricted network to test API accessibility")
+    else:
+        _log("INFO", f"API HTTP {api_status}")
+        if api_status == 200:
+            try:
+                api_json = json.loads(api_body)
+                api_items_raw = _walk_for_listings(api_json)
+                seen_api: set[str] = set()
+                api_candidates: list[dict] = []
+                for rc in api_items_raw:
+                    t = str(rc.get("title") or "")
+                    if t and t not in seen_api:
+                        seen_api.add(t)
+                        api_candidates.append(rc)
+                _log("INFO", f"API returned {len(api_candidates)} listing-shaped objects")
+                if api_candidates:
+                    json_candidates = api_candidates  # prefer API data
+                    _log("INFO", "Using API results as primary extraction source")
+            except json.JSONDecodeError:
+                _log("WARN", "API response not valid JSON")
+        elif api_status == 401:
+            _log("WARN", "API 401 — authentication / DPOP token required")
+        elif api_status == 403:
+            _log("WARN", "API 403 — access denied without valid session")
+        else:
+            _log("WARN", f"API returned unexpected status {api_status}")
+
+    # -----------------------------------------------------------------------
+    # Strategy C — Playwright (isolated)
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Strategy C: Playwright probe (isolated)")
+    print(f"{'─' * 60}")
+
+    # Only run Playwright if requests strategies failed or yielded thin content
+    requests_got_listings = bool(json_candidates or dom_candidates)
+    if requests_got_listings and body_word_count >= 150:
+        _log("INFO", "Requests strategies yielded candidates — skipping Playwright")
+        playwright_result = {"available": False, "skipped": True}
+    else:
+        _log("INFO", "Launching Playwright to attempt JS-rendered extraction")
+        playwright_result = _strategy_c_playwright(query)
+
+        if not playwright_result.get("available"):
+            err = playwright_result.get("error", "unknown")
+            _log("WARN", f"Playwright not available: {err}")
+        elif playwright_result.get("error"):
+            _log("WARN", f"Playwright error: {playwright_result['error']}")
+        else:
+            pw_status = playwright_result.get("status")
+            pw_title = playwright_result.get("title")
+            pw_words = playwright_result.get("body_word_count", 0)
+            pw_count = playwright_result.get("candidate_count", 0)
+            pw_markers = playwright_result.get("found_markers", [])
+            pw_selector = playwright_result.get("matched_selector")
+            pw_next_data = playwright_result.get("next_data_found", False)
+            pw_raw = playwright_result.get("raw_candidates", [])
+
+            _log("INFO", f"Playwright HTTP {pw_status}")
+            _log("INFO", f"Playwright page title: {pw_title or '(none)'}")
+            _log("INFO", f"Playwright body word count: {pw_words}")
+            if pw_markers:
+                _log("INFO", f"SPA markers after JS execution: {pw_markers}")
+            # Show intercepted XHR API URLs
+            xhr_urls = playwright_result.get("intercepted_api_urls", [])
+            if xhr_urls:
+                _log("INFO", f"Intercepted {len(xhr_urls)} Mercari API XHR call(s):")
+                for xu in xhr_urls:
+                    print(f"      {xu}")
+            else:
+                _log("INFO", "No Mercari API XHR calls intercepted (may be auth-gated or different origin)")
+
+            extraction_src = playwright_result.get("extraction_source", "none")
+
+            if pw_next_data:
+                _log("INFO", "__NEXT_DATA__ found in Playwright-rendered DOM")
+                top_keys = playwright_result.get("next_data_top_keys", [])
+                if top_keys:
+                    _log("INFO", f"__NEXT_DATA__ top-level keys: {top_keys}")
+                nd_sample = playwright_result.get("next_data_sample")
+                if nd_sample:
+                    _log("INFO", "__NEXT_DATA__ shallow structure sample:")
+                    for k, v in nd_sample.items():
+                        print(f"      {k!r}: {v}")
+
+            if pw_raw:
+                _log("INFO", f"Playwright extracted {len(pw_raw)} listing-shaped objects (source: {extraction_src})")
+                if not json_candidates:
+                    json_candidates = pw_raw
+            elif pw_selector:
+                _log("INFO", f"Playwright found {pw_count} candidate nodes via CSS (selector: {pw_selector!r})")
+            else:
+                _log("WARN", "Playwright: 0 listing-shaped objects found — Mercari likely lazy-loads via authenticated XHR")
+
+            if pw_words > body_word_count:
+                diff = pw_words - body_word_count
+                _log("INFO", f"JS hydration added ~{diff} words — page is JS-rendered")
+
+    # -----------------------------------------------------------------------
+    # Normalize and print candidates
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Normalized candidate objects")
+    print(f"{'─' * 60}")
+
+    # json_candidates may have been updated by Playwright; re-evaluate
+    all_raw = (json_candidates or dom_candidates)[:MAX_DISPLAY]
+
+    if not all_raw:
+        _log("WARN", "No candidates extracted by any strategy")
+    else:
+        source_label = "JSON/API" if json_candidates else "DOM"
+        _log("INFO", f"Source: {source_label}. Showing up to {MAX_DISPLAY} results.\n")
+        for i, raw in enumerate(all_raw, 1):
+            norm = _normalize(raw, query)
+            print(f"  [{i}] {json.dumps(norm, ensure_ascii=False, indent=6)}")
+
+    # -----------------------------------------------------------------------
+    # Dedupe stability check
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Dedupe stability assessment")
+    print(f"{'─' * 60}")
+
+    if all_raw:
+        candidates_with_links = [r for r in all_raw if _normalize(r, query).get("link")]
+        link_ratio = len(candidates_with_links) / len(all_raw)
+        _log("INFO", f"Candidates with stable links: {len(candidates_with_links)}/{len(all_raw)} ({link_ratio:.0%})")
+        if link_ratio >= 0.8:
+            _log("INFO", "Links appear stable — link-based dedupe is viable")
+        else:
+            _log("WARN", "Many candidates lack links — dedupe reliability uncertain")
+    else:
+        _log("WARN", "No candidates to assess for dedupe stability")
+
+    # -----------------------------------------------------------------------
+    # Login / session signals
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Login / session signals")
+    print(f"{'─' * 60}")
+
+    if html:
+        login_signals = []
+        html_lower = html.lower()
+        if "sign in" in html_lower or "log in" in html_lower:
+            login_signals.append("'sign in' / 'log in' text in HTML")
+        if "create account" in html_lower or "register" in html_lower:
+            login_signals.append("'create account' / 'register' text in HTML")
+        if soup and soup.find("input", {"type": "password"}):
+            login_signals.append("password <input> field found in DOM")
+        if login_signals:
+            for sig in login_signals:
+                _log("INFO", f"Login signal: {sig}")
+            _log("INFO", "Login prompts present but may be incidental (not a hard gate)")
+        else:
+            _log("INFO", "No explicit login-wall signals detected")
+    else:
+        _log("WARN", "No HTML — login signal check skipped")
+
+    # -----------------------------------------------------------------------
+    # Viability summary
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Viability summary")
+    print(f"{'─' * 60}")
+
+    # Infer viability from probe results
+    requests_ok = status in (200, 206) if status else False
+    got_candidates = bool(all_raw)
+    # Combine anti-bot signals gathered across both strategies
+    antibot_signals_a = _detect_antibot(html_a or "", headers_a or {}) if status_a else []
+    antibot_signals_b = _detect_antibot(html_b or "", headers_b or {}) if status_b else []
+    antibot_present = bool(antibot_signals_a or antibot_signals_b)
+    playwright_needed = (
+        not requests_ok
+        or (body_word_count < 150 and not got_candidates)
+        or playwright_result.get("candidate_count", 0) > 0
+    )
+
+    _log("INFO", f"requests-only fetch works:         {'YES' if requests_ok else 'NO'}")
+    _log("INFO", f"Content appears server-rendered:   {'YES' if (requests_ok and body_word_count >= 150) else 'UNLIKELY'}")
+    _log("INFO", f"Extraction is realistic:           {'YES' if got_candidates else 'NO — no candidates found'}")
+    _log("INFO", f"Anti-bot / blocking detected:      {'YES' if antibot_present else 'NOT DETECTED'}")
+    _log("INFO", f"Playwright appears required:       {'POSSIBLY' if playwright_needed else 'NO'}")
+
+    if got_candidates and requests_ok and not antibot_present:
+        classification = "STABLE CANDIDATE"
+        next_step = "Promote to adapters/mercari.py with __NEXT_DATA__ or API extraction"
+    elif got_candidates and requests_ok:
+        classification = "EXPERIMENTAL ONLY"
+        next_step = "Build experimental adapter; monitor for block rate over time"
+    elif playwright_result.get("candidate_count", 0) > 0:
+        classification = "EXPERIMENTAL ONLY (requires Playwright)"
+        next_step = "Implement Playwright-backed adapter under experiments/"
+    else:
+        classification = "INVESTIGATE FURTHER"
+        next_step = "Review raw HTML/API responses manually; consider residential proxy"
+
+    _log("INFO", f"Recommended classification:        {classification}")
+    _log("INFO", f"Recommended next step:             {next_step}")
+
+    print()
+    print(separator)
+    print("PROBE COMPLETE")
+    print(separator)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python experiments/adapters/mercari_probe.py <search term>")
+        print('Example: python experiments/adapters/mercari_probe.py "rtx 3080"')
+        print('Example: python experiments/adapters/mercari_probe.py "nintendo switch"')
+        sys.exit(1)
+
+    search_query = " ".join(sys.argv[1:])
+    probe(search_query)
