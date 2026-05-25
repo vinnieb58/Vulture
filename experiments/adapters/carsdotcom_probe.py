@@ -110,62 +110,58 @@ LISTING_SELECTORS = [
 ]
 
 # Sub-selectors to pull fields from a matched listing card.
-# Ordered from most-specific (Cars.com observed class names) to broadest fallback.
+# Confirmed against live Cars.com HTML (May 2026 Playwright probe).
+#
+# Key finding: each <fuse-card> element carries a `data-vehicle-details`
+# JSON attribute with all structured fields. CSS selectors below serve as
+# fallback for cards that lack that attribute (ads, promoted placements).
 FIELD_SELECTORS = {
     "title": [
-        # Cars.com observed: heading inside .vehicle-card-upper
-        ".vehicle-card-upper h2",
-        ".vehicle-card-upper h3",
-        # Generic heading
+        # Cars.com confirmed: title in <h2><a data-card-link><span>
+        "h2 a[data-card-link] span",
+        "h2 a span",
         "h2",
         "h3",
-        # Class-name fallbacks
         "[class*='title']",
         "[class*='Title']",
     ],
     "price": [
-        # Cars.com observed price class names
+        # Cars.com confirmed: price in span.fuse-body-larger
+        "span.fuse-body-larger",
         ".primary-price",
-        ".price-section .primary-price",
         "[class*='primary-price']",
-        "[class*='listing-price']",
-        "[class*='sale-price']",
-        # Broader fallback
+        "[class*='fuse-body-larger']",
         "[class*='price']",
-        "[class*='Price']",
         "[data-testid='price']",
-        "span[class*='price']",
     ],
     "mileage": [
-        # Cars.com observed
-        ".mileage",
+        # Cars.com confirmed: div.datum-icon.mileage > span
+        "div.mileage span",
+        "div.datum-icon.mileage span",
+        ".mileage span",
         "[class*='mileage']",
         "[class*='odometer']",
-        # Broader fallbacks
-        "[class*='Mileage']",
         "[class*='miles']",
-        "[data-testid='mileage']",
     ],
     "location": [
-        # Cars.com observed dealer / location class names
-        ".dealer-name",
-        ".seller-name",
-        "[class*='dealer-name']",
-        "[class*='seller-name']",
+        # Cars.com confirmed: footer datum-icon span → "City, ST (X mi)"
+        "div[slot='footer'] div.datum-icon span",
+        "div[slot='footer'] span",
         "[class*='miles-from']",
         "[class*='distance-from']",
-        # Broader fallbacks
         "[class*='location']",
-        "[class*='Location']",
+    ],
+    "dealer": [
+        # Cars.com confirmed: dealer name in span.fuse-body-small (weaker color)
+        "span.fuse-body-small",
         "[class*='dealer']",
-        "[data-testid='dealer']",
+        "[class*='seller']",
     ],
     "link": [
-        # Cars.com vehicledetail URLs
+        # Cars.com confirmed: <a data-card-link="" href="https://www.cars.com/vehicledetail/...">
+        "a[data-card-link]",
         "a[href*='/vehicledetail/']",
         "a[href*='/vehicle/']",
-        "a[href*='/car/']",
-        # Generic fallback
         "a[href]",
     ],
 }
@@ -433,16 +429,17 @@ def _normalize(raw: dict, query: str) -> dict:
             except ValueError:
                 pass
 
-    # Location — prefer dealer name + city/state
+    # Location — prefer "City, ST (X mi)" + dealer name; fallback to seller zip
     location: str | None = None
-    dealer = str(raw.get("dealer") or "").strip()
-    loc_field = str(raw.get("location") or "").strip()
-    if dealer and loc_field:
-        location = f"{dealer} — {loc_field}"
-    elif dealer:
-        location = dealer
-    elif loc_field:
-        location = loc_field
+    city_state = str(raw.get("location") or "").strip()
+    dealer_name = str(raw.get("dealer") or "").strip()
+    seller_zip = str(raw.get("seller_zip") or "").strip()
+    if city_state:
+        location = f"{dealer_name} — {city_state}" if dealer_name else city_state
+    elif dealer_name:
+        location = dealer_name + (f" (zip {seller_zip})" if seller_zip else "")
+    elif seller_zip:
+        location = f"zip {seller_zip}"
 
     # Link — prefer absolute URLs, build from relative if needed
     link: str | None = None
@@ -467,10 +464,69 @@ def _normalize(raw: dict, query: str) -> dict:
     }
 
 
+def _extract_vehicle_details_json(card) -> dict:
+    """
+    Parse the `data-vehicle-details` JSON attribute from a <fuse-card> element.
+
+    Cars.com embeds a complete structured payload on each listing card:
+      year, make, model, trim, vin, price, msrp, mileage, stockType,
+      seller.zip, listingId, primaryThumbnail.
+
+    Returns a flat dict, or {} if the attribute is absent or unparseable.
+    """
+    raw_json = card.get("data-vehicle-details")
+    if not raw_json:
+        return {}
+    try:
+        d = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        log.debug("data-vehicle-details JSON parse error: %s", exc)
+        return {}
+
+    result: dict = {}
+
+    year = str(d.get("year") or "").strip()
+    make = str(d.get("make") or "").strip()
+    model = str(d.get("model") or "").strip()
+    trim = str(d.get("trim") or "").strip()
+    stock_type = str(d.get("stockType") or "").strip()
+    parts = [p for p in [stock_type, year, make, model, trim] if p]
+    if parts:
+        result["title"] = " ".join(parts)
+
+    for price_key in ("price", "msrp"):
+        val = d.get(price_key)
+        if val and str(val) not in ("0", "0.0", ""):
+            result["price"] = str(val)
+            break
+
+    raw_mileage = d.get("mileage")
+    if raw_mileage and str(raw_mileage) != "0":
+        result["mileage"] = str(raw_mileage)
+
+    listing_id = d.get("listingId")
+    if listing_id:
+        result["listing_id"] = listing_id
+
+    vin = d.get("vin")
+    if vin:
+        result["vin"] = vin
+
+    seller_zip = (d.get("seller") or {}).get("zip")
+    if seller_zip:
+        result["seller_zip"] = seller_zip
+
+    return result
+
+
 def _try_dom_selectors(soup: BeautifulSoup, query: str) -> list[dict]:
     """
-    Attempt CSS-selector-based extraction from server-rendered HTML.
-    Tries each selector in priority order; returns the first that yields results.
+    Attempt extraction from server-rendered HTML.
+
+    Strategy per card:
+      1. Parse data-vehicle-details JSON for title, price, mileage, VIN.
+      2. Use CSS selectors for link, location (city/state), dealer name.
+      3. Pure CSS fallback for cards without the JSON attribute.
     """
     for selector in LISTING_SELECTORS:
         try:
@@ -488,43 +544,71 @@ def _try_dom_selectors(soup: BeautifulSoup, query: str) -> list[dict]:
         for item in items[:MAX_LISTINGS]:
             raw: dict = {}
 
-            # Title
-            for title_sel in FIELD_SELECTORS["title"]:
-                el = item.select_one(title_sel)
-                if el:
-                    raw["title"] = el.get_text(" ", strip=True)
-                    break
+            # Pass 1: data-vehicle-details JSON
+            json_data = _extract_vehicle_details_json(item)
+            if json_data:
+                raw.update(json_data)
 
-            # Price
-            for price_sel in FIELD_SELECTORS["price"]:
-                el = item.select_one(price_sel)
-                if el:
-                    raw["price"] = el.get_text(strip=True)
-                    break
-
-            # Mileage
-            for mileage_sel in FIELD_SELECTORS["mileage"]:
-                el = item.select_one(mileage_sel)
-                if el:
-                    raw["mileage"] = el.get_text(strip=True)
-                    break
-
-            # Location
-            for loc_sel in FIELD_SELECTORS["location"]:
-                el = item.select_one(loc_sel)
-                if el:
-                    raw["location"] = el.get_text(" ", strip=True)
-                    break
-
-            # Link — prefer href on the card itself, then child anchor
-            card_link = item.get("href") or item.get("data-href")
-            if card_link:
-                raw["link"] = card_link
-            else:
+            # Pass 2: DOM for link (not in JSON)
+            if not raw.get("link"):
                 for link_sel in FIELD_SELECTORS["link"]:
                     el = item.select_one(link_sel)
                     if el and el.get("href"):
                         raw["link"] = el["href"]
+                        break
+                if not raw.get("link"):
+                    gallery = item.find("card-gallery")
+                    if gallery and gallery.get("card-href"):
+                        raw["link"] = gallery["card-href"]
+                if not raw.get("link") and raw.get("listing_id"):
+                    raw["link"] = f"{CARS_ORIGIN}/vehicledetail/{raw['listing_id']}/"
+
+            # Pass 2: DOM for location — "City, ST (X mi)" in footer
+            if not raw.get("location"):
+                for loc_sel in FIELD_SELECTORS["location"]:
+                    el = item.select_one(loc_sel)
+                    if el:
+                        text = el.get_text(" ", strip=True)
+                        if text and "," in text and any(c.isalpha() for c in text):
+                            raw["location"] = text
+                            break
+
+            # Pass 2: DOM for dealer name — span.fuse-body-small (weaker color)
+            if not raw.get("dealer"):
+                for dlr_sel in FIELD_SELECTORS["dealer"]:
+                    for el in item.select(dlr_sel):
+                        text = el.get_text(" ", strip=True)
+                        if not text or len(text) <= 3:
+                            continue
+                        if any(tok in text for tok in ("$", "MSRP", "Est.", "/mo", "%")):
+                            continue
+                        if text.replace(".", "").replace(" ", "").isdigit():
+                            continue
+                        raw["dealer"] = text
+                        break
+                    if raw.get("dealer"):
+                        break
+
+            # Fallback CSS for fields still missing (cards without JSON attr)
+            if not raw.get("title"):
+                for title_sel in FIELD_SELECTORS["title"]:
+                    el = item.select_one(title_sel)
+                    if el:
+                        raw["title"] = el.get_text(" ", strip=True)
+                        break
+
+            if not raw.get("price"):
+                for price_sel in FIELD_SELECTORS["price"]:
+                    el = item.select_one(price_sel)
+                    if el:
+                        raw["price"] = el.get_text(strip=True)
+                        break
+
+            if not raw.get("mileage"):
+                for mileage_sel in FIELD_SELECTORS["mileage"]:
+                    el = item.select_one(mileage_sel)
+                    if el:
+                        raw["mileage"] = el.get_text(strip=True)
                         break
 
             if raw:
