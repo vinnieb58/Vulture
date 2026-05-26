@@ -106,7 +106,21 @@ Or via the YAML hunt config (add a ``carsdotcom`` hunt to config/hunts.yaml)::
     VULTURE_HUNT_SOURCE=yaml python3 main.py
 
 Verify the result in logs/vulture.log — look for lines containing
-``carsdotcom`` and ``NEW:`` / ``OLD:`` / ``FILTERED:``.
+``carsdotcom GET``, ``redirected``, and ``NEW:`` / ``OLD:`` / ``FILTERED:``.
+
+Geography enforcement note
+--------------------------
+``maximum_distance=all`` (or 9999) causes Cars.com to return nationwide
+results sorted by relevance, ignoring the zip code for geographic ranking.
+The adapter now uses ``_DEFAULT_RADIUS_MILES = 100`` to enforce locality.
+Pass ``radius_miles=300`` for a wider search or ``radius_miles=50`` for
+strict locality::
+
+    python3 -c "
+    from adapters.carsdotcom import search_carsdotcom
+    for r in search_carsdotcom('toyota camry', city='77471', limit=5, radius_miles=50):
+        print(r.title, '|', r.price, '|', r.location)
+    "
 """
 
 import json
@@ -155,11 +169,28 @@ _CARS_ORIGIN = "https://www.cars.com"
 _SEARCH_URL = "https://www.cars.com/shopping/results/"
 
 # Default zip: 77471 (Rosenberg, TX) — matches Raven's residential GeoIP area.
-# Replaced by the hunt's city param if it looks like a zip code.
+# Replaced by the hunt's city param if it looks like a zip code, or by an
+# explicit zip_override keyword argument.
 _DEFAULT_ZIP = "77471"
 
-# Regex to detect 5-digit US zip codes supplied as the city argument
+# Default search radius in miles.
+#
+# Root cause of nationwide results: "maximum_distance=all" is interpreted
+# by Cars.com as 9999 (no limit), which returns results from anywhere in the
+# country sorted by relevance rather than by distance to the supplied zip.
+# Using an explicit mile radius enforces geographic locality.
+#
+# 100 miles is the sweet spot for Houston-area searches — covers the full
+# metro and adjacent markets without going national.  Override this constant
+# or pass radius_miles to search_carsdotcom() for different coverage areas.
+_DEFAULT_RADIUS_MILES = 100
+
+# Regex to detect 5-digit US zip codes (used for city and query scanning)
 _ZIP_RE = re.compile(r"^\d{5}$")
+
+# Regex to extract a 5-digit zip embedded in the hunt query string
+# (e.g. "toyota camry 77471" or "honda civic zip:77002")
+_ZIP_IN_QUERY_RE = re.compile(r"(?:^|[\s,;:])(\d{5})(?:\s|$)")
 
 # Browser fingerprint settings
 _VIEWPORT = {"width": 1440, "height": 900}
@@ -231,29 +262,62 @@ _MILEAGE_FALLBACK_SELECTORS = [
 # ---------------------------------------------------------------------------
 
 
-def _resolve_zip(city: str) -> str:
+def _resolve_zip(
+    city: str,
+    zip_override: "str | None" = None,
+    query: str = "",
+) -> str:
     """
-    Return a 5-digit US zip code to use as the search location.
+    Determine the 5-digit US zip code to use for the search.
 
-    If *city* is itself a 5-digit string, use it directly.
-    Otherwise fall back to ``_DEFAULT_ZIP``.
+    Resolution priority (highest to lowest):
+      1. *zip_override* — explicit zip passed by the caller (future
+         adapter_options["zip"] path once the execution model supports it).
+      2. *city* arg is a 5-digit zip string (e.g. ``city="77002"``).
+      3. A 5-digit number embedded in the *query* string
+         (e.g. ``"toyota camry 77471"``).
+      4. ``_DEFAULT_ZIP`` (``"77471"`` — Raven GeoIP fallback).
     """
+    if zip_override and _ZIP_RE.match(zip_override.strip()):
+        log.debug("carsdotcom: zip from zip_override=%s", zip_override.strip())
+        return zip_override.strip()
+
     if _ZIP_RE.match(city.strip()):
+        log.debug("carsdotcom: zip from city arg=%s", city.strip())
         return city.strip()
+
+    m = _ZIP_IN_QUERY_RE.search(query)
+    if m:
+        extracted = m.group(1)
+        log.debug("carsdotcom: zip extracted from query=%r -> %s", query, extracted)
+        return extracted
+
     log.debug(
-        "carsdotcom: city=%r is not a zip code; using default zip=%s",
-        city, _DEFAULT_ZIP,
+        "carsdotcom: no zip found in zip_override=%r city=%r query=%r; "
+        "using default zip=%s",
+        zip_override, city, query, _DEFAULT_ZIP,
     )
     return _DEFAULT_ZIP
 
 
-def _build_search_url(query: str, zip_code: str) -> str:
+def _build_search_url(query: str, zip_code: str, radius_miles: int = _DEFAULT_RADIUS_MILES) -> str:
+    """
+    Build the Cars.com search URL.
+
+    The ``maximum_distance`` parameter is critical for geographic relevance.
+    Using ``all`` (or 9999) means no radius limit → Cars.com returns
+    nationwide results sorted by relevance, not by distance to the zip.
+    An explicit mile value enforces geographic locality.
+
+    Cars.com URL shape after redirect (observed May 2026):
+        ?keyword[]=<query>&zip=<zip>&maximum_distance=<miles>&sort=best_match_desc
+    """
     return (
         f"{_SEARCH_URL}"
         f"?keyword={quote_plus(query)}"
         f"&stock_type=all"
-        f"&maximum_distance=all"
         f"&zip={zip_code}"
+        f"&maximum_distance={radius_miles}"
     )
 
 
@@ -276,7 +340,7 @@ def _inject_stealth(page: "Page") -> None:
     """)
 
 
-def _fetch_html(query: str, zip_code: str) -> "str | None":
+def _fetch_html(query: str, zip_code: str, radius_miles: int = _DEFAULT_RADIUS_MILES) -> "str | None":
     """
     Use Playwright Chromium to load the Cars.com search results page and
     return the rendered HTML as a string.  Returns None on any unrecoverable
@@ -289,8 +353,8 @@ def _fetch_html(query: str, zip_code: str) -> "str | None":
         )
         return None
 
-    url = _build_search_url(query, zip_code)
-    log.debug("carsdotcom: fetching %s", url)
+    url = _build_search_url(query, zip_code, radius_miles)
+    log.info("carsdotcom: GET %s", url)
 
     try:
         with sync_playwright() as pw:
@@ -320,7 +384,9 @@ def _fetch_html(query: str, zip_code: str) -> "str | None":
             _inject_stealth(page)
 
             try:
-                resp = page.goto(url, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
+                resp = page.goto(
+                    url, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+                )
             except PlaywrightTimeout:
                 log.error("carsdotcom: navigation timed out after %d ms for query %r", _NAV_TIMEOUT_MS, query)
                 browser.close()
@@ -340,6 +406,12 @@ def _fetch_html(query: str, zip_code: str) -> "str | None":
                 return None
 
             http_status = resp.status if resp else None
+            final_url = page.url
+            if final_url != url:
+                log.info("carsdotcom: redirected -> %s", final_url)
+            else:
+                log.info("carsdotcom: no redirect (status=%s)", http_status)
+
             if http_status == 403:
                 log.error(
                     "carsdotcom: HTTP 403 for query %r — "
@@ -368,9 +440,9 @@ def _fetch_html(query: str, zip_code: str) -> "str | None":
             html = page.content()
             browser.close()
 
-            log.debug(
-                "carsdotcom: fetched %d chars of HTML for query %r (status=%s)",
-                len(html), query, http_status,
+            log.info(
+                "carsdotcom: fetched %d chars of HTML for query=%r zip=%s radius=%dmi (status=%s)",
+                len(html), query, zip_code, radius_miles, http_status,
             )
             return html
 
@@ -640,7 +712,14 @@ def _parse_listings(html: str, query: str, limit: int) -> list[Listing]:
 # ---------------------------------------------------------------------------
 
 
-def search_carsdotcom(query: str, city: str = _DEFAULT_ZIP, limit: int = 10) -> list[Listing]:
+def search_carsdotcom(
+    query: str,
+    city: str = _DEFAULT_ZIP,
+    limit: int = 10,
+    *,
+    zip_override: "str | None" = None,
+    radius_miles: int = _DEFAULT_RADIUS_MILES,
+) -> list[Listing]:
     """
     Search Cars.com for *query* and return up to *limit* ``Listing`` objects.
 
@@ -648,14 +727,27 @@ def search_carsdotcom(query: str, city: str = _DEFAULT_ZIP, limit: int = 10) -> 
     ----------
     query:
         Search term, e.g. ``"toyota camry"`` or ``"honda civic under 15000"``.
+        A 5-digit zip embedded in the query (e.g. ``"toyota camry 77471"``) is
+        automatically extracted and used as the search zip.
     city:
         Supply a 5-digit US zip code for location-targeted results
         (e.g. ``"77002"`` for downtown Houston).  Any non-zip string falls
-        back to the default zip (``"77471"`` — Raven's residential GeoIP area).
-        Cars.com supports true zip-based location targeting — passing an
-        explicit zip is strongly preferred over relying on GeoIP.
+        back to the default zip (``"77471"``).
     limit:
         Maximum number of ``Listing`` objects to return.
+    zip_override:
+        Explicit zip that takes priority over *city*.  Intended for future
+        ``adapter_options["zip"]`` support once the hunt execution model
+        passes per-adapter option dicts.  Ignored when not a valid 5-digit zip.
+    radius_miles:
+        Search radius in miles from the resolved zip.  Defaults to
+        ``_DEFAULT_RADIUS_MILES`` (100).  Use a larger value (e.g. 300) for
+        nationwide vehicle searches, or smaller (e.g. 50) for strict locality.
+
+        **Why this matters:** passing ``maximum_distance=all`` (or 9999) tells
+        Cars.com to return nationwide results sorted only by relevance, not by
+        distance.  An explicit radius is required for geographically coherent
+        results.
 
     Returns
     -------
@@ -669,14 +761,16 @@ def search_carsdotcom(query: str, city: str = _DEFAULT_ZIP, limit: int = 10) -> 
       Datacenter IPs will encounter Cloudflare Bot Management blocks.
     * Each call starts a fresh Chromium instance (~1–2 s overhead).
     * Does not write to SQLite.  Does not send Discord alerts.
+    * The ``city``, ``zip_override``, and embedded-in-query zip are all checked
+      by ``_resolve_zip()``.  The first valid 5-digit zip found wins.
     """
-    zip_code = _resolve_zip(city)
+    zip_code = _resolve_zip(city, zip_override=zip_override, query=query)
     log.info(
-        "carsdotcom search: query=%r zip=%r (city arg=%r) limit=%d",
-        query, zip_code, city, limit,
+        "carsdotcom search: query=%r zip=%s radius=%dmi city_arg=%r limit=%d",
+        query, zip_code, radius_miles, city, limit,
     )
 
-    html = _fetch_html(query, zip_code)
+    html = _fetch_html(query, zip_code, radius_miles)
     if html is None:
         log.warning("carsdotcom: fetch returned no HTML for query %r", query)
         return []
@@ -685,14 +779,16 @@ def search_carsdotcom(query: str, city: str = _DEFAULT_ZIP, limit: int = 10) -> 
 
     if not listings:
         log.warning(
-            "carsdotcom: query %r yielded 0 usable listings — "
+            "carsdotcom: query=%r zip=%s returned 0 usable listings — "
             "check logs above for block/timeout signals",
-            query,
+            query, zip_code,
         )
         return []
 
+    observed_locations = sorted({lst.location for lst in listings if lst.location})
     log.info(
-        "carsdotcom: query=%r zip=%r returned %d listing(s)",
-        query, zip_code, len(listings),
+        "carsdotcom: query=%r zip=%s radius=%dmi -> %d listing(s). "
+        "observed_locations=%s",
+        query, zip_code, radius_miles, len(listings), observed_locations,
     )
     return listings
