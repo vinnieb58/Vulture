@@ -219,16 +219,24 @@ def run_playwright_probe(query: str, limit: int = 20, slow: bool = False, stealt
     stealth_available = False
     stealth_fn = None
     if stealth:
+        # playwright-stealth 2.x uses Stealth class; 1.x used stealth_sync.
+        # Try both so the probe works across versions.
         try:
-            from playwright_stealth import stealth_sync  # type: ignore[import]
-            stealth_fn = stealth_sync
+            from playwright_stealth import Stealth  # type: ignore[import]
+            _stealth_instance = Stealth()
+            stealth_fn = _stealth_instance.apply_stealth_sync
             stealth_available = True
-        except ImportError:
-            print()
-            print("ERROR: --stealth requires playwright-stealth.")
-            print("  Install: pip install playwright-stealth")
-            print()
-            sys.exit(1)
+        except (ImportError, AttributeError):
+            try:
+                from playwright_stealth import stealth_sync  # type: ignore[import]
+                stealth_fn = stealth_sync
+                stealth_available = True
+            except ImportError:
+                print()
+                print("ERROR: --stealth requires playwright-stealth.")
+                print("  Install: pip install playwright-stealth")
+                print()
+                sys.exit(1)
 
     mode_label = "stealth (playwright-stealth)" if (stealth and stealth_available) else "bare headless"
     print_section(f"eBay Playwright Probe — Phase 2 Recon [{mode_label}]")
