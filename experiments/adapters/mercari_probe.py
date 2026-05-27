@@ -143,6 +143,26 @@ LISTING_SELECTORS = [
 MAX_DISPLAY = 5
 REQUEST_TIMEOUT = 25
 
+# URL patterns that flag a Playwright network call as worth capturing.
+# Any URL containing at least one of these strings (case-insensitive) is kept.
+XHR_CANDIDATE_PATTERNS = [
+    "mercari.com",
+    "mercdn.net",
+    "/search",
+    "/v1/",
+    "/v2/",
+    "graphql",
+    "/items",
+    "/entities",
+]
+
+# Extensions that are never data endpoints — excluded regardless of domain.
+XHR_EXCLUDE_EXTENSIONS = frozenset({
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".svg", ".woff", ".woff2", ".ttf", ".otf", ".ico",
+    ".map", ".ts", ".mp4", ".mp3",
+})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -289,6 +309,19 @@ def _try_dom_selectors(soup: BeautifulSoup) -> list[dict]:
     return []
 
 
+def _xhr_is_candidate(url: str) -> bool:
+    """
+    Return True if a Playwright network URL looks like a Mercari data endpoint.
+    Excludes obvious static asset extensions regardless of domain.
+    """
+    path = url.lower().split("?")[0]
+    for ext in XHR_EXCLUDE_EXTENSIONS:
+        if path.endswith(ext):
+            return False
+    full_lower = url.lower()
+    return any(p in full_lower for p in XHR_CANDIDATE_PATTERNS)
+
+
 def _normalize(raw: dict, query: str) -> dict:
     """Produce a normalized candidate dict in Vulture adapter shape."""
     title = str(raw.get("title") or raw.get("name") or "").strip() or None
@@ -327,51 +360,9 @@ def _normalize(raw: dict, query: str) -> dict:
     }
 
 
-def _try_api_endpoint(query: str) -> list[dict]:
-    """
-    Attempt Mercari's internal search API directly.
-
-    Mercari has a v2 search endpoint used by their SPA. Headers must
-    include the DPOP token and other auth material for prod, but a
-    basic probe can determine whether the endpoint is accessible at all.
-    """
-    api_url = "https://api.mercari.com/v2/entities:search"
-    payload = {
-        "pageSize": 10,
-        "searchSessionId": "probe_session_001",
-        "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
-        "searchCondition": {
-            "keyword": query,
-            "excludeKeyword": "",
-            "sort": "SORT_SCORE",
-            "order": "ORDER_DESC",
-            "status": ["STATUS_ON_SALE"],
-            "itemTypes": [],
-            "skuIds": [],
-        },
-        "defaultDatasets": ["DATASET_TYPE_MERCARI", "DATASET_TYPE_BEYOND"],
-        "serviceFrom": "suruga",
-        "withItemBrand": True,
-        "withItemSize": False,
-        "withItemPromotions": True,
-        "withSearchConditionId": True,
-        "useDynamicAttribute": True,
-        "withOfferOptions": False,
-    }
-    api_headers = {
-        "User-Agent": HEADERS_BROWSER["User-Agent"],
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json; charset=UTF-8",
-        "Origin": "https://www.mercari.com",
-        "Referer": f"https://www.mercari.com/search/?keyword={quote_plus(query)}",
-        "X-Platform": "web",
-    }
-    try:
-        resp = requests.post(api_url, json=payload, headers=api_headers, timeout=REQUEST_TIMEOUT)
-        return resp.status_code, resp.text
-    except requests.exceptions.RequestException as exc:
-        return None, str(exc)
+# api.mercari.com does not publicly resolve (confirmed on Raven residential IP).
+# The real search XHR endpoint lives on www.mercari.com or a subdomain that
+# Playwright XHR interception will discover at runtime.  No direct API probe.
 
 
 # ---------------------------------------------------------------------------
@@ -431,14 +422,14 @@ def _strategy_b(query: str) -> tuple:
 
 def _strategy_c_playwright(query: str) -> dict:
     """
-    Strategy C: lightweight Playwright probe.
+    Strategy C: headless Playwright probe with broadened XHR interception.
     Isolated to this function — not wired into production runtime.
-    Returns a result dict summarising what Playwright found.
 
-    When Cloudflare blocks plain requests but Playwright reaches a 200, this
-    function also extracts the __NEXT_DATA__ JSON blob from the rendered DOM
-    and walks it for listing-shaped objects, giving us the most actionable
-    raw data from this run.
+    Intercepts ALL Playwright network responses matching XHR_CANDIDATE_PATTERNS
+    (mercari.com, mercdn.net, /search, /v1/, /v2/, graphql, /items, /entities).
+    For each intercepted call records: method, HTTP status, URL, content-type,
+    response size, JSON top-level keys, shallow JSON sample, and any
+    listing-shaped objects found by recursive walk.
     """
     result = {
         "available": False,
@@ -450,6 +441,7 @@ def _strategy_c_playwright(query: str) -> dict:
         "candidate_count": 0,
         "raw_candidates": [],
         "next_data_found": False,
+        "intercepted_calls": [],   # full metadata for every captured call
         "error": None,
     }
     try:
@@ -473,21 +465,54 @@ def _strategy_c_playwright(query: str) -> dict:
             )
             page = context.new_page()
 
-            # Intercept XHR/fetch responses to capture Mercari's search API calls
-            intercepted_api_responses: list[dict] = []
+            intercepted_calls: list[dict] = []
 
             def _on_response(response):
                 url = response.url
-                if (
-                    "mercari.com" in url
-                    and any(kw in url for kw in ("search", "items", "entities", "v2", "api"))
-                    and "application/json" in (response.headers.get("content-type") or "")
-                ):
-                    try:
-                        body = response.json()
-                        intercepted_api_responses.append({"url": url, "body": body})
-                    except Exception:
-                        pass
+                if not _xhr_is_candidate(url):
+                    return
+                ct = response.headers.get("content-type", "")
+                entry: dict = {
+                    "method": response.request.method,
+                    "status": response.status,
+                    "url": url,
+                    "content_type": ct,
+                    "size": 0,
+                    "json_top_keys": None,
+                    "json_sample": None,
+                    "candidates": [],
+                    "error": None,
+                }
+                try:
+                    body_text = response.text()
+                    entry["size"] = len(body_text)
+                    if "json" in ct.lower():
+                        try:
+                            body = json.loads(body_text)
+                            # Top-level structure
+                            if isinstance(body, dict):
+                                entry["json_top_keys"] = list(body.keys())[:14]
+                                sample: dict = {}
+                                for k, v in list(body.items())[:4]:
+                                    if isinstance(v, list):
+                                        sample[k] = f"[list len={len(v)}]"
+                                    elif isinstance(v, dict):
+                                        sample[k] = {kk: "..." for kk in list(v.keys())[:6]}
+                                    else:
+                                        sample[k] = v
+                                entry["json_sample"] = sample
+                            elif isinstance(body, list):
+                                entry["json_top_keys"] = f"[array len={len(body)}]"
+                                if body and isinstance(body[0], dict):
+                                    entry["json_sample"] = {"[0] keys": list(body[0].keys())[:10]}
+                            # Recursive listing-shaped object search
+                            entry["candidates"] = _walk_for_listings(body)
+                        except (json.JSONDecodeError, Exception) as exc:
+                            entry["error"] = f"JSON parse: {exc}"
+                except Exception as exc:
+                    entry["error"] = f"Body read: {exc}"
+
+                intercepted_calls.append(entry)
 
             page.on("response", _on_response)
 
@@ -500,34 +525,32 @@ def _strategy_c_playwright(query: str) -> dict:
             try:
                 page.wait_for_load_state("networkidle", timeout=12_000)
             except Exception:
-                # networkidle can time out on busy SPAs; proceed with what we have
                 pass
 
             result["title"] = page.title()
             content = page.content()
             soup = BeautifulSoup(content, "lxml")
 
-            body_text = soup.body.get_text(" ", strip=True) if soup.body else ""
-            result["body_word_count"] = len(body_text.split())
+            body_text_dom = soup.body.get_text(" ", strip=True) if soup.body else ""
+            result["body_word_count"] = len(body_text_dom.split())
             result["found_markers"] = _detect_spa_markers(content)
+            result["intercepted_calls"] = intercepted_calls
 
-            # Record intercepted API calls for diagnosis
-            result["intercepted_api_urls"] = [r["url"] for r in intercepted_api_responses]
+            # Collect listing candidates from all intercepted JSON calls
+            all_xhr_candidates: list[dict] = []
+            for call in intercepted_calls:
+                all_xhr_candidates.extend(call.get("candidates", []))
 
-            # Walk intercepted API response bodies for listing data first
-            api_candidates: list[dict] = []
-            for api_resp in intercepted_api_responses:
-                api_candidates.extend(_walk_for_listings(api_resp["body"]))
-            if api_candidates:
-                seen_api: set[str] = set()
-                unique_api: list[dict] = []
-                for rc in api_candidates:
+            if all_xhr_candidates:
+                seen_xhr: set[str] = set()
+                unique_xhr: list[dict] = []
+                for rc in all_xhr_candidates:
                     t = str(rc.get("title") or "")
-                    if t and t not in seen_api:
-                        seen_api.add(t)
-                        unique_api.append(rc)
-                result["raw_candidates"] = unique_api
-                result["candidate_count"] = len(unique_api)
+                    if t and t not in seen_xhr:
+                        seen_xhr.add(t)
+                        unique_xhr.append(rc)
+                result["raw_candidates"] = unique_xhr
+                result["candidate_count"] = len(unique_xhr)
                 result["extraction_source"] = "intercepted_xhr"
 
             # Fall back to __NEXT_DATA__ from the rendered DOM
@@ -536,39 +559,37 @@ def _strategy_c_playwright(query: str) -> dict:
                 if next_data:
                     result["next_data_found"] = True
                     result["next_data_top_keys"] = list(next_data.keys()) if isinstance(next_data, dict) else []
-                    raw_candidates = _walk_for_listings(next_data)
-                    seen_titles: set[str] = set()
-                    unique: list[dict] = []
-                    for rc in raw_candidates:
+                    raw_nd = _walk_for_listings(next_data)
+                    seen_nd: set[str] = set()
+                    unique_nd: list[dict] = []
+                    for rc in raw_nd:
                         t = str(rc.get("title") or "")
-                        if t and t not in seen_titles:
-                            seen_titles.add(t)
-                            unique.append(rc)
-                    result["raw_candidates"] = unique
-                    result["candidate_count"] = len(unique)
+                        if t and t not in seen_nd:
+                            seen_nd.add(t)
+                            unique_nd.append(rc)
+                    result["raw_candidates"] = unique_nd
+                    result["candidate_count"] = len(unique_nd)
                     result["extraction_source"] = "next_data"
-                    # Shallow structure sample for diagnosis when walker yields nothing
-                    if not unique and isinstance(next_data, dict):
-                        sample: dict = {}
+                    if not unique_nd and isinstance(next_data, dict):
+                        nd_sample: dict = {}
                         for k, v in list(next_data.items())[:5]:
                             if isinstance(v, dict):
-                                sample[k] = {kk: "..." for kk in list(v.keys())[:6]}
+                                nd_sample[k] = {kk: "..." for kk in list(v.keys())[:6]}
                             elif isinstance(v, list):
-                                sample[k] = f"[list len={len(v)}]"
+                                nd_sample[k] = f"[list len={len(v)}]"
                             else:
-                                sample[k] = v
-                        result["next_data_sample"] = sample
+                                nd_sample[k] = v
+                        result["next_data_sample"] = nd_sample
                 else:
-                    # Last fallback: inline JSON blobs
                     blobs = _extract_inline_json_blobs(soup)
-                    blob_candidates: list[dict] = []
+                    blob_cands: list[dict] = []
                     for blob in blobs[:8]:
-                        blob_candidates.extend(_walk_for_listings(blob))
-                    result["raw_candidates"] = blob_candidates
-                    result["candidate_count"] = len(blob_candidates)
+                        blob_cands.extend(_walk_for_listings(blob))
+                    result["raw_candidates"] = blob_cands
+                    result["candidate_count"] = len(blob_cands)
                     result["extraction_source"] = "json_blobs"
 
-            # CSS selector matching — secondary check
+            # CSS selector count — diagnostic only when JSON extraction failed
             if result["candidate_count"] == 0:
                 for selector in LISTING_SELECTORS:
                     try:
@@ -787,58 +808,19 @@ def probe(query: str) -> None:
         _log("INFO", "DOM extraction skipped (no HTML)")
 
     # -----------------------------------------------------------------------
-    # Direct API probe
+    # Strategy C — Playwright with broadened XHR interception (isolated)
     # -----------------------------------------------------------------------
     print(f"\n{'─' * 60}")
-    _log("INFO", "Direct API probe (Mercari internal v2 search endpoint)")
+    _log("INFO", "Strategy C: Playwright probe with broadened XHR interception")
     print(f"{'─' * 60}")
+    _log("INFO", f"XHR filter patterns: {XHR_CANDIDATE_PATTERNS}")
 
-    api_status, api_body = _try_api_endpoint(query)
-    if api_status is None:
-        _log("WARN", f"API probe failed: {api_body}")
-        if "NameResolutionError" in str(api_body) or "Name or service not known" in str(api_body):
-            _log("INFO", "DNS failure on api.mercari.com — likely a cloud VM network restriction, not a definitive block finding")
-            _log("INFO", "Re-run from a residential IP or unrestricted network to test API accessibility")
-    else:
-        _log("INFO", f"API HTTP {api_status}")
-        if api_status == 200:
-            try:
-                api_json = json.loads(api_body)
-                api_items_raw = _walk_for_listings(api_json)
-                seen_api: set[str] = set()
-                api_candidates: list[dict] = []
-                for rc in api_items_raw:
-                    t = str(rc.get("title") or "")
-                    if t and t not in seen_api:
-                        seen_api.add(t)
-                        api_candidates.append(rc)
-                _log("INFO", f"API returned {len(api_candidates)} listing-shaped objects")
-                if api_candidates:
-                    json_candidates = api_candidates  # prefer API data
-                    _log("INFO", "Using API results as primary extraction source")
-            except json.JSONDecodeError:
-                _log("WARN", "API response not valid JSON")
-        elif api_status == 401:
-            _log("WARN", "API 401 — authentication / DPOP token required")
-        elif api_status == 403:
-            _log("WARN", "API 403 — access denied without valid session")
-        else:
-            _log("WARN", f"API returned unexpected status {api_status}")
-
-    # -----------------------------------------------------------------------
-    # Strategy C — Playwright (isolated)
-    # -----------------------------------------------------------------------
-    print(f"\n{'─' * 60}")
-    _log("INFO", "Strategy C: Playwright probe (isolated)")
-    print(f"{'─' * 60}")
-
-    # Only run Playwright if requests strategies failed or yielded thin content
     requests_got_listings = bool(json_candidates or dom_candidates)
     if requests_got_listings and body_word_count >= 150:
         _log("INFO", "Requests strategies yielded candidates — skipping Playwright")
         playwright_result = {"available": False, "skipped": True}
     else:
-        _log("INFO", "Launching Playwright to attempt JS-rendered extraction")
+        _log("INFO", "Launching Playwright (headless Chromium + networkidle wait)...")
         playwright_result = _strategy_c_playwright(query)
 
         if not playwright_result.get("available"):
@@ -850,51 +832,72 @@ def probe(query: str) -> None:
             pw_status = playwright_result.get("status")
             pw_title = playwright_result.get("title")
             pw_words = playwright_result.get("body_word_count", 0)
-            pw_count = playwright_result.get("candidate_count", 0)
             pw_markers = playwright_result.get("found_markers", [])
-            pw_selector = playwright_result.get("matched_selector")
             pw_next_data = playwright_result.get("next_data_found", False)
             pw_raw = playwright_result.get("raw_candidates", [])
+            pw_selector = playwright_result.get("matched_selector")
+            extraction_src = playwright_result.get("extraction_source", "none")
 
             _log("INFO", f"Playwright HTTP {pw_status}")
             _log("INFO", f"Playwright page title: {pw_title or '(none)'}")
             _log("INFO", f"Playwright body word count: {pw_words}")
             if pw_markers:
                 _log("INFO", f"SPA markers after JS execution: {pw_markers}")
-            # Show intercepted XHR API URLs
-            xhr_urls = playwright_result.get("intercepted_api_urls", [])
-            if xhr_urls:
-                _log("INFO", f"Intercepted {len(xhr_urls)} Mercari API XHR call(s):")
-                for xu in xhr_urls:
-                    print(f"      {xu}")
+            if pw_words > body_word_count:
+                _log("INFO", f"JS hydration added ~{pw_words - body_word_count} words — page is JS-rendered")
+
+            # ── Intercepted XHR calls ──────────────────────────────────────
+            calls = playwright_result.get("intercepted_calls", [])
+            if calls:
+                _log("INFO", f"Intercepted {len(calls)} candidate network call(s):")
+                print()
+                for call in calls:
+                    method = call.get("method", "?")
+                    st = call.get("status", "?")
+                    url = call.get("url", "?")
+                    ct = call.get("content_type", "")
+                    sz = call.get("size", 0)
+                    n_cands = len(call.get("candidates", []))
+                    print(f"    [{method}] HTTP {st}  {sz:,} bytes  ct={ct}")
+                    print(f"    URL: {url}")
+                    top_keys = call.get("json_top_keys")
+                    if top_keys:
+                        print(f"    JSON top-level keys: {top_keys}")
+                    jsampl = call.get("json_sample")
+                    if jsampl:
+                        print(f"    JSON shallow sample:")
+                        for k, v in jsampl.items():
+                            print(f"      {k!r}: {v}")
+                    if n_cands:
+                        print(f"    Listing-shaped objects found: {n_cands}")
+                    if call.get("error"):
+                        print(f"    Error: {call['error']}")
+                    print()
             else:
-                _log("INFO", "No Mercari API XHR calls intercepted (may be auth-gated or different origin)")
+                _log("WARN", "No candidate XHR calls intercepted")
+                _log("INFO", "Possible reasons: auth-gated endpoint, different domain pattern, lazy-load not triggered")
 
-            extraction_src = playwright_result.get("extraction_source", "none")
-
+            # ── __NEXT_DATA__ shell info ───────────────────────────────────
             if pw_next_data:
-                _log("INFO", "__NEXT_DATA__ found in Playwright-rendered DOM")
-                top_keys = playwright_result.get("next_data_top_keys", [])
-                if top_keys:
-                    _log("INFO", f"__NEXT_DATA__ top-level keys: {top_keys}")
+                _log("INFO", "__NEXT_DATA__ present in rendered DOM (thin shell confirmed)")
+                nd_keys = playwright_result.get("next_data_top_keys", [])
+                if nd_keys:
+                    _log("INFO", f"__NEXT_DATA__ top-level keys: {nd_keys}")
                 nd_sample = playwright_result.get("next_data_sample")
                 if nd_sample:
-                    _log("INFO", "__NEXT_DATA__ shallow structure sample:")
+                    _log("INFO", "__NEXT_DATA__ shallow structure:")
                     for k, v in nd_sample.items():
                         print(f"      {k!r}: {v}")
 
+            # ── Candidate summary ──────────────────────────────────────────
             if pw_raw:
                 _log("INFO", f"Playwright extracted {len(pw_raw)} listing-shaped objects (source: {extraction_src})")
                 if not json_candidates:
                     json_candidates = pw_raw
             elif pw_selector:
-                _log("INFO", f"Playwright found {pw_count} candidate nodes via CSS (selector: {pw_selector!r})")
+                _log("INFO", f"Playwright CSS selector matched {playwright_result.get('candidate_count',0)} nodes: {pw_selector!r}")
             else:
-                _log("WARN", "Playwright: 0 listing-shaped objects found — Mercari likely lazy-loads via authenticated XHR")
-
-            if pw_words > body_word_count:
-                diff = pw_words - body_word_count
-                _log("INFO", f"JS hydration added ~{diff} words — page is JS-rendered")
+                _log("WARN", "Playwright: 0 listing-shaped objects found")
 
     # -----------------------------------------------------------------------
     # Normalize and print candidates
