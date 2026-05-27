@@ -209,19 +209,31 @@ def _extract_next_data(soup: BeautifulSoup) -> dict | None:
 
 def _strip_xssi(text: str) -> str:
     """
-    Strip Mercari's XSSI protection prefix before JSON parsing.
+    Strip any XSSI / protection prefix from a JSON response body.
 
-    Mercari prepends )]}'\\n to some API responses to prevent cross-site
-    script inclusion.  json.loads fails on position 1 without this strip.
+    Handles multiple prefix forms:
+      - )]}'\\n          (common Angular/Mercari XSSI prefix)
+      - \\n)]}'           (prefix preceded by leading whitespace)
+      - &&&START&&&\\n   (older Angular style)
+      - any leading garbage before the first { or [
+
+    Strategy: strip leading whitespace, check explicit prefixes, then fall
+    back to scanning forward to the first character that can start a JSON
+    value ({, [, ", digit, t/f/n for true/false/null).
     """
-    for prefix in (")]}'\n", ")]}'\r\n", ")]}'"):
-        if text.startswith(prefix):
-            return text[len(prefix):]
-    # Fallback: if first char is ) or ] skip to the first newline
-    if text and text[0] in ")]}":
-        nl = text.find("\n")
-        if 0 < nl < 20:
-            return text[nl + 1:]
+    # Strip leading whitespace that may precede the XSSI token
+    stripped = text.lstrip(" \t\r\n")
+    for prefix in (")]}'\n", ")]}'\r\n", ")]}'", "&&&START&&&\n"):
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].lstrip(" \t\r\n")
+
+    # Fallback: find the first character that can legitimately open a JSON value
+    for i, ch in enumerate(text[:40]):
+        if ch in '{["0123456789tfn-':
+            if i > 0:
+                return text[i:]
+            break  # already at position 0 — no stripping needed
+
     return text
 
 
@@ -625,9 +637,13 @@ def _strategy_d_direct_api(query: str) -> dict:
         result[f"{label}_content_type"] = ct
         result[f"{label}_size"] = size
         candidates: list[dict] = []
+        # Always capture raw prefix for diagnostics
+        result[f"{label}_raw_prefix"] = repr(raw_text[:80])
+
         if "json" in ct.lower() and status == 200:
             try:
                 clean = _strip_xssi(raw_text)
+                result[f"{label}_clean_prefix"] = repr(clean[:40])
                 body = json.loads(clean)
                 if isinstance(body, dict):
                     result[f"{label}_top_keys"] = list(body.keys())[:14]
@@ -644,6 +660,9 @@ def _strategy_d_direct_api(query: str) -> dict:
                 ]
             except (json.JSONDecodeError, ValueError) as exc:
                 result[f"{label}_json_error"] = str(exc)
+        elif status not in (200,):
+            # Capture error body for non-200 responses
+            result[f"{label}_error_body"] = raw_text[:300]
         return candidates
 
     # --- Step 2: GET /v1/api (simplified variables matching Playwright GET) --
@@ -1130,6 +1149,10 @@ def probe(query: str) -> None:
                 _log("WARN", "GET /v1/api 400 — bad request (variables shape mismatch)")
             if d.get("get_json_error"):
                 _log("WARN", f"GET JSON parse error: {d['get_json_error']}")
+                _log("INFO", f"GET raw prefix: {d.get('get_raw_prefix')}")
+                _log("INFO", f"GET clean prefix: {d.get('get_clean_prefix')}")
+            if d.get("get_error_body"):
+                _log("INFO", f"GET error body: {d['get_error_body'][:200]}")
 
         # POST attempt
         post_st = d.get("post_status")
@@ -1150,6 +1173,10 @@ def probe(query: str) -> None:
                 _log("WARN", "POST /v1/api 403 — CSRF + session not sufficient for POST")
             if d.get("post_json_error"):
                 _log("WARN", f"POST JSON parse error: {d['post_json_error']}")
+                _log("INFO", f"POST raw prefix: {d.get('post_raw_prefix')}")
+                _log("INFO", f"POST clean prefix: {d.get('post_clean_prefix')}")
+            if d.get("post_error_body"):
+                _log("INFO", f"POST error body: {d['post_error_body'][:200]}")
 
         # Verdict
         d_raw = d.get("raw_candidates", [])
