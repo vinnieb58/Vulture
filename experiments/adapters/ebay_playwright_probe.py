@@ -6,17 +6,26 @@ This script is the Phase 2 escalation after plain requests AND curl_cffi
 both failed on Raven (2026-05-24). Browser JavaScript execution is required
 to pass eBay's HUMAN Defense challenge.
 
-Confirmed findings so far (all from Raven residential IP):
+RECON COMPLETE — ALL SCRAPING PATHS EXHAUSTED (2026-05-27)
+
+Confirmed findings — Raven residential IP:
   Phase 1  — requests + Chrome UA:         HTTP 403 / 389 bytes
   Phase 1b — curl_cffi Chrome124:          HTTP 403 / 546 bytes
-  Phase 2  — bare headless Playwright:     HTTP 403 / 301 bytes  (2026-05-27)
+  Phase 2  — bare headless Playwright:     HTTP 403 / 301 bytes
+  Phase 2b — playwright-stealth:           HTTP 403 / 301 bytes  ← FINAL
 
-The 301-byte body from bare headless Playwright is SMALLER than curl_cffi,
-which suggests eBay is detecting headless Chromium at the TLS/connection
-layer before any JS challenge runs — likely via the headless Chromium TLS
-fingerprint differing from a real Chrome binary. playwright-stealth patches
-navigator, canvas, WebGL, and other JS properties AND can improve the TLS
-posture via Chrome launch args.
+Key observation: bare Playwright and playwright-stealth return identical
+301-byte bodies. playwright-stealth patches JS fingerprints but the block
+is happening at the TLS/network layer before any JS executes.
+stealth cannot affect that layer.
+
+CONCLUSION: eBay scraping is not viable from Raven.
+RECOMMENDED PATH: eBay Browse API.
+  https://developer.ebay.com/develop/apis/restful-apis/browse-api
+
+This probe is preserved as a historical record of the recon process.
+It can be re-run in the future if circumstances change (e.g., different
+network environment, proxy, or eBay anti-bot vendor change).
 
 This probe supports:
   bare mode (default)   — baseline measurement

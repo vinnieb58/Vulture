@@ -17,27 +17,30 @@ It does NOT:
   - modify Discord behavior
   - connect to any Vulture runtime
 
-Confirmed findings (all from Raven residential IP unless noted):
-  Phase 1  — requests + Chrome UA:
-    Cloud agent (datacenter IP): HTTP 403 / 535 bytes / "Access Denied"
-    Raven (residential IP):      HTTP 403 / 389 bytes / "Access Denied"
+RECON COMPLETE — ALL SCRAPING PATHS EXHAUSTED (2026-05-27)
 
-  Phase 1b — curl_cffi Chrome124 TLS impersonation:
-    Cloud agent (datacenter IP): HTTP 403 / 546 bytes / "Access Denied"
-    Raven (residential IP):      HTTP 403 / 546 bytes / "Access Denied"
+  Phase 1  — requests + Chrome UA (Raven residential IP):
+    HTTP 403 / 389 bytes / "Access Denied"
 
-  Phase 2  — bare headless Playwright (Raven, 2026-05-27):
+  Phase 1b — curl_cffi Chrome124 TLS impersonation (Raven):
+    HTTP 403 / 546 bytes / "Access Denied"
+
+  Phase 2  — bare headless Playwright (Raven):
     HTTP 403 / 301 bytes / "Access Denied"
-    NOTE: 301 bytes is SMALLER than curl_cffi (546 bytes), indicating
-    eBay detects headless Chromium at the TLS/connection layer before
-    any JS challenge runs.
 
-  Phase 2 stealth — playwright-stealth (Raven):
-    PENDING — run: python3 experiments/adapters/ebay_playwright_probe.py
-              "rtx 3080" --stealth --limit 10
+  Phase 2b — playwright-stealth (Raven):
+    HTTP 403 / 301 bytes / "Access Denied"
 
-  Current status: all non-stealth approaches blocked.
-  If playwright-stealth also fails, evaluate eBay Browse API.
+  Key observation: bare Playwright and stealth Playwright both return
+  exactly 301 bytes. playwright-stealth patches JS fingerprints, but
+  the byte count is unchanged, confirming the block happens at the
+  TLS/network layer before any JS executes. stealth cannot fix this.
+
+  CONCLUSION: eBay blocks all non-API access at the network layer
+  from this host and network environment. Scraping is not viable.
+
+  RECOMMENDED PATH: eBay Browse API (no scraping, stable, documented).
+    https://developer.ebay.com/develop/apis/restful-apis/browse-api
 
 Usage:
     python3 experiments/adapters/ebay_probe.py
@@ -413,13 +416,12 @@ BROWSER_ASSESSMENT = {
     # -----------------------------------------------------------------------
     "playwright_likely_viable_on_raven": True,
     "playwright_rationale": (
-        "CONFIRMED (2026-05-27): bare headless Playwright on Raven returned "
-        "HTTP 403 / 301 bytes — smaller than curl_cffi (546 bytes). "
-        "eBay detects headless Chromium at the TLS/connection layer before JS runs. "
-        "playwright-stealth patches canvas, WebGL, navigator, and other fingerprint "
-        "vectors and may improve the TLS posture enough to pass. "
-        "This is the current active evaluation step. "
-        "If playwright-stealth also fails, the only clean path is the eBay Browse API."
+        "CONFIRMED (2026-05-27): bare headless Playwright = HTTP 403 / 301 bytes. "
+        "playwright-stealth = HTTP 403 / 301 bytes (identical). "
+        "Both blocked at TLS/network layer before any JS runs. "
+        "stealth patches JS fingerprints but cannot affect the TLS handshake "
+        "at which eBay is making the block decision. "
+        "All scraping paths are exhausted. eBay Browse API is the only viable path."
     ),
     "playwright_complexity_estimate": "medium",
     "playwright_complexity_detail": (
@@ -443,13 +445,12 @@ BROWSER_ASSESSMENT = {
     "anti_bot_risk": "high",
     "anti_bot_detail": (
         "eBay uses PerimeterX (now HUMAN Defense) for bot detection. "
-        "IP reputation, TLS fingerprint (JA3/JA4), JavaScript challenge token, "
-        "browser canvas/WebGL fingerprint, and behavioral timing signals are all checked. "
-        "CONFIRMED: Raven residential IP + curl_cffi Chrome124 TLS impersonation = 403. "
-        "JavaScript challenge execution in a real browser engine is required. "
-        "A bare headless Playwright browser without stealth will likely also be blocked "
-        "via canvas/WebGL/navigator fingerprint checks. "
-        "Even with playwright-stealth, CAPTCHA escalation is possible at higher request rates."
+        "FULLY CONFIRMED (2026-05-27): all scraping approaches exhausted from Raven. "
+        "requests (403/389b), curl_cffi Chrome124 (403/546b), "
+        "bare headless Playwright (403/301b), playwright-stealth (403/301b). "
+        "The identical 301-byte response for bare and stealth Playwright confirms "
+        "the block is at the TLS/network layer, not the JS fingerprint layer. "
+        "No further scraping escalation is practical or recommended."
     ),
     "memory_runtime_impact_on_raven": "moderate",
     "memory_detail": (
@@ -468,24 +469,25 @@ BROWSER_ASSESSMENT = {
         "Avoid installing the full playwright browser suite (firefox, webkit)."
     ),
     "recommendation": (
-        "curl_cffi RULED OUT (2026-05-24). "
-        "Bare headless Playwright RULED OUT (2026-05-27, HTTP 403 / 301 bytes). "
-        "Current active step: playwright-stealth on Raven. "
-        "pip install playwright-stealth, then: "
-        "python3 experiments/adapters/ebay_playwright_probe.py 'rtx 3080' --stealth --limit 10. "
-        "If playwright-stealth succeeds: run 5+ stability tests before sketching an adapter. "
-        "If playwright-stealth also fails: evaluate eBay Browse API "
-        "(https://developer.ebay.com/develop/apis/restful-apis/browse-api) "
-        "as the stable, maintenance-free alternative to scraping."
+        "RECON COMPLETE. All scraping paths exhausted (2026-05-27). "
+        "Recommended path: eBay Browse API. "
+        "The Browse API returns structured JSON search results with title, price, "
+        "condition, URL, location, and image — exactly the fields Listing needs. "
+        "No scraping, no browser, no maintenance burden from anti-bot changes. "
+        "Requires a free eBay developer account and an OAuth app token. "
+        "API reference: https://developer.ebay.com/develop/apis/restful-apis/browse-api "
+        "If an eBay developer account is off the table, accept eBay as out of scope."
     ),
     "verdict_for_vulture": (
-        "eBay should remain EXPERIMENTAL. "
-        "Blocked on Raven residential IP across all tested methods: "
-        "requests (403/389b), curl_cffi (403/546b), bare Playwright (403/301b). "
-        "playwright-stealth is the last scraping option before API. "
-        "If playwright-stealth fails, recommend eBay Browse API over fragile scraping. "
-        "Do not promote to a stable adapter under any circumstances without "
-        "5+ confirmed stable runs and a clear maintenance plan."
+        "RECON CLOSED. eBay scraping is not viable from Raven. "
+        "All four approaches blocked at network layer: "
+        "requests (403/389b), curl_cffi (403/546b), "
+        "bare Playwright (403/301b), playwright-stealth (403/301b). "
+        "Do NOT attempt further scraping escalation. "
+        "Recommended next action: evaluate eBay Browse API adapter. "
+        "API-based adapter would be stable, deterministic, low-maintenance, "
+        "and fully compatible with the Vulture pipeline contract: "
+        "hunt -> adapter -> normalized Listing -> rules -> dedupe -> alert."
     ),
 }
 
