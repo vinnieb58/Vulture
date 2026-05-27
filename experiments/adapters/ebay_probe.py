@@ -17,25 +17,27 @@ It does NOT:
   - modify Discord behavior
   - connect to any Vulture runtime
 
-Confirmed findings (2026-05-23 / 2026-05-24):
-  Phase 1 — plain requests + Chrome UA:
+Confirmed findings (all from Raven residential IP unless noted):
+  Phase 1  — requests + Chrome UA:
     Cloud agent (datacenter IP): HTTP 403 / 535 bytes / "Access Denied"
     Raven (residential IP):      HTTP 403 / 389 bytes / "Access Denied"
-    → Both blocked. TLS fingerprint mismatch suspected.
 
   Phase 1b — curl_cffi Chrome124 TLS impersonation:
     Cloud agent (datacenter IP): HTTP 403 / 546 bytes / "Access Denied"
     Raven (residential IP):      HTTP 403 / 546 bytes / "Access Denied"
-    → Both blocked even with correct TLS fingerprint from residential IP.
 
-  Conclusion: eBay's HUMAN Defense requires more than TLS impersonation.
-  It almost certainly issues a JavaScript challenge that must be computed
-  and returned by a real browser engine before the SRP is served.
-  Non-browser HTTP clients cannot pass this challenge regardless of IP
-  or TLS fingerprint.
+  Phase 2  — bare headless Playwright (Raven, 2026-05-27):
+    HTTP 403 / 301 bytes / "Access Denied"
+    NOTE: 301 bytes is SMALLER than curl_cffi (546 bytes), indicating
+    eBay detects headless Chromium at the TLS/connection layer before
+    any JS challenge runs.
 
-  Next step: ebay_playwright_probe.py with stealth Chromium config.
-  See experiments/adapters/ebay_playwright_probe.py.
+  Phase 2 stealth — playwright-stealth (Raven):
+    PENDING — run: python3 experiments/adapters/ebay_playwright_probe.py
+              "rtx 3080" --stealth --limit 10
+
+  Current status: all non-stealth approaches blocked.
+  If playwright-stealth also fails, evaluate eBay Browse API.
 
 Usage:
     python3 experiments/adapters/ebay_probe.py
@@ -411,15 +413,13 @@ BROWSER_ASSESSMENT = {
     # -----------------------------------------------------------------------
     "playwright_likely_viable_on_raven": True,
     "playwright_rationale": (
-        "CONFIRMED (2026-05-24): Raven residential IP + curl_cffi Chrome124 TLS "
-        "impersonation returned HTTP 403 / 546 bytes. "
-        "All non-browser HTTP approaches are blocked. "
-        "eBay's HUMAN Defense issues a JavaScript challenge that requires a real browser "
-        "engine to execute and return a token — no HTTP client can fake this. "
-        "Playwright running real Chromium is the only remaining non-API path. "
-        "However, bare headless Playwright will also be detected via canvas/WebGL/navigator "
-        "fingerprint checks. A stealth plugin (playwright-stealth or equivalent) is required. "
-        "See ebay_playwright_probe.py for the next evaluation step."
+        "CONFIRMED (2026-05-27): bare headless Playwright on Raven returned "
+        "HTTP 403 / 301 bytes — smaller than curl_cffi (546 bytes). "
+        "eBay detects headless Chromium at the TLS/connection layer before JS runs. "
+        "playwright-stealth patches canvas, WebGL, navigator, and other fingerprint "
+        "vectors and may improve the TLS posture enough to pass. "
+        "This is the current active evaluation step. "
+        "If playwright-stealth also fails, the only clean path is the eBay Browse API."
     ),
     "playwright_complexity_estimate": "medium",
     "playwright_complexity_detail": (
@@ -468,26 +468,24 @@ BROWSER_ASSESSMENT = {
         "Avoid installing the full playwright browser suite (firefox, webkit)."
     ),
     "recommendation": (
-        "curl_cffi is RULED OUT (2026-05-24 Raven residential IP test confirmed). "
-        "The only remaining non-API path is Playwright with a stealth Chromium config. "
-        "Next step: run ebay_playwright_probe.py from Raven. "
-        "Install Chromium once: `playwright install chromium` (~300 MB). "
-        "Evaluate whether bare headless Playwright returns HTTP 200 with listing cards. "
-        "If bare Playwright is also blocked, install playwright-stealth and retry. "
-        "Do NOT wire Playwright into the production hunt dispatch until at least "
-        "5 stable runs confirm consistent listings from Raven. "
-        "If Playwright succeeds, implement it as a separate optional code path "
-        "behind an experimental flag, not as the default execution path."
+        "curl_cffi RULED OUT (2026-05-24). "
+        "Bare headless Playwright RULED OUT (2026-05-27, HTTP 403 / 301 bytes). "
+        "Current active step: playwright-stealth on Raven. "
+        "pip install playwright-stealth, then: "
+        "python3 experiments/adapters/ebay_playwright_probe.py 'rtx 3080' --stealth --limit 10. "
+        "If playwright-stealth succeeds: run 5+ stability tests before sketching an adapter. "
+        "If playwright-stealth also fails: evaluate eBay Browse API "
+        "(https://developer.ebay.com/develop/apis/restful-apis/browse-api) "
+        "as the stable, maintenance-free alternative to scraping."
     ),
     "verdict_for_vulture": (
         "eBay should remain EXPERIMENTAL. "
-        "CONFIRMED blocked on Raven residential IP with both plain requests and "
-        "curl_cffi Chrome TLS impersonation. "
-        "Browser JavaScript execution is required — Playwright is the only viable path. "
-        "Maintenance burden is high: stealth config breaks every 1-3 months. "
-        "Do not promote to a stable adapter. "
-        "The pipeline integrity (hunt -> adapter -> Listing -> rules -> alert) "
-        "can be preserved with a Playwright adapter, but it comes with ongoing cost."
+        "Blocked on Raven residential IP across all tested methods: "
+        "requests (403/389b), curl_cffi (403/546b), bare Playwright (403/301b). "
+        "playwright-stealth is the last scraping option before API. "
+        "If playwright-stealth fails, recommend eBay Browse API over fragile scraping. "
+        "Do not promote to a stable adapter under any circumstances without "
+        "5+ confirmed stable runs and a clear maintenance plan."
     ),
 }
 

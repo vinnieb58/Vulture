@@ -6,34 +6,40 @@ This script is the Phase 2 escalation after plain requests AND curl_cffi
 both failed on Raven (2026-05-24). Browser JavaScript execution is required
 to pass eBay's HUMAN Defense challenge.
 
-IMPORTANT — READ BEFORE RUNNING:
+Confirmed findings so far (all from Raven residential IP):
+  Phase 1  — requests + Chrome UA:         HTTP 403 / 389 bytes
+  Phase 1b — curl_cffi Chrome124:          HTTP 403 / 546 bytes
+  Phase 2  — bare headless Playwright:     HTTP 403 / 301 bytes  (2026-05-27)
 
-  1. Bare headless Playwright will likely ALSO be blocked by eBay's
-     canvas/WebGL/navigator fingerprint checks. This probe starts with
-     basic anti-detection measures but does not install playwright-stealth.
-     The goal is to determine WHETHER Playwright can reach the SRP at all,
-     and which specific fingerprint checks fire.
+The 301-byte body from bare headless Playwright is SMALLER than curl_cffi,
+which suggests eBay is detecting headless Chromium at the TLS/connection
+layer before any JS challenge runs — likely via the headless Chromium TLS
+fingerprint differing from a real Chrome binary. playwright-stealth patches
+navigator, canvas, WebGL, and other JS properties AND can improve the TLS
+posture via Chrome launch args.
 
-  2. A stealth plugin is the probable next step if bare headless is blocked.
-     See "Next steps if blocked" section at the end of the output.
+This probe supports:
+  bare mode (default)   — baseline measurement
+  stealth mode          — with playwright-stealth applied (--stealth flag)
 
-  3. This probe DOES NOT:
-     - write to SQLite
-     - send Discord alerts
-     - modify hunt execution or Discord behavior
-     - represent a production adapter
+IMPORTANT — this probe DOES NOT:
+  - write to SQLite
+  - send Discord alerts
+  - modify hunt execution or Discord behavior
+  - represent a production adapter
 
-  4. One Chromium instance uses 150-500 MB RAM. Raven (~12 GB RAM) can
-     handle this. Close the browser promptly after the run.
+One Chromium instance uses 150-500 MB RAM. Raven (~12 GB RAM) can handle
+this. The browser is closed promptly after each run.
 
 Prerequisites on Raven:
-    playwright install chromium   # one-time, ~300 MB
+    playwright install chromium          # one-time, ~300 MB (already done)
+    pip install playwright-stealth       # needed for --stealth mode (~small)
 
 Usage:
-    python3 experiments/adapters/ebay_playwright_probe.py
     python3 experiments/adapters/ebay_playwright_probe.py "rtx 3080"
     python3 experiments/adapters/ebay_playwright_probe.py "rtx 3080" --limit 10
-    python3 experiments/adapters/ebay_playwright_probe.py "rtx 3080" --slow   # slower, more human-like
+    python3 experiments/adapters/ebay_playwright_probe.py "rtx 3080" --stealth --limit 10
+    python3 experiments/adapters/ebay_playwright_probe.py "rtx 3080" --stealth --slow --limit 10
 """
 
 import re
@@ -207,12 +213,28 @@ def extract_candidates(html: str, limit: int = 20) -> list[CandidateListing]:
 # Playwright fetch
 # ---------------------------------------------------------------------------
 
-def run_playwright_probe(query: str, limit: int = 20, slow: bool = False) -> None:
+def run_playwright_probe(query: str, limit: int = 20, slow: bool = False, stealth: bool = False) -> None:
     url = build_search_url(query)
 
-    print_section("eBay Playwright Probe — Phase 2 Recon")
+    stealth_available = False
+    stealth_fn = None
+    if stealth:
+        try:
+            from playwright_stealth import stealth_sync  # type: ignore[import]
+            stealth_fn = stealth_sync
+            stealth_available = True
+        except ImportError:
+            print()
+            print("ERROR: --stealth requires playwright-stealth.")
+            print("  Install: pip install playwright-stealth")
+            print()
+            sys.exit(1)
+
+    mode_label = "stealth (playwright-stealth)" if (stealth and stealth_available) else "bare headless"
+    print_section(f"eBay Playwright Probe — Phase 2 Recon [{mode_label}]")
     print(f"  Query      : {query!r}")
     print(f"  Limit      : {limit}")
+    print(f"  Stealth    : {stealth and stealth_available}")
     print(f"  Slow mode  : {slow}")
     print(f"  Headless   : True (required for Raven server)")
     print(f"  Viewport   : {VIEWPORT['width']}x{VIEWPORT['height']}")
@@ -232,6 +254,10 @@ def run_playwright_probe(query: str, limit: int = 20, slow: bool = False) -> Non
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                # Suppress automation flags that eBay detects
+                "--disable-automation",
+                "--disable-infobars",
+                "--disable-extensions",
             ],
         )
         context = browser.new_context(
@@ -239,19 +265,23 @@ def run_playwright_probe(query: str, limit: int = 20, slow: bool = False) -> Non
             user_agent=USER_AGENT,
             locale="en-US",
             timezone_id="America/Chicago",
-            # Opt out of WebRTC IP leak
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
             },
         )
 
-        # Mask navigator.webdriver before any page script runs
+        # Always mask navigator.webdriver at the context level
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
         page = context.new_page()
+
+        # Apply playwright-stealth if requested — patches canvas, WebGL,
+        # navigator plugins, permissions, and other fingerprint vectors
+        if stealth_fn:
+            stealth_fn(page)
 
         try:
             response = page.goto(
@@ -261,7 +291,7 @@ def run_playwright_probe(query: str, limit: int = 20, slow: bool = False) -> Non
             )
             status_code = response.status if response else None
 
-            # Give the page time to execute the HUMAN Defense challenge
+            # Give the page time to execute the HUMAN Defense JS challenge
             wait_ms = 6_000 if slow else 3_500
             page.wait_for_timeout(wait_ms)
 
@@ -329,51 +359,69 @@ def run_playwright_probe(query: str, limit: int = 20, slow: bool = False) -> Non
             for k, v in d.items():
                 print(f"    {k:10s}: {v}")
 
-    print_section("Phase 2 Verdict")
+    mode_label = "stealth" if stealth else "bare"
+    print_section(f"Phase 2 Verdict [{mode_label}]")
     if challenge["challenge_detected"]:
-        print("  BLOCKED — challenge signals detected in Playwright-rendered HTML.")
-        print()
-        print("  Bare headless Playwright is NOT sufficient.")
-        print("  The next step is playwright-stealth to mask canvas/WebGL/navigator")
-        print("  fingerprints. Install and retry:")
-        print()
-        print("    pip install playwright-stealth")
-        print()
-        print("  Then add to this probe before page.goto():")
-        print("    from playwright_stealth import stealth_sync")
-        print("    stealth_sync(page)")
+        if not stealth:
+            print("  BLOCKED — challenge signals in bare headless Playwright HTML.")
+            print()
+            print("  Confirmed result (2026-05-27): bare headless = HTTP 403 / 301 bytes.")
+            print("  The 301-byte body is smaller than curl_cffi (546 bytes), suggesting")
+            print("  eBay detects headless Chromium at TLS/connection level, not just JS.")
+            print()
+            print("  Next step: run with --stealth flag.")
+            print("  Install playwright-stealth first (small, no browser binary):")
+            print()
+            print("    pip install playwright-stealth")
+            print("    python3 experiments/adapters/ebay_playwright_probe.py 'rtx 3080' --stealth --limit 10")
+        else:
+            print("  BLOCKED — challenge signals in stealth Playwright HTML.")
+            print()
+            print("  playwright-stealth did not bypass the challenge.")
+            print("  eBay's HUMAN Defense is blocking at a layer stealth cannot patch.")
+            print()
+            print("  Remaining options:")
+            print("    1. eBay API (Finding API / Browse API) — legitimate, stable,")
+            print("       no scraping required. Requires eBay developer account.")
+            print("       https://developer.ebay.com/develop/apis/restful-apis/browse-api")
+            print("    2. Proxy rotation — residential proxies may help but add ongoing")
+            print("       cost and complexity. Not recommended for Raven's use case.")
+            print("    3. Accept eBay as out of scope for now.")
         playwright_viable = False
     elif not cards_found:
         print("  UNCERTAIN — HTTP 200 but no listing cards found.")
         print("  Page may have loaded a different layout or JS rendering is incomplete.")
-        print("  Try --slow to give JS more time, or inspect the HTML manually.")
+        print("  Try --slow to give JS more time.")
         playwright_viable = False
     elif candidates:
-        print(f"  SUCCESS — {len(candidates)} candidates extracted with bare Playwright.")
+        print(f"  SUCCESS — {len(candidates)} candidates extracted ({mode_label} mode).")
         print("  A Playwright-based adapter may be viable.")
-        print("  Next: test over multiple sessions and search terms for stability.")
+        print("  Run --slow and 2-3 more search terms to confirm stability.")
         playwright_viable = True
     else:
         print("  PARTIAL — Cards found but no candidates normalized.")
-        print("  Possible selector drift. Inspect page HTML.")
+        print("  Possible selector drift. Inspect the HTML.")
         playwright_viable = False
 
     print_section("Summary")
-    print(f"  bare_playwright_viable   : {playwright_viable}")
+    print(f"  mode                     : {mode_label}")
+    print(f"  playwright_viable        : {playwright_viable}")
     print(f"  should_stay_experimental : True")
     print()
-    if not playwright_viable:
-        print("  NEXT STEPS:")
-        print("    1. Install playwright-stealth:  pip install playwright-stealth")
-        print("    2. Re-run with stealth enabled (edit probe, add stealth_sync call)")
-        print("    3. If stealth also fails, eBay requires API access or proxy rotation")
-        print("    4. Do NOT promote eBay to a stable adapter without 5+ stable runs")
+    if not playwright_viable and not stealth:
+        print("  NEXT STEP:")
+        print("    pip install playwright-stealth")
+        print("    python3 experiments/adapters/ebay_playwright_probe.py 'rtx 3080' --stealth --limit 10")
+    elif not playwright_viable and stealth:
+        print("  NEXT STEP:")
+        print("    Evaluate eBay Browse API as the stable path.")
+        print("    https://developer.ebay.com/develop/apis/restful-apis/browse-api")
+        print("    If API is off the table: accept eBay as out of scope.")
     else:
         print("  NEXT STEPS:")
-        print("    1. Run --slow mode and with 2-3 more search terms to confirm stability")
-        print("    2. Test over multiple days / different times of day")
-        print("    3. If stable, sketch a thin Playwright adapter behind experimental flag")
-        print("    4. Monitor for CAPTCHA escalation at higher rates")
+        print("    1. Run --slow and 2-3 more search terms to confirm stability")
+        print("    2. Test over multiple days to check for CAPTCHA escalation")
+        print("    3. If stable, sketch adapter behind experimental flag")
     print()
 
 
@@ -385,7 +433,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Vulture 2.0 eBay Playwright recon probe — Phase 2 (experimental, isolated). "
-            "Requires: playwright install chromium"
+            "Requires: playwright install chromium  (already done on Raven). "
+            "For --stealth: pip install playwright-stealth"
         )
     )
     parser.add_argument(
@@ -401,12 +450,21 @@ def main() -> None:
         help="Max candidates to extract (default: 20)",
     )
     parser.add_argument(
+        "--stealth",
+        action="store_true",
+        help=(
+            "Apply playwright-stealth before page.goto(). "
+            "Patches canvas, WebGL, navigator fingerprints. "
+            "Requires: pip install playwright-stealth"
+        ),
+    )
+    parser.add_argument(
         "--slow",
         action="store_true",
-        help="Wait 6s after page load instead of 3.5s — more human-like, better for slow connections",
+        help="Wait 6s after page load instead of 3.5s — more human-like",
     )
     args = parser.parse_args()
-    run_playwright_probe(query=args.query, limit=args.limit, slow=args.slow)
+    run_playwright_probe(query=args.query, limit=args.limit, slow=args.slow, stealth=args.stealth)
 
 
 if __name__ == "__main__":
