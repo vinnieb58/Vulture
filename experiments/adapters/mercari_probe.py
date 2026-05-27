@@ -16,6 +16,8 @@ Probe strategy (progressive):
     Strategy A — plain requests + BeautifulSoup
     Strategy B — browser-like session with enriched headers + cookies
     Strategy C — lightweight Playwright check (isolated; not wired to production)
+    Strategy D — requests-only direct GraphQL call to /v1/api
+                 Uses CSRF token from /v1/initialize to bypass Socure JS gating.
 
 Viability questions answered:
     1. Can results be fetched reliably with plain requests?
@@ -420,6 +422,221 @@ def _strategy_b(query: str) -> tuple:
         return None, str(exc), None, url, None
 
 
+def _strategy_d_direct_api(query: str) -> dict:
+    """
+    Strategy D: requests-only direct GraphQL call to www.mercari.com/v1/api.
+
+    Hypothesis: Socure's bot detection is JavaScript-only. By making plain
+    HTTP requests we never execute Socure's JS, so the fingerprint check
+    never runs.  We still need Mercari's CSRF token and session cookies,
+    which /v1/initialize hands out freely to any browser-like HTTP client.
+
+    Steps:
+        1. Warm-up GET to mercari.com homepage (establishes session + CF cookie).
+        2. GET /v1/initialize → extract csrf token and accessToken.
+        3. GET /v1/api with operationName + variables + extensions as query
+           params (matches the intercepted URL shape from Playwright logs).
+        4. POST /v1/api with JSON body (alternative GraphQL form).
+        5. Walk any 200 JSON response for listing-shaped objects.
+    """
+    API_BASE = "https://www.mercari.com/v1/api"
+    INIT_URL = "https://www.mercari.com/v1/initialize"
+    # Persisted query hash observed in Playwright XHR intercept
+    PERSISTED_HASH = "bc1eb4c4c2bb85e0e19b07c807570de0f5386c0fe770a43194c6e61b7af8c111"
+
+    result: dict = {
+        "csrf": None,
+        "access_token": None,
+        "is_bot": None,
+        "cookie_names": [],
+        "initialize_status": None,
+        "get_status": None,
+        "get_content_type": None,
+        "get_size": 0,
+        "get_top_keys": None,
+        "get_candidates": 0,
+        "post_status": None,
+        "post_content_type": None,
+        "post_size": 0,
+        "post_top_keys": None,
+        "post_candidates": 0,
+        "raw_candidates": [],
+        "extraction_source": None,
+        "error": None,
+    }
+
+    # --- Session setup (warm-up mirrors Strategy B) -------------------------
+    session = requests.Session()
+    try:
+        session.get(
+            "https://www.mercari.com/",
+            headers=HEADERS_BROWSER,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+        )
+        time.sleep(1.0)
+    except requests.exceptions.RequestException:
+        pass
+
+    result["cookie_names"] = [c.name for c in session.cookies]
+
+    # --- Step 1: /v1/initialize — get CSRF token ----------------------------
+    init_headers = dict(HEADERS_BROWSER)
+    init_headers["Accept"] = "application/json, text/plain, */*"
+    init_headers["Referer"] = "https://www.mercari.com/"
+    try:
+        init_resp = session.get(INIT_URL, headers=init_headers, timeout=REQUEST_TIMEOUT)
+        result["initialize_status"] = init_resp.status_code
+        if init_resp.status_code == 200:
+            try:
+                init_json = init_resp.json()
+                result["csrf"] = init_json.get("csrf")
+                result["is_bot"] = init_json.get("isBot")
+                token = init_json.get("accessToken") or ""
+                if len(str(token)) > 10:
+                    result["access_token"] = token
+            except (json.JSONDecodeError, ValueError):
+                pass
+    except requests.exceptions.RequestException as exc:
+        result["error"] = f"/v1/initialize request failed: {exc}"
+        return result
+
+    # Update cookie list after initialize
+    result["cookie_names"] = [c.name for c in session.cookies]
+
+    # --- Build GraphQL variables (from observed intercepted request) ---------
+    criteria = {
+        "offset": 0,
+        "soldItemsOffset": 0,
+        "promotedItemsOffset": 0,
+        "sortBy": 0,
+        "length": 100,
+        "query": query,
+        "categoryIds": None,
+        "brandIds": None,
+        "itemConditions": [],
+        "shippingPayerIds": [],
+        "sizeGroupIds": [],
+        "sizeIds": [],
+        "itemStatuses": [],
+        "customFacets": [],
+        "facetTypes": [
+            "category_ids_hierarchical", "brand_ids", "size_ids_hierarchical",
+            "authenticity", "condition_ids", "item_status", "shipping_payer_ids",
+            "meetup", "country_sources", "deals", "price",
+        ],
+        "authenticities": [],
+        "deliveryType": "all",
+        "state": None,
+        "locale": None,
+        "shopPageUri": None,
+        "nationalShippingFeeMin": None,
+        "nationalShippingFeeMax": None,
+        "withCouponOnly": None,
+        "excludeShippingTypes": None,
+        "savedSearchId": None,
+        "meetupDistanceLimit": None,
+        "countrySources": [],
+        "withDealsOnly": False,
+        "showDescription": False,
+    }
+
+    feed_deals_criteria = dict(criteria)
+    feed_deals_criteria.update({
+        "sortBy": 9,
+        "length": 20,
+        "itemStatuses": [1, 2, 3],
+        "withDealsOnly": True,
+    })
+
+    variables = {
+        "withFeedLikes": False,
+        "withFeedRecentlyViewed": False,
+        "withFeedDeals": True,
+        "feedDealsCriteria": feed_deals_criteria,
+        "criteria": criteria,
+    }
+
+    extensions = {
+        "persistedQuery": {
+            "version": 1,
+            "sha256Hash": PERSISTED_HASH,
+        }
+    }
+
+    # --- Shared API headers --------------------------------------------------
+    api_headers = dict(HEADERS_BROWSER)
+    api_headers["Accept"] = "application/json"
+    api_headers["Origin"] = "https://www.mercari.com"
+    api_headers["Referer"] = f"https://www.mercari.com/search/?keyword={quote_plus(query)}"
+    if result["csrf"]:
+        api_headers["x-csrf-token"] = result["csrf"]
+    if result["access_token"]:
+        api_headers["Authorization"] = f"Bearer {result['access_token']}"
+
+    def _parse_response(resp: requests.Response, label: str) -> list[dict]:
+        """Record metadata and return any listing-shaped objects from resp."""
+        status = resp.status_code
+        ct = resp.headers.get("content-type", resp.headers.get("Content-Type", ""))
+        text = resp.text
+        size = len(text)
+        result[f"{label}_status"] = status
+        result[f"{label}_content_type"] = ct
+        result[f"{label}_size"] = size
+        candidates: list[dict] = []
+        if "json" in ct.lower() and status == 200:
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    result[f"{label}_top_keys"] = list(body.keys())[:14]
+                elif isinstance(body, list):
+                    result[f"{label}_top_keys"] = f"[array len={len(body)}]"
+                candidates = _walk_for_listings(body)
+                result[f"{label}_candidates"] = len(candidates)
+            except (json.JSONDecodeError, ValueError) as exc:
+                result[f"{label}_json_error"] = str(exc)
+        return candidates
+
+    # --- Step 2: GET /v1/api (query-param form matching intercepted URL) -----
+    try:
+        get_params = {
+            "operationName": "searchFacetQuery",
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "extensions": json.dumps(extensions, separators=(",", ":")),
+        }
+        get_resp = session.get(
+            API_BASE, params=get_params, headers=api_headers, timeout=REQUEST_TIMEOUT
+        )
+        cands = _parse_response(get_resp, "get")
+        if cands:
+            result["raw_candidates"] = cands
+            result["extraction_source"] = "get"
+    except requests.exceptions.RequestException as exc:
+        result["get_error"] = str(exc)
+
+    # --- Step 3: POST /v1/api (JSON body form) — only if GET failed ---------
+    if not result["raw_candidates"]:
+        try:
+            post_headers = dict(api_headers)
+            post_headers["Content-Type"] = "application/json"
+            post_body = {
+                "operationName": "searchFacetQuery",
+                "variables": variables,
+                "extensions": extensions,
+            }
+            post_resp = session.post(
+                API_BASE, json=post_body, headers=post_headers, timeout=REQUEST_TIMEOUT
+            )
+            cands = _parse_response(post_resp, "post")
+            if cands:
+                result["raw_candidates"] = cands
+                result["extraction_source"] = "post"
+        except requests.exceptions.RequestException as exc:
+            result["post_error"] = str(exc)
+
+    return result
+
+
 def _strategy_c_playwright(query: str) -> dict:
     """
     Strategy C: headless Playwright probe with broadened XHR interception.
@@ -808,6 +1025,76 @@ def probe(query: str) -> None:
         _log("INFO", "DOM extraction skipped (no HTML)")
 
     # -----------------------------------------------------------------------
+    # Strategy D — direct requests GraphQL call (bypass Socure JS)
+    # -----------------------------------------------------------------------
+    print(f"\n{'─' * 60}")
+    _log("INFO", "Strategy D: direct requests GraphQL — www.mercari.com/v1/api")
+    print(f"{'─' * 60}")
+    _log("INFO", "Hypothesis: Socure fingerprints only JS execution — plain HTTP bypasses it")
+
+    d = _strategy_d_direct_api(query)
+
+    _log("INFO", f"/v1/initialize HTTP {d.get('initialize_status')}")
+    _log("INFO", f"CSRF token obtained: {'YES' if d.get('csrf') else 'NO'}")
+    _log("INFO", f"accessToken obtained: {'YES (len=%d)' % len(str(d['access_token'])) if d.get('access_token') else 'NO'}")
+    _log("INFO", f"isBot from /v1/initialize: {d.get('is_bot')}")
+    _log("INFO", f"Session cookie names: {d.get('cookie_names', [])}")
+
+    if d.get("error"):
+        _log("WARN", f"Strategy D setup error: {d['error']}")
+    else:
+        # GET attempt
+        get_st = d.get("get_status")
+        get_ct = d.get("get_content_type", "")
+        get_sz = d.get("get_size", 0)
+        get_nc = d.get("get_candidates", 0)
+        get_keys = d.get("get_top_keys")
+        if get_st:
+            _log("INFO", f"GET /v1/api: HTTP {get_st}  {get_sz:,} bytes  ct={get_ct}")
+            if get_keys:
+                _log("INFO", f"GET /v1/api JSON top-level keys: {get_keys}")
+            if get_nc:
+                _log("INFO", f"Listing-shaped objects from GET: {get_nc}")
+            if get_st == 403:
+                _log("WARN", "GET /v1/api 403 — CSRF + session cookies not sufficient for GET form")
+            if d.get("get_json_error"):
+                _log("WARN", f"GET JSON parse error: {d['get_json_error']}")
+
+        # POST attempt
+        post_st = d.get("post_status")
+        post_ct = d.get("post_content_type", "")
+        post_sz = d.get("post_size", 0)
+        post_nc = d.get("post_candidates", 0)
+        post_keys = d.get("post_top_keys")
+        if post_st:
+            _log("INFO", f"POST /v1/api: HTTP {post_st}  {post_sz:,} bytes  ct={post_ct}")
+            if post_keys:
+                _log("INFO", f"POST /v1/api JSON top-level keys: {post_keys}")
+            if post_nc:
+                _log("INFO", f"Listing-shaped objects from POST: {post_nc}")
+            if post_st == 403:
+                _log("WARN", "POST /v1/api 403 — CSRF + session cookies not sufficient for POST form")
+            if d.get("post_json_error"):
+                _log("WARN", f"POST JSON parse error: {d['post_json_error']}")
+
+        # Verdict
+        d_raw = d.get("raw_candidates", [])
+        if d_raw:
+            _log("INFO", f"Strategy D SUCCESS — extracted {len(d_raw)} listing candidates (source: {d.get('extraction_source')})")
+            if not json_candidates:
+                json_candidates = d_raw
+        else:
+            both_403 = (get_st == 403 or not get_st) and (post_st == 403 or not post_st)
+            if both_403:
+                _log("WARN", "Strategy D BLOCKED — /v1/api returns 403 for both GET and POST")
+                _log("WARN", "Socure gates the GraphQL endpoint server-side, not just via JS")
+                _log("INFO", f"CSRF present: {'YES' if d.get('csrf') else 'NO'}")
+                _log("INFO", f"accessToken present: {'YES' if d.get('access_token') else 'NO'}")
+                _log("INFO", f"Cookie names: {d.get('cookie_names', [])}")
+            else:
+                _log("WARN", "Strategy D: no listing candidates extracted")
+
+    # -----------------------------------------------------------------------
     # Strategy C — Playwright with broadened XHR interception (isolated)
     # -----------------------------------------------------------------------
     print(f"\n{'─' * 60}")
@@ -815,6 +1102,7 @@ def probe(query: str) -> None:
     print(f"{'─' * 60}")
     _log("INFO", f"XHR filter patterns: {XHR_CANDIDATE_PATTERNS}")
 
+    # Re-evaluate — Strategy D may have found candidates
     requests_got_listings = bool(json_candidates or dom_candidates)
     if requests_got_listings and body_word_count >= 150:
         _log("INFO", "Requests strategies yielded candidates — skipping Playwright")
@@ -971,37 +1259,57 @@ def probe(query: str) -> None:
     # Infer viability from probe results
     requests_ok = status in (200, 206) if status else False
     got_candidates = bool(all_raw)
-    # Combine anti-bot signals gathered across both strategies
     antibot_signals_a = _detect_antibot(html_a or "", headers_a or {}) if status_a else []
     antibot_signals_b = _detect_antibot(html_b or "", headers_b or {}) if status_b else []
     antibot_present = bool(antibot_signals_a or antibot_signals_b)
+
+    d_got = bool(d.get("raw_candidates"))
+    d_blocked = (
+        (d.get("get_status") == 403 or not d.get("get_status"))
+        and (d.get("post_status") == 403 or not d.get("post_status"))
+    )
     playwright_needed = (
-        not requests_ok
-        or (body_word_count < 150 and not got_candidates)
-        or playwright_result.get("candidate_count", 0) > 0
+        not got_candidates
+        and not d_got
+        and playwright_result.get("candidate_count", 0) == 0
     )
 
-    _log("INFO", f"requests-only fetch works:         {'YES' if requests_ok else 'NO'}")
-    _log("INFO", f"Content appears server-rendered:   {'YES' if (requests_ok and body_word_count >= 150) else 'UNLIKELY'}")
-    _log("INFO", f"Extraction is realistic:           {'YES' if got_candidates else 'NO — no candidates found'}")
-    _log("INFO", f"Anti-bot / blocking detected:      {'YES' if antibot_present else 'NOT DETECTED'}")
-    _log("INFO", f"Playwright appears required:       {'POSSIBLY' if playwright_needed else 'NO'}")
+    _log("INFO", f"requests-only fetch works (search page):  {'YES' if requests_ok else 'NO'}")
+    _log("INFO", f"Content appears server-rendered:          {'YES' if (requests_ok and body_word_count >= 150) else 'NO — JS shell'}")
+    _log("INFO", f"Strategy D (direct GraphQL) succeeded:    {'YES' if d_got else 'NO'}")
+    _log("INFO", f"Strategy D /v1/api blocked (403):         {'YES' if d_blocked else 'NO or not tried'}")
+    _log("INFO", f"Candidates extracted by any strategy:     {'YES' if got_candidates else 'NO'}")
+    _log("INFO", f"Anti-bot / blocking detected:             {'YES' if antibot_present else 'NOT DETECTED'}")
+    _log("INFO", f"Playwright appears required:              {'YES' if playwright_needed else 'NO'}")
 
-    if got_candidates and requests_ok and not antibot_present:
+    if d_got and not d_blocked:
+        classification = "EXPERIMENTAL CANDIDATE (requests-only GraphQL)"
+        next_step = (
+            "Build adapters/mercari.py using Strategy D pattern: "
+            "warm-up → /v1/initialize (CSRF) → POST /v1/api GraphQL"
+        )
+    elif got_candidates and requests_ok and not antibot_present:
         classification = "STABLE CANDIDATE"
-        next_step = "Promote to adapters/mercari.py with __NEXT_DATA__ or API extraction"
+        next_step = "Promote to adapters/mercari.py"
     elif got_candidates and requests_ok:
         classification = "EXPERIMENTAL ONLY"
-        next_step = "Build experimental adapter; monitor for block rate over time"
+        next_step = "Build experimental adapter; monitor block rate over time"
     elif playwright_result.get("candidate_count", 0) > 0:
         classification = "EXPERIMENTAL ONLY (requires Playwright)"
         next_step = "Implement Playwright-backed adapter under experiments/"
+    elif d_blocked:
+        classification = "NOT VIABLE WITHOUT ANTI-BOT TOOLING"
+        next_step = (
+            "Socure gates /v1/api server-side even for plain requests. "
+            "Would require Playwright stealth (playwright-stealth / rebrowser) "
+            "or a Mercari account session. Consider abandoning for now."
+        )
     else:
         classification = "INVESTIGATE FURTHER"
-        next_step = "Review raw HTML/API responses manually; consider residential proxy"
+        next_step = "Review raw responses manually; re-run from Raven"
 
-    _log("INFO", f"Recommended classification:        {classification}")
-    _log("INFO", f"Recommended next step:             {next_step}")
+    _log("INFO", f"Recommended classification: {classification}")
+    _log("INFO", f"Recommended next step:      {next_step}")
 
     print()
     print(separator)
