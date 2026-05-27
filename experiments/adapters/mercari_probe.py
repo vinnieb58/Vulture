@@ -207,6 +207,43 @@ def _extract_next_data(soup: BeautifulSoup) -> dict | None:
     return None
 
 
+def _strip_xssi(text: str) -> str:
+    """
+    Strip Mercari's XSSI protection prefix before JSON parsing.
+
+    Mercari prepends )]}'\\n to some API responses to prevent cross-site
+    script inclusion.  json.loads fails on position 1 without this strip.
+    """
+    for prefix in (")]}'\n", ")]}'\r\n", ")]}'"):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    # Fallback: if first char is ) or ] skip to the first newline
+    if text and text[0] in ")]}":
+        nl = text.find("\n")
+        if 0 < nl < 20:
+            return text[nl + 1:]
+    return text
+
+
+def _extract_mercari_search_items(body: dict) -> list[dict]:
+    """
+    Navigate Mercari's searchFacetQuery response directly to the items list.
+
+    Expected shape:
+        { "data": { "search": { "items": [...] } } }
+
+    Each item has: id (str), name (str), price (int), thumbnails ([str]),
+    itemCondition, seller.region.  Returns the raw list for _normalize().
+    """
+    try:
+        items = body["data"]["search"]["items"]
+        if isinstance(items, list):
+            return items
+    except (KeyError, TypeError):
+        pass
+    return []
+
+
 def _extract_inline_json_blobs(soup: BeautifulSoup) -> list[dict]:
     """Return parsed JSON from all application/json script tags."""
     blobs = []
@@ -575,33 +612,54 @@ def _strategy_d_direct_api(query: str) -> dict:
         api_headers["Authorization"] = f"Bearer {result['access_token']}"
 
     def _parse_response(resp: requests.Response, label: str) -> list[dict]:
-        """Record metadata and return any listing-shaped objects from resp."""
+        """Record metadata and return listing candidates from resp."""
         status = resp.status_code
         ct = resp.headers.get("content-type", resp.headers.get("Content-Type", ""))
-        text = resp.text
-        size = len(text)
+        # Decode bytes explicitly so we can strip XSSI before parsing
+        try:
+            raw_text = resp.content.decode("utf-8", errors="replace")
+        except Exception:
+            raw_text = resp.text
+        size = len(raw_text)
         result[f"{label}_status"] = status
         result[f"{label}_content_type"] = ct
         result[f"{label}_size"] = size
         candidates: list[dict] = []
         if "json" in ct.lower() and status == 200:
             try:
-                body = resp.json()
+                clean = _strip_xssi(raw_text)
+                body = json.loads(clean)
                 if isinstance(body, dict):
                     result[f"{label}_top_keys"] = list(body.keys())[:14]
                 elif isinstance(body, list):
                     result[f"{label}_top_keys"] = f"[array len={len(body)}]"
-                candidates = _walk_for_listings(body)
+                # Try the specific Mercari items path first; fall back to generic walk
+                candidates = _extract_mercari_search_items(body) if isinstance(body, dict) else []
+                if not candidates:
+                    candidates = _walk_for_listings(body)
                 result[f"{label}_candidates"] = len(candidates)
+                result[f"{label}_sample_titles"] = [
+                    str(c.get("name") or c.get("title") or "")[:60]
+                    for c in candidates[:5]
+                ]
             except (json.JSONDecodeError, ValueError) as exc:
                 result[f"{label}_json_error"] = str(exc)
         return candidates
 
-    # --- Step 2: GET /v1/api (query-param form matching intercepted URL) -----
+    # --- Step 2: GET /v1/api (simplified variables matching Playwright GET) --
+    # The working Playwright GET used withFeedDeals=false, feedDealsCriteria=null.
+    # The full feedDealsCriteria causes a 400 in GET form.
+    get_variables = {
+        "withFeedLikes": False,
+        "withFeedRecentlyViewed": False,
+        "withFeedDeals": False,
+        "feedDealsCriteria": None,
+        "criteria": criteria,
+    }
     try:
         get_params = {
             "operationName": "searchFacetQuery",
-            "variables": json.dumps(variables, separators=(",", ":")),
+            "variables": json.dumps(get_variables, separators=(",", ":")),
             "extensions": json.dumps(extensions, separators=(",", ":")),
         }
         get_resp = session.get(
@@ -753,9 +811,17 @@ def _strategy_c_playwright(query: str) -> dict:
             result["found_markers"] = _detect_spa_markers(content)
             result["intercepted_calls"] = intercepted_calls
 
-            # Collect listing candidates from all intercepted JSON calls
+            # Collect listing candidates from intercepted JSON calls.
+            # Prefer data.search.items (clean search results) over the generic
+            # walker which picks up navigation/category noise from large POSTs.
             all_xhr_candidates: list[dict] = []
             for call in intercepted_calls:
+                body = call.get("body")
+                if isinstance(body, dict):
+                    specific = _extract_mercari_search_items(body)
+                    if specific:
+                        all_xhr_candidates.extend(specific)
+                        continue
                 all_xhr_candidates.extend(call.get("candidates", []))
 
             if all_xhr_candidates:
@@ -1055,8 +1121,13 @@ def probe(query: str) -> None:
                 _log("INFO", f"GET /v1/api JSON top-level keys: {get_keys}")
             if get_nc:
                 _log("INFO", f"Listing-shaped objects from GET: {get_nc}")
+                titles = d.get("get_sample_titles", [])
+                if titles:
+                    _log("INFO", f"GET sample titles: {titles}")
             if get_st == 403:
-                _log("WARN", "GET /v1/api 403 — CSRF + session cookies not sufficient for GET form")
+                _log("WARN", "GET /v1/api 403 — CSRF + session not sufficient for GET")
+            if get_st == 400:
+                _log("WARN", "GET /v1/api 400 — bad request (variables shape mismatch)")
             if d.get("get_json_error"):
                 _log("WARN", f"GET JSON parse error: {d['get_json_error']}")
 
@@ -1072,8 +1143,11 @@ def probe(query: str) -> None:
                 _log("INFO", f"POST /v1/api JSON top-level keys: {post_keys}")
             if post_nc:
                 _log("INFO", f"Listing-shaped objects from POST: {post_nc}")
+                titles = d.get("post_sample_titles", [])
+                if titles:
+                    _log("INFO", f"POST sample titles: {titles}")
             if post_st == 403:
-                _log("WARN", "POST /v1/api 403 — CSRF + session cookies not sufficient for POST form")
+                _log("WARN", "POST /v1/api 403 — CSRF + session not sufficient for POST")
             if d.get("post_json_error"):
                 _log("WARN", f"POST JSON parse error: {d['post_json_error']}")
 
