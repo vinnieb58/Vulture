@@ -616,6 +616,10 @@ def _strategy_d_direct_api(query: str) -> dict:
     # --- Shared API headers --------------------------------------------------
     api_headers = dict(HEADERS_BROWSER)
     api_headers["Accept"] = "application/json"
+    # Exclude Brotli: requests has no built-in Brotli decompressor, so
+    # advertising 'br' causes the server to send compressed binary that
+    # resp.text / resp.content.decode() cannot handle.
+    api_headers["Accept-Encoding"] = "gzip, deflate"
     api_headers["Origin"] = "https://www.mercari.com"
     api_headers["Referer"] = f"https://www.mercari.com/search/?keyword={quote_plus(query)}"
     if result["csrf"]:
@@ -668,6 +672,8 @@ def _strategy_d_direct_api(query: str) -> dict:
     # --- Step 2: GET /v1/api (simplified variables matching Playwright GET) --
     # The working Playwright GET used withFeedDeals=false, feedDealsCriteria=null.
     # The full feedDealsCriteria causes a 400 in GET form.
+    # GET also requires Content-Type: application/json as a CSRF signal
+    # (Mercari blocks GET /v1/api without it — confirmed from 400 error body).
     get_variables = {
         "withFeedLikes": False,
         "withFeedRecentlyViewed": False,
@@ -675,6 +681,8 @@ def _strategy_d_direct_api(query: str) -> dict:
         "feedDealsCriteria": None,
         "criteria": criteria,
     }
+    get_headers = dict(api_headers)
+    get_headers["Content-Type"] = "application/json"
     try:
         get_params = {
             "operationName": "searchFacetQuery",
@@ -682,7 +690,7 @@ def _strategy_d_direct_api(query: str) -> dict:
             "extensions": json.dumps(extensions, separators=(",", ":")),
         }
         get_resp = session.get(
-            API_BASE, params=get_params, headers=api_headers, timeout=REQUEST_TIMEOUT
+            API_BASE, params=get_params, headers=get_headers, timeout=REQUEST_TIMEOUT
         )
         cands = _parse_response(get_resp, "get")
         if cands:
