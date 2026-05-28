@@ -163,3 +163,12 @@ This batch should be committed only after live confirmation that:
 1. Keep adapter status evidence-based and avoid optimistic promotion labels.
 2. Add repeatable adapter smoke checks and log outcomes in future session entries.
 3. Expand tests around runtime loading/fan-out behavior without changing architecture.
+
+## Test execution in this session
+
+- `python3 -m pytest` (repo root): **failed** due to test collection hitting `scripts/test_multi_source.py` (script exits via `SystemExit` and also surfaced missing optional runtime dependency `bs4` in that script path).
+- `python3 -m pytest tests`: **passed** (`210 passed`).
+
+Interpretation:
+- Primary maintained test suite under `tests/` is currently green.
+- Root-level pytest invocation is currently not clean because script-style files under `scripts/` are collected and exit during import.
