@@ -21,6 +21,7 @@ import logging
 from typing import Callable, Optional
 
 from adapters.craigslist import search_craigslist
+from adapters.mercari import search_mercari
 from adapters.offerup import search_offerup
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,21 @@ _CAPABILITIES: dict[str, dict] = {
             "vehicles",
         ],
     },
+    "mercari": {
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "general_marketplace",
+            "computer_parts",
+            "gaming",
+            "home_theater",
+        ],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -109,6 +125,7 @@ _CAPABILITIES: dict[str, dict] = {
 _REGISTRY: dict[str, Callable] = {
     "craigslist": search_craigslist,
     "offerup": search_offerup,
+    "mercari": search_mercari,
 }
 
 
