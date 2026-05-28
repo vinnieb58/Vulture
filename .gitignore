@@ -18,3 +18,6 @@ Thumbs.db
 
 # Runtime logs (auto-created by main.py)
 logs/
+
+# Probe debug artefacts (HTML snapshots, screenshots saved by experiment scripts)
+experiments/debug/
