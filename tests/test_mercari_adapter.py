@@ -1,7 +1,13 @@
 import unittest
 from unittest.mock import patch
 
-from adapters.mercari import _extract_items, _normalize_listing, _normalize_price, search_mercari
+from adapters.mercari import (
+    _extract_items,
+    _is_relevant_to_query,
+    _normalize_listing,
+    _normalize_price,
+    search_mercari,
+)
 
 
 class _FakeResponse:
@@ -59,6 +65,20 @@ class _FakeSession:
                                     "price": 39500,
                                     "url": "/item/m59843646014/",
                                 },
+                                # outlier title -> should be filtered by query relevance
+                                {
+                                    "id": "m11111111111",
+                                    "name": "Asus Rog 32 oled",
+                                    "price": 80000,
+                                    "url": "/item/m11111111111/",
+                                },
+                                # keep broken/parts listing if title remains query-relevant
+                                {
+                                    "id": "m22222222222",
+                                    "name": "MSI Rtx 3080 Ti Gaming Trio Not Working",
+                                    "price": 12000,
+                                    "url": "/item/m22222222222/",
+                                },
                                 # malformed/no title -> should skip
                                 {"id": "m00000000000", "price": 10000},
                             ]
@@ -70,6 +90,22 @@ class _FakeSession:
 
 
 class MercariAdapterTests(unittest.TestCase):
+    def test_is_relevant_to_query_examples(self):
+        self.assertFalse(_is_relevant_to_query("Asus Rog 32 oled", "rtx 3080"))
+        self.assertTrue(_is_relevant_to_query("RTX 3080", "rtx 3080"))
+        self.assertTrue(
+            _is_relevant_to_query(
+                "Nvidia GeForce RTX 3080 10GB Founders Edition GPU",
+                "rtx 3080",
+            )
+        )
+        self.assertTrue(
+            _is_relevant_to_query(
+                "MSI Rtx 3080 Ti Gaming Trio Not Working",
+                "rtx 3080",
+            )
+        )
+
     def test_normalize_price_minor_units_to_dollars(self):
         self.assertEqual(_normalize_price(38000), 380)
         self.assertEqual(_normalize_price(40613), 406)
@@ -103,12 +139,13 @@ class MercariAdapterTests(unittest.TestCase):
         session_cls.return_value = fake
         results = search_mercari("rtx 3080", limit=5)
 
-        # Two real listings should survive filtering.
-        self.assertEqual(len(results), 2)
+        # Query-relevant listings should survive filtering.
+        self.assertEqual(len(results), 3)
         self.assertEqual(results[0].source, "mercari")
         self.assertEqual(results[0].title, "RTX 3080")
         self.assertEqual(results[0].price, 380)
         self.assertTrue(results[0].link.startswith("https://www.mercari.com/item/m"))
+        self.assertTrue(all("asus rog 32 oled" not in r.title.lower() for r in results))
 
         # Verify API request uses csrf header and excludes Brotli.
         api_calls = [c for c in fake.calls if c[1] == "https://www.mercari.com/v1/api"]

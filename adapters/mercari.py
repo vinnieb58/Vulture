@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from urllib.parse import quote_plus
 
@@ -33,6 +34,19 @@ _HEADERS_BROWSER = {
     "Connection": "keep-alive",
 }
 
+_GENERIC_QUERY_TOKENS = {
+    "for",
+    "with",
+    "and",
+    "the",
+    "item",
+    "items",
+    "sale",
+    "buy",
+    "used",
+    "new",
+}
+
 
 def _normalize_price(value) -> int | None:
     """
@@ -49,6 +63,34 @@ def _normalize_price(value) -> int | None:
     if value >= 1000:
         return value // 100
     return value
+
+
+def _is_relevant_to_query(title: str, query: str) -> bool:
+    """
+    Conservative, deterministic relevance guard.
+
+    - Tokenize title/query to alphanumeric lowercase tokens.
+    - Drop tiny/generic query tokens.
+    - If query has no meaningful tokens, do not filter.
+    - For model-like queries (e.g. "rtx 3080"), require one strong token match.
+    """
+    if not title or not query:
+        return True
+
+    title_tokens = set(re.findall(r"[a-z0-9]+", title.lower()))
+    query_tokens = [
+        t
+        for t in re.findall(r"[a-z0-9]+", query.lower())
+        if len(t) > 1 and t not in _GENERIC_QUERY_TOKENS
+    ]
+    if not query_tokens:
+        return True
+
+    strong_tokens = [t for t in query_tokens if any(ch.isdigit() for ch in t) or len(t) >= 3]
+    if not strong_tokens:
+        return True
+
+    return any(token in title_tokens for token in strong_tokens)
 
 
 def _walk_for_listing_objects(obj, depth: int = 0, max_depth: int = 10) -> list[dict]:
@@ -278,6 +320,8 @@ def search_mercari(query: str, city: str = "houston", limit: int = 10) -> list[L
             continue
         listing = _normalize_listing(raw)
         if listing is None:
+            continue
+        if not _is_relevant_to_query(listing.title, query):
             continue
         listings.append(listing)
         if len(listings) >= request_limit:
