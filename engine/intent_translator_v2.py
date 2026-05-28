@@ -99,6 +99,8 @@ _VERTICAL_KEYWORDS: dict[str, list[str]] = {
         "motherboard", "mobo", "psu", "power supply",
         "steam deck", "nintendo switch", "playstation", "xbox",
         "ps5", "ps4", "xbox series",
+        "gaming handheld", "handheld console", "portable console",
+        "rog ally", "legion go", "playstation portal",
     ],
     "home_theater": [
         "tv", "television", "oled", "qled", "qned",
