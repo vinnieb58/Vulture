@@ -1,293 +1,64 @@
-# Vulture 2.0 Architecture
+# Vulture 2.0+ Architecture (Live)
 
-_Last refreshed: 2026-05-21_
+Last refreshed: 2026-05-28 (UTC)
 
-## Purpose
-
-Vulture is a modular deal-hunting system that searches supported websites for user-defined hunts, normalizes listings into a shared model, filters listings deterministically, deduplicates sightings, stores data in SQLite, and sends Discord alerts for new matches.
-
-Vulture 2.0 adds Discord-based hunt management, DB-backed hunt storage, and LLM/rules-assisted translation of natural-language hunt intent into structured hunt definitions.
-
-## Core principle
-
-The LLM may help translate user intent into a structured hunt definition, but **runtime execution remains deterministic**.
-
-The LLM should not decide whether a scraped listing passes or fails. Listing acceptance/rejection should come from predictable code in the rules engine.
-
-## High-level architecture
+## Core architecture
 
 ```text
-Discord user
-  -> Discord slash command / intent
-  -> discord_bot.py
-  -> engine/command_router.py
-  -> engine/hunt_service.py
-  -> engine/llm_translator.py, when needed
-  -> engine/hunt_repository.py
-  -> SQLite hunts table
+Discord operator
+  -> discord_bot.py (slash commands)
+  -> engine.command_router.dispatch()
+  -> engine.hunt_service (+ engine.llm_translator for intent flows)
+  -> engine.hunt_repository (SQLite hunts table)
 
-Scheduler / manual run
+Scheduled/manual cycle
   -> main.py
-  -> load active hunts
-  -> adapter dispatch
-  -> normalize listings
-  -> deterministic rules
-  -> SQLite listings table
-  -> Discord notification
+  -> load hunts (yaml | db | mixed)
+  -> fan out source_sites per hunt
+  -> adapters.registry.get_adapter(source)
+  -> adapter returns Listing objects
+  -> engine.rules.rejection_reason()
+  -> engine.database.save_listing() (link dedupe)
+  -> engine.notifier.send_discord_alert() for new listings
 ```
 
-## Current module map
+## Key design rule (implemented)
 
-```text
-vulture/
-  adapters/
-    craigslist.py
-    registry.py                 # recommended next addition
+- Translation can be LLM/rules-assisted for hunt creation.
+- Runtime listing acceptance is deterministic only (rules engine).
 
-  engine/
-    command_router.py           # Discord command routing
-    hunt_service.py             # hunt business logic
-    hunt_repository.py          # DB interface for hunts
-    llm_translator.py           # intent -> structured hunt translation
-    rules.py                    # deterministic runtime filtering
-    database.py                 # listings persistence / dedupe
-    notifier.py                 # Discord alerting
-    hunts.py                    # legacy YAML support
+## Hunt source modes in live code
 
-  models/
-    listing.py                  # normalized listing model
-    hunt.py                     # structured hunt model, if present in repo
+- `yaml`: `engine.hunts.load_hunts()`
+- `db`: `engine.hunt_service.list_hunts(status="active")`
+- `mixed`: merged YAML + DB; YAML wins on name collision
 
-  config/
-    hunts.yaml                  # legacy v1.0 path only
+## Multi-source execution behavior
 
-  data/
-    vulture.db                  # SQLite database
+- DB hunts can carry multiple `source_sites`
+- `main._expand_hunt_sources()` creates one execution unit per source
+- Source failures are isolated by try/except around each run
 
-  logs/
-    vulture.log                 # runtime logs
+## Persistence model
 
-  discord_bot.py                # Discord control layer
-  main.py                       # one hunt execution cycle
-  requirements.txt
-  .env                          # local secrets, not committed
-  .env.example                  # placeholders only
-```
+- SQLite file: `data/vulture.db`
+- `hunts` table: structured hunt state with JSON-encoded list/dict fields
+- `listings` table: normalized listing rows; uniqueness on `link`
 
-## Runtime data flow
+## Adapter architecture in current code
 
-### 1. Hunt creation
+- Central dispatch and capability metadata is already implemented in `adapters/registry.py`
+- Runtime-registered sources: `craigslist`, `offerup`, `carsdotcom`
+- Capability metadata includes fields such as:
+  - `stable`, `experimental`
+  - `requires_browser`, `requires_login`
+  - `supports_location`, `location_control`
+  - `verticals`
 
-```text
-Discord input
-  -> command router
-  -> hunt service
-  -> optional translator
-  -> normalized hunt fields
-  -> repository
-  -> SQLite hunts table
-```
+## Translator and rules split
 
-### 2. Hunt execution
-
-```text
-main.py
-  -> load active DB hunts
-  -> build execution dict/context
-  -> adapter search
-  -> Listing objects
-  -> rules.matches_rules()
-  -> database dedupe by link
-  -> save new listing
-  -> Discord alert
-```
-
-## Hunt storage
-
-### Current source of truth
-
-The active Vulture 2.0 source of truth is the SQLite `hunts` table.
-
-### Legacy source
-
-`config/hunts.yaml` is legacy v1.0 support. It can remain for compatibility, but new development should not be designed around YAML as the primary hunt store.
-
-## Listing storage
-
-Listings are stored in SQLite. The key dedupe mechanism is the listing URL/link.
-
-Current listing fields are expected to include at least:
-
-```text
-source
-title
-price
-location
-link
-first_seen
-```
-
-Optional future fields may include:
-
-```text
-image_url
-posted_at
-seller
-condition
-raw
-```
-
-Do not expand the listing model casually. Add fields only when a second adapter proves they are necessary.
-
-## Adapter architecture
-
-### Current state
-
-Craigslist is the only stable adapter.
-
-### Desired near-term state
-
-Add a registry so main execution does not hard-code one `if/elif` block per website.
-
-Recommended file:
-
-```text
-adapters/registry.py
-```
-
-Recommended shape:
-
-```python
-from adapters import craigslist
-
-ADAPTERS = {
-    "craigslist": craigslist.search,
-}
-
-SOURCE_CAPABILITIES = {
-    "craigslist": {
-        "stable": True,
-        "requires_browser": False,
-        "supports_location": True,
-        "supports_price_filter_in_url": False,
-        "verticals": [
-            "general_marketplace",
-            "computer_parts",
-            "vehicles",
-            "home_theater",
-        ],
-    }
-}
-
-
-def get_adapter(source: str):
-    normalized = source.lower().strip()
-    return ADAPTERS.get(normalized)
-```
-
-The exact function names should follow the live codebase, but the principle should be preserved.
-
-## Source capability metadata
-
-Every adapter should eventually describe its capabilities.
-
-Minimum useful fields:
-
-| Field | Meaning |
-|---|---|
-| `stable` | Whether the adapter is safe for normal use |
-| `experimental` | Whether it should be hidden or gated |
-| `requires_browser` | Whether Playwright/Selenium is required |
-| `requires_login` | Whether cookies/session/login are likely needed |
-| `supports_location` | Whether the source can search by location |
-| `supports_radius` | Whether search radius is supported |
-| `supports_price_filter_in_url` | Whether price can be pushed into the search URL |
-| `verticals` | Which hunt categories the source is useful for |
-
-## Vertical model
-
-Vulture should stay one program, not separate programs for cars, GPUs, appliances, etc.
-
-The system should support vertical-aware translation and source selection.
-
-Recommended vertical examples:
-
-```text
-computer_parts
-vehicles
-home_theater
-gaming
-general_marketplace
-retail
-```
-
-Recommended future source grouping:
-
-```python
-VERTICAL_SOURCES = {
-    "computer_parts": ["craigslist", "swappa", "ebay"],
-    "vehicles": ["craigslist", "cars_com", "autotrader"],
-    "home_theater": ["craigslist", "facebook_marketplace"],
-    "gaming": ["craigslist", "swappa", "ebay"],
-    "general_marketplace": ["craigslist", "facebook_marketplace", "offerup"],
-    "retail": ["microcenter", "bestbuy"],
-}
-```
-
-Do not implement all of this at once. The near-term task is to make the code ready for it.
-
-## LLM translator rules
-
-The translator may:
-
-- detect vertical/category,
-- extract max price,
-- extract make/model/product family,
-- expand obvious aliases,
-- generate include/exclude keywords,
-- set structured `adapter_options`,
-- reject unsupported or invalid locations.
-
-The translator must not:
-
-- scrape websites,
-- decide individual listing matches at runtime,
-- replace deterministic rules,
-- mutate `.env`,
-- silently change persisted hunt behavior without confirmation where appropriate.
-
-## Runtime rules philosophy
-
-Runtime filtering should be:
-
-- deterministic,
-- explainable in logs,
-- conservative where data is missing,
-- stricter when a listing clearly violates a rule.
-
-Example:
-
-- If a RAM title clearly says `8GB` and the hunt requires `16GB`, reject it.
-- If a title does not state capacity, allow it rather than guessing.
-- If a vehicle title clearly says `headlight`, reject it as a parts listing.
-- If a title is ambiguous, prefer logging and conservative behavior over risky assumptions.
-
-## Secret handling
-
-`.env` must remain local and uncommitted.
-
-Code should read `.env` but never write or rewrite it.
-
-`.env.example` may be committed with placeholders only.
-
-## Stability constraints
-
-Do not redesign the architecture unless explicitly chosen.
-
-Do not replace deterministic filtering with LLM listing judgment.
-
-Do not add a hard site like Facebook Marketplace before the adapter framework is ready.
-
-Do not combine adapter expansion, database redesign, and Discord UX redesign into one commit.
-
-Prefer small, reviewable changes.
+- `engine.llm_translator.translate()` is the public translator entry
+- Vehicle intents route to `engine.intent_translator_v2.translate_v2()`
+- Non-vehicle intents use preserved v1 deterministic builder path
+- `engine.hunt_service.hunt_to_execution_dict()` forwards structured constraints to runtime rules
+- `engine.rules` performs deterministic checks for price, keyword rules, and structured constraints (TV size, GPU tier, RAM capacity/speed, vehicle year/miles)

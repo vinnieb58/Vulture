@@ -108,3 +108,58 @@ This batch should be committed only after live confirmation that:
 - vehicle typo normalization is working
 - parts like headlights / liftgates / catalytic converters are being rejected
 - no obvious vehicle regressions were introduced
+
+---
+
+# SESSION LOG - 2026-05-28
+
+## Branch/context observed
+
+- Inspected baseline branch: `main` at commit `8e82b42`
+- Recent commit trail includes:
+  - vertical-aware hunt processing updates
+  - vehicle translator v2 fixes
+  - Cars.com experimental adapter work
+  - eBay recon completion
+
+## What code exists now
+
+- Two runtime entrypoints:
+  - `main.py` hunt cycle worker
+  - `discord_bot.py` slash-command control runtime
+- Adapter registry is live and used by `main.py`:
+  - `craigslist` (stable)
+  - `offerup` (experimental)
+  - `carsdotcom` (experimental)
+- DB-backed hunt lifecycle is implemented in service/repository layers.
+- Multi-source hunt fan-out is implemented (`source_sites` expansion per source run).
+- Deterministic rules engine enforces price, keyword, TV/GPU/RAM/vehicle structured constraints.
+
+## What changed since previous docs
+
+- Updated docs to reflect that adapter registry is already implemented (not planned future work).
+- Updated docs to reflect live runtime adapters and probe-only sources.
+- Added `docs/current/CODEBASE_STATUS.md` as an implementation-grounded status map.
+- Updated architecture/current status/roadmap/programming reference to align with code reality and remove stale branch/planning assumptions.
+- Added current verification command sections for Windows and Raven.
+
+## Confirmed working (code-confirmed)
+
+- Discord command dispatch and hunt lifecycle paths exist and are wired.
+- Hunt-source mode handling (`yaml`, `db`, `mixed`) is implemented in `main.py`.
+- Multi-source hunt execution fan-out is implemented.
+- Link-based dedupe in SQLite listings is implemented.
+- Translator + rules test suites exist and are runnable via pytest.
+
+## Unconfirmed / caution areas
+
+- OfferUp location targeting remains GeoIP-only (city input is advisory).
+- Cars.com reliability across varied network/runtime environments remains experimental.
+- eBay scraping remains probe-only with documented blocking; no runtime adapter.
+- Live production reliability of non-craigslist adapters is not asserted as stable.
+
+## What should happen next
+
+1. Keep adapter status evidence-based and avoid optimistic promotion labels.
+2. Add repeatable adapter smoke checks and log outcomes in future session entries.
+3. Expand tests around runtime loading/fan-out behavior without changing architecture.
