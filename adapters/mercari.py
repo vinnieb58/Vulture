@@ -34,6 +34,23 @@ _HEADERS_BROWSER = {
 }
 
 
+def _normalize_price(value) -> int | None:
+    """
+    Normalize Mercari numeric price to integer dollars for Listing.
+
+    Empirical probe data on Raven shows values like 38000 for ~$380.00.
+    Treat large integers as minor units (cents) and convert to whole dollars.
+    """
+    if not isinstance(value, int):
+        return None
+    if value <= 0:
+        return None
+    # Heuristic: Mercari API commonly returns cents-like values.
+    if value >= 1000:
+        return value // 100
+    return value
+
+
 def _walk_for_listing_objects(obj, depth: int = 0, max_depth: int = 10) -> list[dict]:
     """Fallback recursive scan for listing-shaped objects."""
     if depth > max_depth:
@@ -96,9 +113,7 @@ def _normalize_listing(item: dict) -> Listing | None:
     if not title:
         return None
 
-    price = item.get("price")
-    if not isinstance(price, int):
-        price = None
+    price = _normalize_price(item.get("price"))
 
     link = item.get("url")
     if isinstance(link, str) and link.startswith("/"):
