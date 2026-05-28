@@ -239,21 +239,49 @@ def _strip_xssi(text: str) -> str:
 
 def _extract_mercari_search_items(body: dict) -> list[dict]:
     """
-    Navigate Mercari's searchFacetQuery response directly to the items list.
+    Navigate Mercari's searchFacetQuery response to the items list.
 
-    Expected shape:
-        { "data": { "search": { "items": [...] } } }
+    Tries known paths in priority order:
+        data.search.items          (observed in Playwright GET intercept)
+        data.search.itemsList      (alternate field name variant)
+        data.searchFacet.items     (older API variant)
 
-    Each item has: id (str), name (str), price (int), thumbnails ([str]),
-    itemCondition, seller.region.  Returns the raw list for _normalize().
+    Mercari item IDs are strings starting with 'm' (e.g. 'm12345678').
+    Category nav objects have integer IDs (4, 7, 10...).  We filter those
+    out so only real listing objects are returned.
     """
-    try:
-        items = body["data"]["search"]["items"]
-        if isinstance(items, list):
-            return items
-    except (KeyError, TypeError):
-        pass
-    return []
+    candidates: list[dict] = []
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return candidates
+
+    # Try known paths to items list
+    for path in (
+        ("search", "items"),
+        ("search", "itemsList"),
+        ("searchFacet", "items"),
+    ):
+        obj: object = data
+        for key in path:
+            obj = obj.get(key) if isinstance(obj, dict) else None
+        if isinstance(obj, list) and obj:
+            candidates = [i for i in obj if isinstance(i, dict)]
+            break
+
+    # Filter: keep objects that look like listings, not category nav nodes.
+    # Real listings: id starts with 'm', have a numeric price, have thumbnails.
+    # Category nodes: integer id, no price, no thumbnails.
+    if candidates:
+        real = [
+            c for c in candidates
+            if (isinstance(c.get("id"), str) and c["id"].startswith("m"))
+            or (isinstance(c.get("price"), (int, float)) and c.get("price", 0) > 0)
+            or bool(c.get("thumbnails"))
+        ]
+        if real:
+            candidates = real
+
+    return candidates
 
 
 def _extract_inline_json_blobs(soup: BeautifulSoup) -> list[dict]:
@@ -653,10 +681,22 @@ def _strategy_d_direct_api(query: str) -> dict:
                     result[f"{label}_top_keys"] = list(body.keys())[:14]
                 elif isinstance(body, list):
                     result[f"{label}_top_keys"] = f"[array len={len(body)}]"
+                # Capture data.* sub-keys for path diagnostics
+                if isinstance(body, dict) and "data" in body and isinstance(body["data"], dict):
+                    result[f"{label}_data_sub_keys"] = list(body["data"].keys())[:12]
+
                 # Try the specific Mercari items path first; fall back to generic walk
                 candidates = _extract_mercari_search_items(body) if isinstance(body, dict) else []
                 if not candidates:
-                    candidates = _walk_for_listings(body)
+                    raw = _walk_for_listings(body)
+                    # Filter walk results: exclude category-nav objects (integer IDs, no price/thumbnails)
+                    real = [
+                        c for c in raw
+                        if (isinstance(c.get("item_id"), str) and c["item_id"].startswith("m"))
+                        or (c.get("price") is not None and c.get("price") != 0)
+                        or bool(c.get("image"))
+                    ]
+                    candidates = real if real else raw
                 result[f"{label}_candidates"] = len(candidates)
                 result[f"{label}_sample_titles"] = [
                     str(c.get("name") or c.get("title") or "")[:60]
@@ -1146,6 +1186,9 @@ def probe(query: str) -> None:
             _log("INFO", f"GET /v1/api: HTTP {get_st}  {get_sz:,} bytes  ct={get_ct}")
             if get_keys:
                 _log("INFO", f"GET /v1/api JSON top-level keys: {get_keys}")
+            data_sub = d.get("get_data_sub_keys")
+            if data_sub:
+                _log("INFO", f"GET /v1/api data.* sub-keys: {data_sub}")
             if get_nc:
                 _log("INFO", f"Listing-shaped objects from GET: {get_nc}")
                 titles = d.get("get_sample_titles", [])
