@@ -368,8 +368,16 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         )
 
     rules: dict = {}
+
+    # Vertical label — metadata forwarded to rules.py for contextual log messages.
+    # Derived from category (which persists the vertical display name) or from
+    # adapter_options if explicitly stored there.
+    _vertical = (hunt.category or "").replace(" ", "_").strip("_")
+    if _vertical:
+        rules["vertical"] = _vertical
+
     # min_price from adapter_options — translator sets this for verticals where
-    # placeholder/junk listings are common (e.g. vehicles with $0 / $1 price)
+    # placeholder/junk listings are common (e.g. vehicles with $0 / $1 price).
     min_price = hunt.adapter_options.get("min_price")
     if min_price is not None:
         rules["min_price"] = int(min_price)
@@ -379,6 +387,7 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         rules["include_keywords"] = hunt.include_keywords
     if hunt.exclude_keywords:
         rules["exclude_keywords"] = hunt.exclude_keywords
+
     # Structured constraints stored by the translator — enforced by rules.py
     # via title-text extraction (conservative: missing value = allow through).
     max_miles = hunt.adapter_options.get("max_miles")
@@ -402,6 +411,19 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     require_all_keywords = hunt.adapter_options.get("require_all_keywords")
     if require_all_keywords:
         rules["require_all_keywords"] = list(require_all_keywords)
+
+    # TV: structured size constraint (more precise than a bare-number substring).
+    min_size_inches = hunt.adapter_options.get("min_size_inches")
+    if min_size_inches is not None:
+        rules["min_size_inches"] = int(min_size_inches)
+    max_size_inches = hunt.adapter_options.get("max_size_inches")
+    if max_size_inches is not None:
+        rules["max_size_inches"] = int(max_size_inches)
+
+    # GPU: tier-based minimum class ("or better" hunts).
+    min_gpu_class = hunt.adapter_options.get("min_gpu_class")
+    if min_gpu_class:
+        rules["min_gpu_class"] = str(min_gpu_class)
 
     # city is used as the Craigslist subdomain; multi-word values cause DNS
     # failures (e.g. "mandeville louisiana").  For non-Craigslist adapters

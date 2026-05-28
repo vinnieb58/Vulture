@@ -291,6 +291,18 @@ _YEAR_MAX_RE = re.compile(
 # Step 1: classify_vertical
 # ---------------------------------------------------------------------------
 
+# Vehicle keywords that are substrings of common non-vehicle words and must be
+# matched on word boundaries only.  Example: "car" matches inside "card only".
+_BOUNDARY_VEHICLE_KEYWORDS: frozenset[str] = frozenset({"car", "van"})
+
+
+def _keyword_in_intent(intent_lower: str, kw: str) -> bool:
+    """Return True when kw is present in intent_lower (boundary-safe when needed)."""
+    if kw in _BOUNDARY_VEHICLE_KEYWORDS:
+        return bool(re.search(r"\b" + re.escape(kw) + r"\b", intent_lower))
+    return kw in intent_lower
+
+
 def classify_vertical(intent: str) -> str:
     """
     Map a natural-language intent to a vertical key.
@@ -298,18 +310,28 @@ def classify_vertical(intent: str) -> str:
     Returns one of:
         "vehicles" | "computer_parts" | "home_theater" | "general_marketplace"
 
-    Scoring: each vertical accumulates 1 point per keyword found (substring).
-    The highest-scoring vertical wins; ties prefer the order above.
-    Falls back to "general_marketplace" when no vertical scores > 0.
+    Scoring: each vertical accumulates 1 point per keyword found.
+    Short vehicle tokens like "car" use word-boundary matching to avoid false
+    positives ("card only" must not score as a vehicle).
+
+    Strong GPU signals (rtx/gtx/gpu) short-circuit to computer_parts so they
+    are never routed to translate_v2() when vehicle keywords tie on score.
     """
     intent_lower = intent.lower()
+
+    # Strong GPU signals — route to v1 computer_parts path, not vehicle v2.
+    if re.search(r"\b(rtx|gtx)\b", intent_lower) or re.search(
+        r"\b(gpu|graphics card|video card)\b", intent_lower
+    ):
+        return "computer_parts"
+
     best_key = "general_marketplace"
     best_score = 0
 
     for v2_key, keywords in _VERTICAL_KEYWORDS.items():
         if not keywords:
             continue
-        score = sum(1 for kw in keywords if kw in intent_lower)
+        score = sum(1 for kw in keywords if _keyword_in_intent(intent_lower, kw))
         if score > best_score:
             best_score = score
             best_key = v2_key
