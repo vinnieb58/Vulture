@@ -20,6 +20,7 @@ Usage:
 import logging
 from typing import Callable, Optional
 
+from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
 from adapters.offerup import search_offerup
@@ -102,6 +103,44 @@ _CAPABILITIES: dict[str, dict] = {
             "home_theater",
         ],
     },
+    # -------------------------------------------------------------------------
+    # Cars.com — experimental (residential-IP only, requires Playwright Chromium)
+    #
+    # Parsing: Playwright Chromium → data-vehicle-details JSON attr + DOM selectors.
+    # Each <fuse-card> custom element embeds the full vehicle payload as a JSON
+    # attribute (year, make, model, trim, vin, price, mileage, listingId).
+    #
+    # Anti-bot: Cloudflare Bot Management + Akamai Bot Manager are present.
+    # Datacenter IPs get ERR_HTTP2_PROTOCOL_ERROR or HTTP 403.
+    # Residential IPs (Raven) pass through cleanly with headless Chromium.
+    #
+    # Location: zip-code targeted. The search URL accepts &zip=XXXXX and
+    # Cars.com correctly limits/ranks results to that geography.  Pass a
+    # 5-digit zip as the city argument (e.g. city="77002").
+    # Falls back to 77471 (Rosenberg, TX — Raven's GeoIP area) if city
+    # is not a zip code.
+    #
+    # Vertical: vehicles only. Not a general marketplace.
+    #
+    # Confirmed working from probe runs (May 2026):
+    #   - 48+ listing cards per page
+    #   - All 5 fields extracted: title, price, mileage (discarded — no Listing
+    #     field), dealer+city/state location, vehicledetail link
+    #   - Stable selector: [data-listing-id]
+    #   - Stable JSON attr: data-vehicle-details on ~60% of cards
+    # -------------------------------------------------------------------------
+    "carsdotcom": {
+        "stable": False,
+        "experimental": True,
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": True,
+        "location_control": "zip",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": ["vehicles"],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -123,6 +162,7 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
+    "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
     "offerup": search_offerup,
     "mercari": search_mercari,

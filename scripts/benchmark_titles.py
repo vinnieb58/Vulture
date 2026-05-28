@@ -35,6 +35,10 @@ def _sim_rules(t) -> dict:
     """Build the same rules dict that hunt_to_execution_dict would produce."""
     rules: dict = {}
     ao = t.adapter_options or {}
+    # Vertical label (metadata for log context — mirrors hunt_to_execution_dict)
+    _vertical = (t.category or "").replace(" ", "_").strip("_")
+    if _vertical:
+        rules["vertical"] = _vertical
     if ao.get("min_price") is not None:
         rules["min_price"]           = int(ao["min_price"])
     if t.max_price is not None:
@@ -57,6 +61,14 @@ def _sim_rules(t) -> dict:
         rules["min_vram_gb"]         = int(ao["min_vram_gb"])
     if ao.get("min_speed_mhz") is not None:
         rules["min_speed_mhz"]       = int(ao["min_speed_mhz"])
+    # TV: structured size constraint
+    if ao.get("min_size_inches") is not None:
+        rules["min_size_inches"]     = int(ao["min_size_inches"])
+    if ao.get("max_size_inches") is not None:
+        rules["max_size_inches"]     = int(ao["max_size_inches"])
+    # GPU: tier-based minimum class
+    if ao.get("min_gpu_class"):
+        rules["min_gpu_class"]       = ao["min_gpu_class"]
     return rules
 
 
@@ -297,6 +309,100 @@ CASES = [
             ("2x8GB DDR4 Corsair Vengeance", 38,  True),   # 2×8=16 >= 8
             ("32GB DDR4 kit",                45,  False),  # over price
             ("16GB DDR4 SODIMM laptop",      25,  False),  # sodimm excluded
+        ],
+    ),
+
+    # ==================================================================
+    # ACCEPTANCE TESTS — match spec examples exactly
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Acceptance 1: TV — 75 inch 4K under $500
+    # ------------------------------------------------------------------
+    (
+        "Find me a 75 inch 4K TV under $500 near Houston",
+        [
+            # PASS: correct size, 4K alias present, price ok
+            ("Samsung 75 inch 4K UHD Smart TV 2023",   450, True),
+            ("LG 75 inch 4K OLED TV",                  480, True),
+            # FAIL: wrong size (65, not 75) — structured size check
+            ("Samsung 65 inch 4K Smart TV",            420, False),
+            # PASS: UHD is a 4K alias; size extracted from "75 inch"
+            ("Sony 75 inch UHD Smart TV",              490, True),
+            # FAIL: no 4K/UHD/2160p resolution keyword in title
+            ("75 inch Smart TV Hisense",               400, False),
+            # FAIL: wall mount excluded
+            ("75 inch 4K TV wall mount bracket",        40, False),
+            # FAIL: over price
+            ("TCL 75 inch 4K TV",                      510, False),
+            # PASS: size cannot be extracted (no "inch"/") → conservative pass
+            # and 4K present
+            ("Samsung 4K OLED Smart TV",               450, True),
+        ],
+    ),
+
+    # ------------------------------------------------------------------
+    # Acceptance 2: GPU — RTX 3080 or better, card only
+    # ------------------------------------------------------------------
+    (
+        "Find an RTX 3080 or better under $400, card only, not a whole PC",
+        [
+            # PASS: RTX 3080 meets min_gpu_class floor; card listing
+            ("EVGA RTX 3080 10GB XC3 Gaming",          380, True),
+            # PASS: RTX 3090 is above 3080 tier
+            ("Gigabyte RTX 3090 24GB Gaming OC",       390, True),
+            # FAIL: RTX 3070 is below RTX 3080 tier
+            ("MSI RTX 3070 8GB Gaming X Trio",         300, False),
+            # FAIL: laptop — excluded by default GPU excludes
+            ("ASUS TUF Gaming Laptop RTX 3080 16GB",   350, False),
+            # FAIL: gaming PC — excluded
+            ("Gaming PC RTX 3080 i9 32GB",             380, False),
+            # FAIL: over price
+            ("RTX 3080 10GB GPU",                      420, False),
+        ],
+    ),
+
+    # ------------------------------------------------------------------
+    # Acceptance 3: RAM — 32GB DDR4 3200MHz or faster
+    # ------------------------------------------------------------------
+    (
+        "Find 32GB DDR4 RAM 3200mhz or faster",
+        [
+            # PASS: exactly 32GB, DDR4, speed >= 3200
+            ("Corsair 32GB DDR4 3200MHz Desktop RAM",   55, True),
+            # PASS: kit total 2×16=32GB, speed > 3200
+            ("G.Skill 2x16GB DDR4 3600MHz",             60, True),
+            # FAIL: only 16GB
+            ("Kingston 16GB DDR4 3200MHz",              28, False),
+            # FAIL: speed 2400 < 3200
+            ("Crucial 32GB DDR4 2400MHz",               45, False),
+            # FAIL: DDR5 (wrong generation — include_keywords requires "ddr4")
+            ("Corsair 32GB DDR5 6000MHz",               80, False),
+            # FAIL: SODIMM excluded
+            ("32GB DDR4 3200MHz SODIMM laptop",         40, False),
+            # PASS: no speed in title → conservative pass (speed not stated)
+            ("32GB DDR4 desktop RAM kit",               50, True),
+        ],
+    ),
+
+    # ------------------------------------------------------------------
+    # Acceptance 4: Vehicles — Toyota Sequoia 2016+ under 150k miles
+    # ------------------------------------------------------------------
+    (
+        "Find a Toyota Sequoia 2016 or newer under 150k miles",
+        [
+            # PASS: 2019 >= 2016, 65k < 150k, price ok
+            ("2019 Toyota Sequoia SR5 4WD 65k miles",  32000, True),
+            # FAIL: year 2014 < 2016
+            ("2014 Toyota Sequoia Platinum 90k miles", 25000, False),
+            # FAIL: mileage 160k > 150k
+            ("2018 Toyota Sequoia Limited 160k miles", 28000, False),
+            # PASS: no mileage in title → conservative pass
+            ("2017 Toyota Sequoia TRD Sport clean",    30000, True),
+            # FAIL: parts listing excluded
+            ("Toyota Sequoia part out 2018",             800, False),
+            # PASS: year right at the boundary (2016 == min_year)
+            ("2016 Toyota Sequoia Premium 4WD",        22000, True),
         ],
     ),
 
