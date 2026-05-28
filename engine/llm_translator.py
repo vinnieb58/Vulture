@@ -41,6 +41,11 @@ computer_parts (RAM):
   extracted    : ram_type, min_capacity_gb, max_price
   enforced     : ddr-type via include_keywords; min_capacity_gb from title parse
   conservative : capacity only rejected when stated explicitly (e.g. "4GB DDR4")
+
+computer_parts (handheld / Steam Deck / Switch / etc.):
+  extracted    : handheld target (steam_deck, nintendo_switch, …)
+  enforced     : strong device phrase in title via include_keywords (OR)
+  conservative : generic GPU/RAM paths unchanged; loose "gaming" alone never passes
 """
 
 from __future__ import annotations
@@ -107,6 +112,8 @@ VERTICALS: dict[str, dict] = {
             # Handhelds / consoles (gaming; mercari when experimental enabled)
             "steam deck", "nintendo switch", "playstation", "xbox",
             "ps5", "ps4", "xbox series",
+            "gaming handheld", "handheld console", "portable console",
+            "rog ally", "legion go", "playstation portal",
         ],
         "size_pattern": False,
         "default_exclude": [
@@ -209,6 +216,44 @@ VERTICALS: dict[str, dict] = {
         "default_exclude": ["wanted", "looking for", "iso"],
     },
 }
+
+# Handheld / portable-console hunts (Steam Deck, Switch, etc.) — title must match
+# a strong device phrase; see _HANDHELD_INCLUDE and _build_handheld_translation().
+_HANDHELD_PHRASES: tuple[tuple[str, str], ...] = (
+    ("steam deck oled", "steam_deck"),
+    ("steam deck", "steam_deck"),
+    ("nintendo switch oled", "nintendo_switch"),
+    ("nintendo switch", "nintendo_switch"),
+    ("rog ally x", "rog_ally"),
+    ("rog ally", "rog_ally"),
+    ("legion go", "legion_go"),
+    ("playstation portal", "ps_portal"),
+    ("ps portal", "ps_portal"),
+    ("gaming handheld", "generic_handheld"),
+    ("handheld console", "generic_handheld"),
+    ("portable console", "generic_handheld"),
+)
+
+_HANDHELD_INCLUDE: dict[str, list[str]] = {
+    "steam_deck": ["steam deck", "steamdeck"],
+    "nintendo_switch": ["nintendo switch", "switch oled", "switch lite"],
+    "rog_ally": ["rog ally", "ally x"],
+    "legion_go": ["legion go"],
+    "ps_portal": ["playstation portal", "ps portal"],
+    "generic_handheld": [
+        "steam deck", "steamdeck",
+        "rog ally", "legion go",
+        "nintendo switch", "switch oled", "switch lite",
+        "playstation portal", "ps portal",
+    ],
+}
+
+# Extra excludes for handheld hunts only (Craigslist noise from live Raven tests).
+_HANDHELD_FALSE_POSITIVE_EXCLUDE = [
+    "8bitdo", "gamepad only", "controller only",
+    "restaurant", "commercial kitchen", "pemf",
+    "massage chair", "medical equipment",
+]
 
 # Additional exclude keywords used only for RAM sub-hunts inside computer_parts.
 # Not part of VERTICALS so they don't pollute GPU/CPU searches.
@@ -722,6 +767,49 @@ def _is_ram_hunt(intent_lower: str) -> bool:
     if re.search(r'\bram\b', intent_lower):
         return True
     return any(kw in intent_lower for kw in ["memory", "ddr4", "ddr5", "ddr3", "dimm"])
+
+
+def _extract_handheld_target(intent_lower: str) -> Optional[str]:
+    """
+    Return a handheld target key when the intent is for a portable console /
+    gaming handheld, not a GPU/RAM part hunt.
+
+    Longest phrase wins (e.g. "steam deck oled" before "steam deck").
+    """
+    for phrase, target in _HANDHELD_PHRASES:
+        if phrase in intent_lower:
+            return target
+    return None
+
+
+def _build_handheld_translation(
+    target: str,
+    intent_lower: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Handheld / gaming-console hunt.
+
+    Returns (search_terms, include_keywords, model_exclude_keywords).
+
+    Title must contain at least one strong device phrase (OR via include_keywords).
+    Does not accept loose terms like "gaming" or "electronics" alone.
+    """
+    include_kw = list(_HANDHELD_INCLUDE.get(target, _HANDHELD_INCLUDE["generic_handheld"]))
+
+    if target == "steam_deck":
+        search = "Steam Deck OLED" if "oled" in intent_lower else "Steam Deck"
+    elif target == "nintendo_switch":
+        search = "Nintendo Switch OLED" if "oled" in intent_lower else "Nintendo Switch"
+    elif target == "rog_ally":
+        search = "ROG Ally X" if "ally x" in intent_lower else "ROG Ally"
+    elif target == "legion_go":
+        search = "Legion Go"
+    elif target == "ps_portal":
+        search = "PlayStation Portal"
+    else:
+        search = "gaming handheld"
+
+    return [search], include_kw, list(_HANDHELD_FALSE_POSITIVE_EXCLUDE)
 
 
 def _extract_size(intent_lower: str) -> Optional[int]:
@@ -1421,6 +1509,11 @@ def _translate_v1_non_vehicle(
 
     _is_ram   = _is_ram_hunt(intent_lower_orig)
     _pre_gpu  = _extract_gpu_model(intent_lower_orig) if not _is_ram else None
+    _handheld = (
+        _extract_handheld_target(intent_lower_orig)
+        if vertical == "computer_parts" and not _is_ram and not _pre_gpu
+        else None
+    )
     if _pre_gpu and vertical != "computer_parts":
         vertical = "computer_parts"
         v_cfg    = VERTICALS["computer_parts"]
@@ -1470,6 +1563,7 @@ def _translate_v1_non_vehicle(
 
     ram_specific_exclude: list[str] = []
     gpu_model_excl:       list[str] = []
+    handheld_excl:        list[str] = []
     tv_require_all:       list[str] = []
 
     if vertical == "tv_home_theater":
@@ -1478,6 +1572,10 @@ def _translate_v1_non_vehicle(
         )
     elif vertical == "computer_parts" and _is_ram:
         search_terms, include_kw, ram_specific_exclude = _build_ram_translation(ram_type, min_gb)
+    elif vertical == "computer_parts" and _handheld:
+        search_terms, include_kw, handheld_excl = _build_handheld_translation(
+            _handheld, intent_lower_orig
+        )
     elif vertical == "computer_parts":
         search_terms, include_kw, gpu_model_excl = _build_gpu_translation(
             gpu_model, intent, or_better=_or_better
@@ -1495,7 +1593,7 @@ def _translate_v1_non_vehicle(
     if ram_specific_exclude:
         exclude_kw: list[str] = ram_specific_exclude
     else:
-        exclude_kw = list(v_cfg.get("default_exclude", [])) + gpu_model_excl
+        exclude_kw = list(v_cfg.get("default_exclude", [])) + gpu_model_excl + handheld_excl
         if _card_only:
             exclude_kw = exclude_kw + _GPU_CARD_ONLY_EXTRA_EXCLUDE
 
@@ -1565,6 +1663,7 @@ def _translate_v1_non_vehicle(
     if size:       constraint_parts.append(f'size={size}" (structured: min_size={size}, max_size={size})')
     if resolution: constraint_parts.append(f"resolution={resolution}")
     if gpu_model:  constraint_parts.append(f"model={gpu_model}")
+    if _handheld:  constraint_parts.append(f"handheld={_handheld} (title phrase required)")
     if _or_better: constraint_parts.append(f"min_gpu_class={gpu_model} (or better)")
     if _card_only: constraint_parts.append("card_only=true (stricter system excludes active)")
     if ram_type:   constraint_parts.append(f"ddr_generation={ram_type}")

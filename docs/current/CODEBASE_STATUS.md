@@ -99,7 +99,7 @@ Vulture is a **personal/self-hosted** system for a single operator (e.g. Raven),
 | `craigslist` | **stable** | Primary adapter; requests + bs4; location via CL subdomain |
 | `offerup` | **beta** | Production-usable on residential IP; `geoip_only` location (city arg advisory) |
 | `mercari` | **beta** | Production-usable search + relevance filter; listing URLs use `/us/item/{id}/` |
-| `carsdotcom` | **beta** | Production-usable on Raven with Playwright + Chromium; vehicles only; zip targeting |
+| `carsdotcom` | **beta** | Production-usable on Raven with Playwright + Chromium; vehicles only; zip targeting; **flaky/browser-sensitive** (Cloudflare HTTP/2 blocks possible — adapter returns `[]`, does not crash hunt cycle) |
 
 ### Probe/experiment-only (not registered runtime adapters)
 
@@ -147,6 +147,8 @@ Current test suite in `tests/`:
 - `tests/test_verticals.py`
 - `tests/test_mercari_adapter.py`
 - `tests/test_source_selection.py`
+- `tests/test_handheld_hunt.py`
+- `tests/test_carsdotcom_adapter.py`
 
 Test execution result is documented in the session entry for 2026-05-28 in `docs/current/SESSION_LOG.md`.
 
@@ -154,7 +156,7 @@ Test execution result is documented in the session entry for 2026-05-28 in `docs
 
 - No production adapter for eBay/Micro Center
 - OfferUp location targeting is not controllable by requested city (GeoIP-driven)
-- Cars.com requires Playwright/Chromium on the hunt host (Raven)
+- Cars.com requires Playwright/Chromium on the hunt host (Raven); intermittent Cloudflare/`ERR_HTTP2_PROTOCOL_ERROR` blocks — treat as flaky; failures return empty results
 - OpenAI translator backend is stubbed (`_translate_openai` raises `TranslationError`)
 - Test coverage is translator/rules focused; there are no adapter integration tests against live sites in CI here
 - Docs were stale before this refresh and must continue to be maintained from code truth

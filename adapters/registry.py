@@ -107,15 +107,17 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # Cars.com — production-usable on Raven (Playwright Chromium; residential IP)
+    # Cars.com — production-usable on Raven but browser/blocking-sensitive
     #
     # Parsing: Playwright Chromium → data-vehicle-details JSON attr + DOM selectors.
     # Each <fuse-card> custom element embeds the full vehicle payload as a JSON
     # attribute (year, make, model, trim, vin, price, mileage, listingId).
     #
     # Anti-bot: Cloudflare Bot Management + Akamai Bot Manager are present.
-    # Datacenter IPs get ERR_HTTP2_PROTOCOL_ERROR or HTTP 403.
-    # Residential IPs (Raven) pass through cleanly with headless Chromium.
+    # Intermittent ERR_HTTP2_PROTOCOL_ERROR / Cloudflare RST-stream blocks are
+    # possible even on residential IPs.  search_carsdotcom() logs and returns []
+    # on failure — it never raises, so a failed Cars.com fetch does not crash
+    # the hunt cycle.
     #
     # Location: zip-code targeted. The search URL accepts &zip=XXXXX and
     # Cars.com correctly limits/ranks results to that geography.  Pass a
@@ -124,18 +126,15 @@ _CAPABILITIES: dict[str, dict] = {
     # is not a zip code.
     #
     # Vertical: vehicles only. Not a general marketplace.
-    #
-    # Confirmed working from probe runs (May 2026):
-    #   - 48+ listing cards per page
-    #   - All 5 fields extracted: title, price, mileage (discarded — no Listing
-    #     field), dealer+city/state location, vehicledetail link
-    #   - Stable selector: [data-listing-id]
-    #   - Stable JSON attr: data-vehicle-details on ~60% of cards
     # -------------------------------------------------------------------------
     "carsdotcom": {
         "status": "beta",
         "stable": True,
         "experimental": False,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "cloudflare_akamai",
+        "failure_mode": "returns_empty_list",
         "requires_browser": True,
         "requires_login": False,
         "supports_location": True,
