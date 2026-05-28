@@ -97,6 +97,8 @@ _VERTICAL_KEYWORDS: dict[str, list[str]] = {
         "ram", "memory", "ddr4", "ddr5", "ddr3", "dimm",
         "ssd", "nvme", "m.2", "hard drive", "hdd",
         "motherboard", "mobo", "psu", "power supply",
+        "steam deck", "nintendo switch", "playstation", "xbox",
+        "ps5", "ps4", "xbox series",
     ],
     "home_theater": [
         "tv", "television", "oled", "qled", "qned",
@@ -240,6 +242,26 @@ def _parse_int(raw: str) -> int:
 
 def _spans_overlap(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
     return any(span[0] < s[1] and span[1] > s[0] for s in spans)
+
+
+def _intent_has_explicit_mileage_and_price(intent: str) -> bool:
+    """
+    True when the intent text marks separate mileage and price constraints.
+
+    Used to avoid treating equal numeric values (e.g. 50k miles + 50k dollars)
+    as extraction confusion.
+    """
+    if not intent:
+        return False
+    lower = intent.lower()
+    expanded = _expand_k(lower)
+    has_mileage = bool(_MILES_RE.search(expanded))
+    has_price = (
+        bool(_EXPLICIT_PRICE_RE.search(expanded))
+        or "$" in lower
+        or bool(re.search(r"\bdollars?\b", lower))
+    )
+    return has_mileage and has_price
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +583,7 @@ def build_hunt(
     # Import VERTICALS lazily to avoid circular import (this module is imported
     # by llm_translator which defines VERTICALS).
     from engine.llm_translator import VERTICALS  # noqa: PLC0415
+    from engine.source_selection import resolve_source_sites
 
     v1_key = _V2_TO_V1.get(vertical, "general")
     v_cfg = VERTICALS.get(v1_key, VERTICALS["general"])
@@ -657,7 +680,7 @@ def build_hunt(
         "vertical":         vertical,        # v2 name
         "vertical_key":     v1_key,          # VERTICALS dict key
         "category":         category,
-        "source_sites":     list(v_cfg["sources"]),
+        "source_sites":     resolve_source_sites(v1_key),
         "search_terms":     search_terms,
         "include_keywords": include_kw,
         "exclude_keywords": exclude_kw,
@@ -702,13 +725,18 @@ def validate_hunt(hunt: dict, vertical: str) -> dict:
     max_miles = adapter_opts.get("max_miles")
     errors: list[str] = []
 
-    # Check 1: max_price == max_miles → probable extraction confusion
-    if max_price is not None and max_miles is not None and max_price == max_miles:
+    # Check 1: equal values only when units are ambiguous (no explicit $/miles/dollars)
+    intent_text = hunt.get("_intent", "")
+    if (
+        max_price is not None
+        and max_miles is not None
+        and max_price == max_miles
+        and not _intent_has_explicit_mileage_and_price(intent_text)
+    ):
         log.warning(
-            "validate_hunt: max_price (%s) equals max_miles (%s) — "
-            "likely unit confusion.  Nulling max_price conservatively.  "
-            "Intent: %r",
-            max_price, max_miles, hunt.get("_intent", ""),
+            "validate_hunt: max_price (%s) equals max_miles (%s) with no distinct "
+            "unit markers — likely unit confusion.  Nulling max_price.  Intent: %r",
+            max_price, max_miles, intent_text,
         )
         hunt["max_price"] = None
         max_price = None
@@ -733,14 +761,17 @@ def validate_hunt(hunt: dict, vertical: str) -> dict:
                 f"Vehicle hunt is missing required parts exclusions: {sorted(missing)}"
             )
 
-    # Check 4: max_miles must NOT appear in max_price
-    # (this is guaranteed by build_hunt, but verify defensively)
-    if vertical == "vehicles" and max_miles is not None:
-        if hunt.get("max_price") == max_miles:
-            errors.append(
-                f"max_price ({hunt.get('max_price')}) equals max_miles — "
-                "mileage was placed in the price field, which is forbidden."
-            )
+    # Check 4: equal price/miles forbidden only when intent lacks distinct units
+    if (
+        vertical == "vehicles"
+        and max_miles is not None
+        and hunt.get("max_price") == max_miles
+        and not _intent_has_explicit_mileage_and_price(intent_text)
+    ):
+        errors.append(
+            f"max_price ({hunt.get('max_price')}) equals max_miles — "
+            "mileage was placed in the price field, which is forbidden."
+        )
 
     if errors:
         raise TranslationError(

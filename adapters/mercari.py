@@ -138,6 +138,31 @@ def _extract_items(payload: dict) -> list[dict]:
     return _walk_for_listing_objects(payload)
 
 
+def _canonical_item_url(item_id: str, raw_url: str | None = None) -> str:
+    """
+    Build a Mercari US item URL that opens in the browser.
+
+    Mercari US listing pages live at /us/item/{id}/ — the legacy /item/{id}/
+    path returns 404. API payloads may return either form; normalize always.
+    """
+    if isinstance(raw_url, str) and raw_url.strip():
+        link = raw_url.strip()
+        if link.startswith("/"):
+            link = "https://www.mercari.com" + link
+        elif link.startswith("item/"):
+            link = "https://www.mercari.com/" + link
+        # Legacy path without /us/
+        link = re.sub(
+            r"^https?://(?:www\.)?mercari\.com/item/",
+            "https://www.mercari.com/us/item/",
+            link,
+            flags=re.IGNORECASE,
+        )
+        if re.search(r"mercari\.com/us/item/", link, re.IGNORECASE):
+            return link if link.endswith("/") else link + "/"
+    return f"https://www.mercari.com/us/item/{item_id}/"
+
+
 def _normalize_listing(item: dict) -> Listing | None:
     """
     Convert a Mercari JSON object into Listing.
@@ -157,11 +182,8 @@ def _normalize_listing(item: dict) -> Listing | None:
 
     price = _normalize_price(item.get("price"))
 
-    link = item.get("url")
-    if isinstance(link, str) and link.startswith("/"):
-        link = "https://www.mercari.com" + link
-    if not isinstance(link, str) or not link.strip():
-        link = f"https://www.mercari.com/item/{item_id}/"
+    raw_url = item.get("url") or item.get("itemUrl") or item.get("permalink")
+    link = _canonical_item_url(item_id, raw_url if isinstance(raw_url, str) else None)
 
     image = None
     thumbs = item.get("thumbnails")
@@ -186,7 +208,7 @@ def _normalize_listing(item: dict) -> Listing | None:
 
 def search_mercari(query: str, city: str = "houston", limit: int = 10) -> list[Listing]:
     """
-    Experimental Mercari adapter (requests-only Strategy D).
+    Mercari adapter (requests-only Strategy D).
 
     Notes:
     - `city` is accepted for adapter-signature compatibility but currently unused.

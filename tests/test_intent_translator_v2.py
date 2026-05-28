@@ -186,6 +186,15 @@ class TestExtractConstraints:
         assert c["max_miles"] == 50_000, f"max_miles wrong: {c}"
         assert c["max_price"] == 30_000, f"max_price wrong: {c}"
 
+    def test_equal_50k_miles_and_50k_dollars(self):
+        """Equal numeric values with distinct units must both be kept."""
+        c = extract_constraints(
+            "toyota sequoia less than 50k miles and less than 50k dollars",
+            "vehicles",
+        )
+        assert c["max_miles"] == 50_000
+        assert c["max_price"] == 50_000
+
     def test_miles_and_dollar_price(self):
         c = extract_constraints(
             "toyota sequoia under 50k miles under $30k",
@@ -253,9 +262,17 @@ class TestValidateHunt:
         assert result["max_price"] == 30_000
         assert result["adapter_options"]["max_miles"] == 50_000
 
-    def test_price_equals_miles_is_corrected(self):
-        """When max_price equals max_miles, price is nulled conservatively."""
+    def test_price_equals_miles_with_distinct_units_preserved(self):
         hunt = self._make_vehicle_hunt(max_price=50_000, max_miles=50_000)
+        hunt["_intent"] = "toyota sequoia less than 50k miles and less than 50k dollars"
+        result = validate_hunt(hunt, "vehicles")
+        assert result["max_price"] == 50_000
+        assert result["adapter_options"]["max_miles"] == 50_000
+
+    def test_price_equals_miles_ambiguous_is_corrected(self):
+        """Equal values without unit markers → null price."""
+        hunt = self._make_vehicle_hunt(max_price=50_000, max_miles=50_000)
+        hunt["_intent"] = "toyota sequoia under 50k"
         result = validate_hunt(hunt, "vehicles")
         assert result["max_price"] is None
 
@@ -285,6 +302,14 @@ class TestTranslateV2Regression:
     Six mandatory regression cases from the feature specification.
     Each asserts the minimum expected output; extra fields are fine.
     """
+
+    def test_regression_equal_50k_miles_50k_dollars(self):
+        """Live Raven case: equal 50k values with both unit markers."""
+        t = translate_v2(
+            "toyota sequoia less than 50k miles and less than 50k dollars"
+        )
+        assert t.max_price == 50_000
+        assert t.adapter_options.get("max_miles") == 50_000
 
     def test_regression_1_sequoia_50k_miles_30k_dollars(self):
         """
