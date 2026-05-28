@@ -1263,7 +1263,7 @@ def _generate_name(
 
 
 # ---------------------------------------------------------------------------
-# Rules-based translator — main function
+# Rules-based translator — routing + vertical-specific implementations
 # ---------------------------------------------------------------------------
 
 def _translate_rules_based(
@@ -1273,58 +1273,77 @@ def _translate_rules_based(
     max_price: Optional[int],
 ) -> HuntTranslation:
     """
-    Deterministic pattern-matching translator.  No external calls.
+    Route vehicle intents to the v2 pipeline; all other verticals use v1.
+
+    Vehicle routing — translate_v2() (engine/intent_translator_v2.py):
+      - 3-pass unit-aware constraint extraction (mileage never bleeds into price)
+      - Structured 6-step inspectable pipeline
+      - validated_hunt() guard (max_price ≠ max_miles)
+
+    Non-vehicle routing — _translate_v1_non_vehicle() (below):
+      - Original deterministic logic for GPU, RAM, TV, and general hunts
+      - Preserved unchanged to avoid regressions in those verticals
+      - GPU model detection, RAM DDR/capacity/speed extraction, TV
+        size/resolution/brand/panel extraction, general noise stripping
     """
-    # Lowercase and apply make-spelling normalization so that common typos
-    # (e.g. "hyndai" → "hyundai") flow through vertical detection, make/model
-    # extraction, search terms, and include_keywords correctly.
+    from engine.intent_translator_v2 import classify_vertical, _V2_TO_V1  # noqa: PLC0415
+
+    v1_vertical = _V2_TO_V1.get(classify_vertical(intent), "general")
+
+    if v1_vertical == "vehicles":
+        from engine.intent_translator_v2 import translate_v2  # noqa: PLC0415
+        return translate_v2(intent, location=location, max_price=max_price)
+
+    return _translate_v1_non_vehicle(intent, location=location, max_price=max_price)
+
+
+def _translate_v1_non_vehicle(
+    intent: str,
+    *,
+    location: Optional[str],
+    max_price: Optional[int],
+) -> HuntTranslation:
+    """
+    Original v1 deterministic translator for GPU, RAM, TV, and general hunts.
+
+    Unchanged from the pre-v2 implementation.  Vehicles are handled by
+    translate_v2() via _translate_rules_based() routing above.
+    """
     intent_lower_orig = _normalize_makes(intent.lower())
+    intent_lower_num  = _expand_k_numbers(intent_lower_orig)
 
-    # Expand k-suffix numbers for numeric extractions ONLY.
-    # We do NOT apply this to the original intent so that "4k" and "8k"
-    # are still recognised as resolutions, not converted to 4000/8000.
-    intent_lower_num = _expand_k_numbers(intent_lower_orig)
-
-    # 1. Identify vertical
     vertical, v_cfg = _detect_vertical(intent_lower_orig)
 
-    # Pre-compute RAM flag once; reused in several branches below.
-    _is_ram = _is_ram_hunt(intent_lower_orig)
-
-    # Early GPU detection: bare AMD model numbers (e.g. "6700xt") score zero
-    # against the keyword-based vertical scorer, so they fall through to
-    # "general".  Detect the GPU model upfront and override the vertical when
-    # a model is found but the scorer missed it.
-    _pre_gpu = _extract_gpu_model(intent_lower_orig) if not _is_ram else None
+    _is_ram   = _is_ram_hunt(intent_lower_orig)
+    _pre_gpu  = _extract_gpu_model(intent_lower_orig) if not _is_ram else None
     if _pre_gpu and vertical != "computer_parts":
         vertical = "computer_parts"
         v_cfg    = VERTICALS["computer_parts"]
 
-    # 2. Extract structured attributes
-    #    Resolution + vertical keywords → original text
-    #    Prices, mileage, capacity       → k-expanded text
     size       = _extract_size(intent_lower_orig)       if v_cfg.get("size_pattern") else None
     resolution = _extract_resolution(intent_lower_orig) if vertical == "tv_home_theater" else None
     tv_brand   = _extract_tv_brand(intent_lower_orig)   if vertical == "tv_home_theater" else None
     tv_panel   = _extract_tv_panel(intent_lower_orig)   if vertical == "tv_home_theater" else None
 
-    ram_type    = _extract_ram_type(intent_lower_orig)  if vertical == "computer_parts" else None
-    # Reuse _pre_gpu to avoid calling _extract_gpu_model a second time.
-    gpu_model   = _pre_gpu if (vertical == "computer_parts" and not _is_ram) else None
-    min_gb      = _extract_min_gb(intent_lower_num)     if vertical == "computer_parts" else None
+    ram_type      = _extract_ram_type(intent_lower_orig) if vertical == "computer_parts" else None
+    gpu_model     = _pre_gpu if (vertical == "computer_parts" and not _is_ram) else None
+    min_gb        = _extract_min_gb(intent_lower_num)    if vertical == "computer_parts" else None
     min_speed_mhz = (
         _extract_min_speed_mhz(intent_lower_num)
         if vertical == "computer_parts" and _is_ram
         else None
     )
-    min_vram_gb = (_extract_min_vram_gb(intent_lower_orig)
-                   if vertical == "computer_parts" and not _is_ram
-                   else None)
+    min_vram_gb = (
+        _extract_min_vram_gb(intent_lower_orig)
+        if vertical == "computer_parts" and not _is_ram
+        else None
+    )
 
+    # vehicles branch kept for completeness but will never fire via this path
     veh_pair   = _extract_vehicle_make_model(intent_lower_orig) if vertical == "vehicles" else None
     make       = veh_pair[0] if veh_pair else None
     model      = veh_pair[1] if veh_pair else None
-    miles      = _extract_miles(intent_lower_num)       if vertical == "vehicles" else None
+    miles      = _extract_miles(intent_lower_num) if vertical == "vehicles" else None
     min_year, max_year = (
         _extract_year_range(intent_lower_orig) if vertical == "vehicles" else (None, None)
     )
@@ -1332,25 +1351,20 @@ def _translate_rules_based(
     price = _extract_price(intent_lower_num, max_price)
     loc   = _sanitize_craigslist_location(location)
 
-    # 3. Build search terms, include_keywords, and (for RAM) exclude_keywords
     ram_specific_exclude: list[str] = []
-    gpu_model_excl:       list[str] = []   # XTX guard; empty for all non-GPU branches
-    tv_require_all:       list[str] = []   # populated by TV branch; empty for all others
+    gpu_model_excl:       list[str] = []
+    tv_require_all:       list[str] = []
 
     if vertical == "tv_home_theater":
         search_terms, include_kw, tv_require_all = _build_tv_translation(
             size, resolution, brand=tv_brand, panel=tv_panel
         )
-
     elif vertical == "computer_parts" and _is_ram:
         search_terms, include_kw, ram_specific_exclude = _build_ram_translation(ram_type, min_gb)
-
     elif vertical == "computer_parts":
         search_terms, include_kw, gpu_model_excl = _build_gpu_translation(gpu_model, intent)
-
     elif vertical == "vehicles":
         search_terms, include_kw = _build_vehicle_translation(make or "", model or "", intent)
-
     else:
         clean = _PRICE_RE.sub("", intent_lower_num).strip()
         clean = _MILES_RE.sub("", clean).strip()
@@ -1359,25 +1373,19 @@ def _translate_rules_based(
         search_terms = [clean.title() if clean else intent]
         include_kw   = []
 
-    # 4. Exclude keywords
-    if ram_specific_exclude:
-        exclude_kw: list[str] = ram_specific_exclude
-    else:
-        exclude_kw = list(v_cfg.get("default_exclude", [])) + gpu_model_excl
+    exclude_kw: list[str] = (
+        ram_specific_exclude
+        if ram_specific_exclude
+        else list(v_cfg.get("default_exclude", [])) + gpu_model_excl
+    )
 
-    # 5. Category label
-    category = vertical.replace("_", " ")
-
-    # 6. adapter_options: structured constraints forwarded to the rule engine
+    category    = vertical.replace("_", " ")
     adapter_opts: dict = {}
 
     if tv_require_all:
-        # Store multi-discriminator TV constraints for AND-semantics title check.
-        # Kept in adapter_options so existing Hunt schema requires no changes.
         adapter_opts["require_all_keywords"] = tv_require_all
 
     if vertical == "vehicles":
-        # Filter out $0/$1 placeholder listings automatically.
         adapter_opts["min_price"] = 200
         if miles:
             adapter_opts["max_miles"] = miles
@@ -1393,17 +1401,14 @@ def _translate_rules_based(
             if min_speed_mhz:
                 adapter_opts["min_speed_mhz"] = min_speed_mhz
         else:
-            # GPU hunt: min_vram_gb only set when "vram" / "video memory" explicit.
             if min_vram_gb:
                 adapter_opts["min_vram_gb"] = min_vram_gb
 
-    # 7. Auto-generate name
     name = _generate_name(
         vertical, size, resolution, gpu_model, make, model, ram_type, search_terms,
         brand=tv_brand, panel=tv_panel,
     )
 
-    # 8. Notes / reasoning summary
     constraint_parts: list[str] = []
     if tv_brand:   constraint_parts.append(f"brand={tv_brand}")
     if tv_panel:   constraint_parts.append(f"panel={tv_panel}")
@@ -1425,7 +1430,9 @@ def _translate_rules_based(
     if price:      constraint_parts.append(f"max_price=${price}")
     if loc:        constraint_parts.append(f"location={loc}")
     if adapter_opts.get("min_price"):
-        constraint_parts.append(f"min_price=${adapter_opts['min_price']} (filters placeholder $0/$1 ads)")
+        constraint_parts.append(
+            f"min_price=${adapter_opts['min_price']} (filters placeholder $0/$1 ads)"
+        )
 
     constraints_str = (
         "Constraints: " + ", ".join(constraint_parts)
