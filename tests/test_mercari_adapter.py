@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from adapters.mercari import (
+    _canonical_item_url,
     _extract_items,
     _is_relevant_to_query,
     _normalize_listing,
@@ -113,18 +114,35 @@ class MercariAdapterTests(unittest.TestCase):
         self.assertIsNone(_normalize_price(None))
         self.assertIsNone(_normalize_price("38000"))
 
+    def test_canonical_item_url_us_path(self):
+        self.assertEqual(
+            _canonical_item_url("m86534672098"),
+            "https://www.mercari.com/us/item/m86534672098/",
+        )
+        self.assertEqual(
+            _canonical_item_url("m555", "/item/m555/"),
+            "https://www.mercari.com/us/item/m555/",
+        )
+        self.assertEqual(
+            _canonical_item_url(
+                "m59843646014",
+                "https://www.mercari.com/item/m59843646014/",
+            ),
+            "https://www.mercari.com/us/item/m59843646014/",
+        )
+
     def test_normalize_listing_filters_noise_and_builds_link(self):
         self.assertIsNone(_normalize_listing({"id": 4, "name": "Home"}))
         good = _normalize_listing({"id": "m123", "name": "RTX 3080", "price": 38000})
         self.assertIsNotNone(good)
         self.assertEqual(good.title, "RTX 3080")
         self.assertEqual(good.price, 380)
-        self.assertEqual(good.link, "https://www.mercari.com/item/m123/")
+        self.assertEqual(good.link, "https://www.mercari.com/us/item/m123/")
 
         good2 = _normalize_listing(
             {"id": "m555", "name": "GPU", "price": 10000, "url": "/item/m555/"}
         )
-        self.assertEqual(good2.link, "https://www.mercari.com/item/m555/")
+        self.assertEqual(good2.link, "https://www.mercari.com/us/item/m555/")
 
     def test_extract_items_prefers_data_search_items(self):
         payload = {"data": {"search": {"items": [{"id": "m1", "name": "x"}]}}}
@@ -144,7 +162,7 @@ class MercariAdapterTests(unittest.TestCase):
         self.assertEqual(results[0].source, "mercari")
         self.assertEqual(results[0].title, "RTX 3080")
         self.assertEqual(results[0].price, 380)
-        self.assertTrue(results[0].link.startswith("https://www.mercari.com/item/m"))
+        self.assertTrue(results[0].link.startswith("https://www.mercari.com/us/item/m"))
         self.assertTrue(all("asus rog 32 oled" not in r.title.lower() for r in results))
 
         # Verify API request uses csrf header and excludes Brotli.

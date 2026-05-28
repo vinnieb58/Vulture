@@ -30,8 +30,9 @@ Last refreshed: 2026-05-28 (UTC)
 - `engine/rules.py`: deterministic listing filter + structured title parsing
 - `adapters/registry.py`: source registry and capability metadata
 - `adapters/craigslist.py`: stable requests/bs4 adapter
-- `adapters/offerup.py`: experimental requests + `__NEXT_DATA__` parser
-- `adapters/carsdotcom.py`: experimental Playwright adapter (residential IP recommended)
+- `adapters/offerup.py`: production-usable requests + `__NEXT_DATA__` parser (GeoIP-only location)
+- `adapters/mercari.py`: production-usable requests GraphQL search (canonical `/us/item/` URLs)
+- `adapters/carsdotcom.py`: production-usable Playwright adapter (vehicles; residential IP + Chromium on Raven)
 
 ## Current runtime flow
 
@@ -85,15 +86,20 @@ Hunt row (DB) or YAML hunt
   -> Discord webhook alert for new rows
 ```
 
+## Deployment model
+
+Vulture is a **personal/self-hosted** system for a single operator (e.g. Raven), not a multi-tenant SaaS. Adapters that work in live testing participate in normal `/hunt` source selection by vertical. Registry metadata stays honest about caveats (`geoip_only`, `requires_browser`, etc.) without blocking runtime.
+
 ## Supported adapters and status
 
 ### Registered in live runtime (`adapters/registry.py`)
 
 | Source | Classification | Status notes |
 |---|---|---|
-| `craigslist` | **stable** | Primary production adapter; requests + bs4; location via CL subdomain |
-| `offerup` | **experimental candidate** | Implemented adapter, but `supports_location=False` (`geoip_only`); city arg advisory only |
-| `carsdotcom` | **experimental candidate** | Implemented adapter requires Playwright + Chromium; anti-bot/network sensitivity; residential-IP recommended |
+| `craigslist` | **stable** | Primary adapter; requests + bs4; location via CL subdomain |
+| `offerup` | **beta** | Production-usable on residential IP; `geoip_only` location (city arg advisory) |
+| `mercari` | **beta** | Production-usable search + relevance filter; listing URLs use `/us/item/{id}/` |
+| `carsdotcom` | **beta** | Production-usable on Raven with Playwright + Chromium; vehicles only; zip targeting |
 
 ### Probe/experiment-only (not registered runtime adapters)
 
@@ -104,7 +110,7 @@ Hunt row (DB) or YAML hunt
 | Cars.com request/playwright probes | **probe only + informs experimental adapter** | Recon scripts exist; production adapter present but still marked experimental |
 | OfferUp location probe | **probe only + informs experimental adapter** | Probe confirms GeoIP-only location behavior |
 | Craigslist probe script | **probe only** | Runtime adapter exists separately and is stable |
-| Mercari | **deferred** | No adapter or probe file found in repository |
+| Mercari probe (`experiments/adapters/mercari_probe.py`) | **probe only** | Informs `adapters/mercari.py` runtime adapter |
 
 ## Database and hunt model behavior
 
@@ -139,14 +145,16 @@ Current test suite in `tests/`:
 - `tests/test_intent_translator_v2.py`
 - `tests/test_translator_non_vehicle_regression.py`
 - `tests/test_verticals.py`
+- `tests/test_mercari_adapter.py`
+- `tests/test_source_selection.py`
 
 Test execution result is documented in the session entry for 2026-05-28 in `docs/current/SESSION_LOG.md`.
 
 ## Known gaps / TODOs
 
-- No production adapter for eBay/Micro Center/Mercari
+- No production adapter for eBay/Micro Center
 - OfferUp location targeting is not controllable by requested city (GeoIP-driven)
-- Cars.com adapter remains explicitly experimental
+- Cars.com requires Playwright/Chromium on the hunt host (Raven)
 - OpenAI translator backend is stubbed (`_translate_openai` raises `TranslationError`)
 - Test coverage is translator/rules focused; there are no adapter integration tests against live sites in CI here
 - Docs were stale before this refresh and must continue to be maintained from code truth

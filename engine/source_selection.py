@@ -1,16 +1,15 @@
 """
 engine/source_selection.py
 
-Vertical-aware source_sites selection with experimental-adapter gating.
+Vertical-aware source_sites selection for translated hunts.
 
-Production hunts (default): craigslist only.
-Dev/test (VULTURE_ENABLE_EXPERIMENTAL_ADAPTERS=true): multi-source profiles
-per vertical. Explicit source lists (e.g. /hunt_create) bypass gating.
+Personal/self-hosted deployment: Craigslist, OfferUp, Mercari, and Cars.com
+participate in normal vertical profiles. Capability metadata in the registry
+documents caveats (geoip_only, requires_browser, etc.) without blocking runtime.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 from adapters.registry import get_capabilities, list_sources, normalize_source
@@ -18,32 +17,32 @@ from adapters.registry import get_capabilities, list_sources, normalize_source
 _STABLE_DEFAULT = ["craigslist"]
 
 # Vertical keys match VERTICALS in llm_translator.py and v2 classify_vertical().
-_EXPERIMENTAL_PROFILES: dict[str, list[str]] = {
+_VERTICAL_PROFILES: dict[str, list[str]] = {
     "computer_parts": ["craigslist", "mercari", "offerup"],
     "laptops_computers": ["craigslist", "mercari", "offerup"],
     "vehicles": ["craigslist", "carsdotcom", "offerup"],
     "tv_home_theater": ["craigslist", "offerup"],
-    "home_theater": ["craigslist", "offerup"],  # v2 vertical name
-    "general": ["craigslist", "offerup"],
-    "general_marketplace": ["craigslist", "offerup"],
+    "home_theater": ["craigslist", "offerup"],
+    "general": ["craigslist", "offerup", "mercari"],
+    "general_marketplace": ["craigslist", "offerup", "mercari"],
     "furniture_home": ["craigslist", "offerup"],
 }
 
-# Sources that must never appear outside their allowed verticals when auto-selected.
 _VERTICAL_ONLY_SOURCES: dict[str, frozenset[str]] = {
     "carsdotcom": frozenset({"vehicles"}),
     "mercari": frozenset({
         "computer_parts",
         "laptops_computers",
         "gaming",
+        "general",
+        "general_marketplace",
     }),
 }
 
 
 def experimental_adapters_enabled() -> bool:
-    """True when VULTURE_ENABLE_EXPERIMENTAL_ADAPTERS is a truthy env value."""
-    raw = os.getenv("VULTURE_ENABLE_EXPERIMENTAL_ADAPTERS", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """Deprecated: adapters are enabled by default. Always returns True."""
+    return True
 
 
 def _registered_sources() -> frozenset[str]:
@@ -64,7 +63,7 @@ def _filter_registered(sources: list[str]) -> list[str]:
 
 
 def _source_allowed_for_vertical(source: str, vertical_key: str) -> bool:
-    """Enforce vehicle-only / electronics-focused adapter policy."""
+    """Enforce vehicle-only / category-focused adapter policy."""
     restricted = _VERTICAL_ONLY_SOURCES.get(source)
     if restricted is not None:
         return vertical_key in restricted
@@ -92,23 +91,16 @@ def resolve_source_sites(
     """
     Return source_sites for a translated or manual hunt.
 
-    explicit_sources: when provided (non-empty), use after normalize/filter;
-      experimental sources are allowed without the env flag.
-    experimental: override env; default reads VULTURE_ENABLE_EXPERIMENTAL_ADAPTERS.
+    explicit_sources: when provided (non-empty), use after normalize/filter.
+    experimental: ignored (kept for call-site compatibility).
     """
+    del experimental
     if explicit_sources:
-        cleaned = _filter_registered([normalize_source(s) for s in explicit_sources if s and str(s).strip()])
-        return cleaned
+        return _filter_registered(
+            [normalize_source(s) for s in explicit_sources if s and str(s).strip()]
+        )
 
-    use_experimental = (
-        experimental_adapters_enabled()
-        if experimental is None
-        else experimental
-    )
-    if not use_experimental:
-        return list(_STABLE_DEFAULT)
-
-    profile = _EXPERIMENTAL_PROFILES.get(vertical_key, _STABLE_DEFAULT)
+    profile = _VERTICAL_PROFILES.get(vertical_key, _STABLE_DEFAULT)
     filtered = [
         s for s in _filter_registered(list(profile))
         if _source_allowed_for_vertical(s, vertical_key)
@@ -120,8 +112,8 @@ def filter_explicit_source_sites(
     source_sites: list[str],
     vertical_key: str,
 ) -> list[str]:
-    """
-    Normalize manual source_sites and drop unknown sources.
-    Does not strip experimental adapters when explicitly requested.
-    """
-    return _filter_registered([normalize_source(s) for s in source_sites if s and str(s).strip()])
+    """Normalize manual source_sites and drop unknown sources."""
+    del vertical_key
+    return _filter_registered(
+        [normalize_source(s) for s in source_sites if s and str(s).strip()]
+    )

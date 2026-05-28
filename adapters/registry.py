@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 
 _CAPABILITIES: dict[str, dict] = {
     "craigslist": {
+        "status": "stable",
         "stable": True,
         "experimental": False,
         "requires_browser": False,
@@ -51,7 +52,7 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # OfferUp — experimental (usable on residential IP hosts like Raven)
+    # OfferUp — production-usable (GeoIP-only location; residential IP recommended)
     #
     # Parsing: requests + BeautifulSoup + __NEXT_DATA__ JSON (Next.js SSR).
     # No browser automation required.  No login required for basic search.
@@ -71,8 +72,9 @@ _CAPABILITIES: dict[str, dict] = {
     # logged for observability but does not affect which listings are returned.
     # -------------------------------------------------------------------------
     "offerup": {
-        "stable": False,
-        "experimental": True,
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
         "requires_browser": False,
         "requires_login": False,
         "supports_location": False,
@@ -89,8 +91,9 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     "mercari": {
-        "stable": False,
-        "experimental": True,
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
         "requires_browser": False,
         "requires_login": False,
         "supports_location": False,
@@ -104,7 +107,7 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # Cars.com — experimental (residential-IP only, requires Playwright Chromium)
+    # Cars.com — production-usable on Raven (Playwright Chromium; residential IP)
     #
     # Parsing: Playwright Chromium → data-vehicle-details JSON attr + DOM selectors.
     # Each <fuse-card> custom element embeds the full vehicle payload as a JSON
@@ -130,8 +133,9 @@ _CAPABILITIES: dict[str, dict] = {
     #   - Stable JSON attr: data-vehicle-details on ~60% of cards
     # -------------------------------------------------------------------------
     "carsdotcom": {
-        "stable": False,
-        "experimental": True,
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
         "requires_browser": True,
         "requires_login": False,
         "supports_location": True,
