@@ -51,6 +51,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from engine.source_selection import resolve_source_sites
 from engine.verticals import ALL_VERTICALS  # vertical key constants for validation
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,9 @@ VERTICALS: dict[str, dict] = {
             "ssd", "nvme", "m.2", "hard drive", "hdd",
             # Other
             "motherboard", "mobo", "psu", "power supply",
+            # Handhelds / consoles (gaming; mercari when experimental enabled)
+            "steam deck", "nintendo switch", "playstation", "xbox",
+            "ps5", "ps4", "xbox series",
         ],
         "size_pattern": False,
         "default_exclude": [
@@ -1597,7 +1601,7 @@ def _translate_v1_non_vehicle(
         name             = name,
         vertical         = vertical,
         category         = category,
-        source_sites     = list(v_cfg["sources"]),
+        source_sites     = resolve_source_sites(vertical),
         search_terms     = search_terms,
         include_keywords = include_kw,
         exclude_keywords = exclude_kw,

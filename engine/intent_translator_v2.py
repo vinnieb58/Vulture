@@ -97,6 +97,8 @@ _VERTICAL_KEYWORDS: dict[str, list[str]] = {
         "ram", "memory", "ddr4", "ddr5", "ddr3", "dimm",
         "ssd", "nvme", "m.2", "hard drive", "hdd",
         "motherboard", "mobo", "psu", "power supply",
+        "steam deck", "nintendo switch", "playstation", "xbox",
+        "ps5", "ps4", "xbox series",
     ],
     "home_theater": [
         "tv", "television", "oled", "qled", "qned",
@@ -561,6 +563,7 @@ def build_hunt(
     # Import VERTICALS lazily to avoid circular import (this module is imported
     # by llm_translator which defines VERTICALS).
     from engine.llm_translator import VERTICALS  # noqa: PLC0415
+    from engine.source_selection import resolve_source_sites
 
     v1_key = _V2_TO_V1.get(vertical, "general")
     v_cfg = VERTICALS.get(v1_key, VERTICALS["general"])
@@ -657,7 +660,7 @@ def build_hunt(
         "vertical":         vertical,        # v2 name
         "vertical_key":     v1_key,          # VERTICALS dict key
         "category":         category,
-        "source_sites":     list(v_cfg["sources"]),
+        "source_sites":     resolve_source_sites(v1_key),
         "search_terms":     search_terms,
         "include_keywords": include_kw,
         "exclude_keywords": exclude_kw,
