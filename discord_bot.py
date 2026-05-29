@@ -29,6 +29,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+from crow.bot import setup_crow
 from engine.command_router import dispatch
 from engine.database import init_db
 from engine.hunt_repository import init_hunts_table
@@ -119,6 +120,9 @@ class VultureBot(discord.Client):
 
 
 bot = VultureBot()
+
+# Crow v0.1 — read-only Raven / Vulture ops commands (same runtime as hunt commands)
+setup_crow(bot, max_message_len=_MAX_MSG)
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,8 @@
 
 Vulture is a deal-hunting tool that scrapes marketplaces for listings matching defined hunts, filters them against configurable rules, persists new finds to a local SQLite database, and sends Discord alerts for anything new.
 
+**Crow v0.1** (read-only ops console for Raven + Vulture) lives in the `crow/` package inside this repo. See [docs/CROW_V0_1.md](docs/CROW_V0_1.md). Start the Discord bot the same way: `python discord_bot.py`.
+
 ---
 
 ## v1.0 Scope
