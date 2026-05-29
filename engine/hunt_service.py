@@ -79,6 +79,32 @@ def _require_hunt(hunt_id: str) -> Hunt:
     return hunt
 
 
+def _is_vehicle_hunt(hunt: Hunt) -> bool:
+    category = (hunt.category or "").lower().replace(" ", "_")
+    return category == "vehicles" or "vehicle" in category
+
+
+def _resolve_vehicle_make_model(hunt: Hunt) -> tuple[Optional[str], Optional[str]]:
+    """Return (make, model) for vehicle title matching at runtime."""
+    ao = hunt.adapter_options or {}
+    make = ao.get("make")
+    model = ao.get("model")
+    if make and model:
+        return str(make).lower(), str(model).lower()
+    for kw in hunt.include_keywords or []:
+        tokens = str(kw).lower().split()
+        if len(tokens) >= 2:
+            return tokens[0], tokens[1]
+    name_parts = (hunt.name or "").lower().replace("-", "_").split("_")
+    if len(name_parts) >= 2 and name_parts[0] and name_parts[1]:
+        return name_parts[0], name_parts[1]
+    if make:
+        return str(make).lower(), str(model).lower() if model else None
+    if model:
+        return None, str(model).lower()
+    return None, None
+
+
 def _apply_transition(hunt: Hunt, target_status: str) -> Hunt:
     """
     Validate and apply a status transition.
@@ -426,9 +452,13 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         rules["min_gpu_class"] = str(min_gpu_class)
 
     vehicle_make = hunt.adapter_options.get("make")
+    vehicle_model = hunt.adapter_options.get("model")
+    if _is_vehicle_hunt(hunt) and (not vehicle_make or not vehicle_model):
+        inferred_make, inferred_model = _resolve_vehicle_make_model(hunt)
+        vehicle_make = vehicle_make or inferred_make
+        vehicle_model = vehicle_model or inferred_model
     if vehicle_make:
         rules["vehicle_make"] = str(vehicle_make)
-    vehicle_model = hunt.adapter_options.get("model")
     if vehicle_model:
         rules["vehicle_model"] = str(vehicle_model)
 

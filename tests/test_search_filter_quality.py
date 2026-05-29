@@ -92,6 +92,13 @@ class TestVehicleModelOnlyMatching:
     def test_sequoia_without_toyota_passes(self, rules):
         assert _passes("SEQUOIA 2018 LIMITED", rules, price=25000)
 
+    def test_sequoia_2008_passes_with_inferred_fields(self, rules):
+        # include_keywords-only legacy shape: make/model inferred before include check
+        rules.pop("vehicle_make", None)
+        rules.pop("vehicle_model", None)
+        rules.pop("min_year", None)  # title relevance only — year filter is separate
+        assert _passes("SEQUOIA 2008 LIMITED", rules, price=25000)
+
 
     def test_sequoia_2008_title_relevance_without_year_rule(self):
         rules = {
@@ -205,3 +212,54 @@ class TestAdapterRegistryMetadata:
         assert caps["experimental"] is True
         assert caps["requires_browser"] is True
         assert caps.get("flaky") is True
+
+class TestHuntExecutionDictVehicleFields:
+    """Runtime path: legacy DB hunts without adapter_options.make/model."""
+
+    def _legacy_sequoia_hunt(self):
+        from models.hunt import Hunt
+        return Hunt(
+            name="toyota_sequoia",
+            category="vehicles",
+            source_sites=["craigslist", "offerup"],
+            search_terms=["Toyota Sequoia"],
+            include_keywords=["toyota sequoia"],
+            exclude_keywords=[
+                "part out", "parts only", "for parts", "OEM", "roof rack",
+                "engine", "transmission", "mirror", "wheel",
+            ],
+            adapter_options={"min_price": 200},
+        )
+
+    def test_execution_dict_infers_vehicle_make_model(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        ex = hunt_to_execution_dict(self._legacy_sequoia_hunt())
+        rules = ex["rules"]
+        assert rules.get("vehicle_make") == "toyota"
+        assert rules.get("vehicle_model") == "sequoia"
+
+    def test_sequoia_2008_passes_legacy_runtime_rules(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        rules = hunt_to_execution_dict(self._legacy_sequoia_hunt())["rules"]
+        assert _passes("SEQUOIA 2008 LIMITED", rules, price=25000)
+
+    def test_sequoia_2018_passes_legacy_runtime_rules(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        rules = hunt_to_execution_dict(self._legacy_sequoia_hunt())["rules"]
+        assert _passes("SEQUOIA 2018 LIMITED", rules, price=25000)
+
+    def test_tundra_and_sequoia_rejects(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        rules = hunt_to_execution_dict(self._legacy_sequoia_hunt())["rules"]
+        assert _fails("Toyota Tundra and sequoia", rules, price=25000)
+
+    def test_mixed_models_rejects(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        rules = hunt_to_execution_dict(self._legacy_sequoia_hunt())["rules"]
+        assert _fails("Toyota Tacoma 4runner Tundra and sequoia", rules, price=25000)
+
+    def test_roof_rack_oem_rejects(self):
+        from engine.hunt_service import hunt_to_execution_dict
+        rules = hunt_to_execution_dict(self._legacy_sequoia_hunt())["rules"]
+        assert _fails("Toyota Sequoia TRD roof rack OEM", rules, price=120)
+

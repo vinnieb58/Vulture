@@ -77,6 +77,20 @@ def _looks_like_gpu_whole_system(title_lower: str) -> bool:
     return any(p in title_lower for p in _GPU_WHOLE_SYSTEM_PATTERNS)
 
 
+
+def _ensure_vehicle_structured_fields(rules: dict) -> None:
+    """Populate vehicle_make/model from include_keywords for legacy DB hunts."""
+    if rules.get("vehicle_make") and rules.get("vehicle_model"):
+        return
+    if rules.get("vertical") != "vehicles":
+        return
+    for kw in rules.get("include_keywords") or []:
+        tokens = str(kw).lower().split()
+        if len(tokens) >= 2:
+            rules.setdefault("vehicle_make", tokens[0])
+            rules.setdefault("vehicle_model", tokens[1])
+            return
+
 def _looks_like_ram_whole_computer(title_lower: str) -> bool:
     if any(p in title_lower for p in _RAM_WHOLE_COMPUTER_PATTERNS):
         return True
@@ -348,6 +362,8 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
             return f"{_vpfx}price ${p} > max_price ${max_price}"
 
     # --- keyword filters ---
+
+    _ensure_vehicle_structured_fields(rules)
 
     # include_keywords — OR / any() semantics (backward-compatible).
     include_keywords = rules.get("include_keywords") or []
