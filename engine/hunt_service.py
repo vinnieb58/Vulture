@@ -425,6 +425,17 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     if min_gpu_class:
         rules["min_gpu_class"] = str(min_gpu_class)
 
+    vehicle_make = hunt.adapter_options.get("make")
+    if vehicle_make:
+        rules["vehicle_make"] = str(vehicle_make)
+    vehicle_model = hunt.adapter_options.get("model")
+    if vehicle_model:
+        rules["vehicle_model"] = str(vehicle_model)
+
+    hunt_subtype = hunt.adapter_options.get("hunt_subtype")
+    if hunt_subtype:
+        rules["hunt_subtype"] = str(hunt_subtype)
+
     # city is used as the Craigslist subdomain; multi-word values cause DNS
     # failures (e.g. "mandeville louisiana").  For non-Craigslist adapters
     # (e.g. OfferUp) city is advisory only — the adapter logs it but does

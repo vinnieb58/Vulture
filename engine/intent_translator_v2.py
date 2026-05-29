@@ -210,6 +210,7 @@ VEHICLE_PARTS_EXCLUDE: list[str] = [
     "poster", "memorabilia", "keychain", "toy car", "replica",
     # Classified clutter
     "wanted", "looking for", "iso", "will trade",
+    "we buy", "wtb", "buying", "cash for", "consign",
 ]
 
 _VEHICLE_PARTS_EXCLUDE_SET: frozenset[str] = frozenset(
@@ -625,6 +626,10 @@ def build_hunt(
     adapter_opts: dict = {}
     if vertical == "vehicles":
         adapter_opts["min_price"] = 200  # filter $0/$1 placeholder listings
+        if make:
+            adapter_opts["make"] = make
+        if model:
+            adapter_opts["model"] = model
         if "max_miles" in constraints:
             adapter_opts["max_miles"] = constraints["max_miles"]
         if "min_year" in constraints:

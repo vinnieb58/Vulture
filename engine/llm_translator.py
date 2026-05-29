@@ -91,6 +91,7 @@ VERTICALS: dict[str, dict] = {
             "for parts", "for repair", "not working",
             # Classified noise
             "wanted", "looking for", "iso",
+            "we buy", "wtb", "buying", "cash for", "consign",
         ],
     },
     "computer_parts": {
@@ -118,6 +119,7 @@ VERTICALS: dict[str, dict] = {
         "size_pattern": False,
         "default_exclude": [
             "wanted", "looking for", "iso",
+            "we buy", "wtb", "buying", "cash for", "consign",
             "broken", "for parts", "not working",
         ],
     },
@@ -131,6 +133,7 @@ VERTICALS: dict[str, dict] = {
         "size_pattern": False,
         "default_exclude": [
             "wanted", "looking for", "iso",
+            "we buy", "wtb", "buying", "cash for", "consign",
             "charger", "adapter", "bag",
         ],
     },
@@ -193,6 +196,7 @@ VERTICALS: dict[str, dict] = {
             "poster", "memorabilia", "keychain", "toy car", "replica",
             # Classified clutter
             "wanted", "looking for", "iso",
+            "we buy", "wtb", "buying", "cash for", "consign",
             "will trade",
         ],
     },
@@ -206,14 +210,14 @@ VERTICALS: dict[str, dict] = {
             "bookshelf", "bookcase", "cabinet",
         ],
         "size_pattern": False,
-        "default_exclude": ["wanted", "looking for", "iso"],
+        "default_exclude": ["wanted", "looking for", "iso", "we buy", "wtb", "buying", "cash for", "consign"],
     },
     "general": {
         "display_name": "General",
         "sources": ["craigslist"],
         "keywords": [],   # fallback — matches everything
         "size_pattern": False,
-        "default_exclude": ["wanted", "looking for", "iso"],
+        "default_exclude": ["wanted", "looking for", "iso", "we buy", "wtb", "buying", "cash for", "consign"],
     },
 }
 
@@ -252,6 +256,9 @@ _HANDHELD_INCLUDE: dict[str, list[str]] = {
 _HANDHELD_FALSE_POSITIVE_EXCLUDE = [
     "8bitdo", "gamepad only", "controller only",
     "restaurant", "commercial kitchen", "pemf",
+    "bakery", "dough mixer", "food truck", "meat slicer",
+    "kebab", "smoker oven", "dishwasher", "refrigeration",
+    "processing",
     "massage chair", "medical equipment",
 ]
 
@@ -262,6 +269,9 @@ _RAM_EXCLUDE = [
     "ecc", "registered", "buffered", "server memory",
     "broken", "for parts", "not working",
     "wanted", "looking for", "iso",
+    "we buy", "wtb", "buying", "cash for", "consign",
+    "mini pc", "optiplex", "elitedesk", "aio", "all-in-one",
+    "pavilion desktop", "gaming computer", "prebuilt pc",
 ]
 
 
@@ -539,14 +549,23 @@ _VRAM_INTENT_RE = re.compile(
 #   - "prebuilt" is omitted: sellers sometimes write "pulled from prebuilt"
 #     when selling a card they removed from a system.
 _GPU_SYSTEM_EXCLUDE: list[str] = [
-    "laptop",           # "ASUS TUF Gaming Laptop RTX 3070" — most common false positive
-    "notebook",         # synonym for laptop
-    "gaming pc",        # complete gaming system
-    "gaming desktop",   # complete gaming desktop
-    "gaming computer",  # complete gaming computer
-    "gaming tower",     # e.g. "Gaming Tower RTX 3080 i9" — full-system listing
-    "complete system",  # explicit full-system phrase
-    "full system",      # explicit full-system phrase
+    "laptop",
+    "notebook",
+    "gaming pc",
+    "gaming desktop",
+    "gaming computer",
+    "gaming tower",
+    "complete system",
+    "full system",
+    "desktop build",
+    "alienware m15",
+    "alienware r13",
+    "full pc",
+    "we buy",
+    "wtb",
+    "buying",
+    "cash for",
+    "consign",
 ]
 
 # Additional excludes applied when the user explicitly requests a standalone
@@ -1616,6 +1635,10 @@ def _translate_v1_non_vehicle(
 
     if vertical == "vehicles":
         adapter_opts["min_price"] = 200
+        if make:
+            adapter_opts["make"] = make
+        if model:
+            adapter_opts["model"] = model
         if miles:
             adapter_opts["max_miles"] = miles
         if min_year:
@@ -1624,6 +1647,12 @@ def _translate_v1_non_vehicle(
             adapter_opts["max_year"] = max_year
 
     if vertical == "computer_parts":
+        if _handheld:
+            adapter_opts["hunt_subtype"] = "handheld"
+        elif _is_ram:
+            adapter_opts["hunt_subtype"] = "ram"
+        else:
+            adapter_opts["hunt_subtype"] = "gpu"
         if _is_ram:
             if min_gb:
                 adapter_opts["min_capacity_gb"] = min_gb
