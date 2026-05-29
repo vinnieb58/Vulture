@@ -15,9 +15,11 @@ from adapters.registry import get_capabilities
 
 
 class TestCarsdotcomCapabilities:
-    def test_marked_flaky_and_browser_sensitive(self):
+    def test_marked_experimental_and_browser_sensitive(self):
         caps = get_capabilities("carsdotcom")
         assert caps is not None
+        assert caps.get("stable") is False
+        assert caps.get("experimental") is True
         assert caps.get("flaky") is True
         assert caps.get("browser_sensitive") is True
         assert caps.get("blocking_risk") == "cloudflare_akamai"

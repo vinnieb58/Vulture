@@ -8,6 +8,103 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Vehicle model-only matching and subtype title filters
+# ---------------------------------------------------------------------------
+
+_DISTINCTIVE_VEHICLE_MODELS: dict[str, bool] = {
+    "sequoia": False, "4runner": False, "telluride": False, "palisade": False,
+    "prius": False, "highlander": False, "tacoma": False, "tundra": False,
+    "camry": True,
+}
+
+_GPU_WHOLE_SYSTEM_PATTERNS = (
+    "laptop", "gaming pc", "gaming desktop", "desktop build",
+    "alienware m15", "alienware r13", "full pc", "tower",
+)
+
+_RAM_WHOLE_COMPUTER_PATTERNS = (
+    "mini pc", "optiplex", "elitedesk", "aio", "all-in-one",
+    "pavilion desktop", "gaming computer", "prebuilt pc",
+)
+
+_RAM_DESKTOP_KIT_HINTS = (
+    "ddr", "dimm", "288-pin", "288 pin", " sodimm", "so-dimm",
+    "ripjaws", "vengeance", " kit", "x8gb", "x16gb", " pc ram",
+    " desktop ram", " memory module",
+)
+
+
+def _word_in_title(title_lower: str, word: str) -> bool:
+    return bool(re.search(r"\b" + re.escape(word.lower()) + r"\b", title_lower))
+
+
+def _vehicle_models_in_title(title_lower: str) -> list[str]:
+    return [m for m in _DISTINCTIVE_VEHICLE_MODELS if _word_in_title(title_lower, m)]
+
+
+def _vehicle_include_matches(title_lower: str, make: str, model: str, include_keywords: list) -> bool:
+    if len(_vehicle_models_in_title(title_lower)) > 1:
+        return False
+    make_l, model_l = make.lower(), model.lower()
+    for kw in include_keywords:
+        if str(kw).lower() in title_lower:
+            return True
+    has_make, has_model = _word_in_title(title_lower, make_l), _word_in_title(title_lower, model_l)
+    if has_make and has_model:
+        return True
+    requires_make = _DISTINCTIVE_VEHICLE_MODELS.get(model_l)
+    if requires_make is None:
+        return False
+    if requires_make:
+        return has_make and has_model
+    models_present = _vehicle_models_in_title(title_lower)
+    return has_model and (not models_present or models_present == [model_l])
+
+
+def _vehicle_include_rejection(title_lower: str, make: str, model: str, include_keywords: list, vpfx: str) -> Optional[str]:
+    models_present = _vehicle_models_in_title(title_lower)
+    if len(models_present) > 1:
+        return f"{vpfx}ambiguous multi-model vehicle title ({', '.join(models_present)})"
+    if _vehicle_include_matches(title_lower, make, model, include_keywords):
+        return None
+    shown = ", ".join(f'"{kw}"' for kw in include_keywords[:4])
+    if len(include_keywords) > 4:
+        shown += f" +{len(include_keywords) - 4} more"
+    return f"{vpfx}title missing include keyword (any of: {shown})"
+
+
+def _looks_like_gpu_whole_system(title_lower: str) -> bool:
+    return any(p in title_lower for p in _GPU_WHOLE_SYSTEM_PATTERNS)
+
+
+
+def _ensure_vehicle_structured_fields(rules: dict) -> None:
+    """Populate vehicle_make/model from include_keywords for legacy DB hunts."""
+    if rules.get("vehicle_make") and rules.get("vehicle_model"):
+        return
+    if rules.get("vertical") != "vehicles":
+        return
+    for kw in rules.get("include_keywords") or []:
+        tokens = str(kw).lower().split()
+        if len(tokens) >= 2:
+            rules.setdefault("vehicle_make", tokens[0])
+            rules.setdefault("vehicle_model", tokens[1])
+            return
+
+def _looks_like_ram_whole_computer(title_lower: str) -> bool:
+    if any(p in title_lower for p in _RAM_WHOLE_COMPUTER_PATTERNS):
+        return True
+    if "desktop" in title_lower:
+        if any(h in title_lower for h in _RAM_DESKTOP_KIT_HINTS):
+            return False
+        if re.search(r"\bdesktop\s+(?:computer|pc|system|bundle)\b", title_lower):
+            return True
+        if re.search(r"\b(?:hp|dell|lenovo|acer)\s+desktop\b", title_lower):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Structured-constraint helpers
 # ---------------------------------------------------------------------------
 
@@ -251,22 +348,36 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
     min_price = rules.get("min_price")
     if min_price is not None:
         p = listing.price
-        if p is None or p < min_price:
-            return f"{_vpfx}price ${p if p is not None else 'n/a'} < min_price ${min_price}"
+        if p is None:
+            return f"{_vpfx}missing price while min_price filter is active"
+        if p < min_price:
+            return f"{_vpfx}price ${p} < min_price ${min_price}"
 
     max_price = rules.get("max_price")
     if max_price is not None:
         p = listing.price
-        if p is None or p > max_price:
-            return f"{_vpfx}price ${p if p is not None else 'n/a'} > max_price ${max_price}"
+        if p is None:
+            return f"{_vpfx}missing price while max_price is required"
+        if p > max_price:
+            return f"{_vpfx}price ${p} > max_price ${max_price}"
 
     # --- keyword filters ---
+
+    _ensure_vehicle_structured_fields(rules)
 
     # include_keywords — OR / any() semantics (backward-compatible).
     include_keywords = rules.get("include_keywords") or []
     if include_keywords:
         title_lower = listing.title.lower()
-        if not any(str(kw).lower() in title_lower for kw in include_keywords):
+        vehicle_make = rules.get("vehicle_make")
+        vehicle_model = rules.get("vehicle_model")
+        if _vertical == "vehicles" and vehicle_make and vehicle_model:
+            reason = _vehicle_include_rejection(
+                title_lower, str(vehicle_make), str(vehicle_model), include_keywords, _vpfx,
+            )
+            if reason:
+                return reason
+        elif not any(str(kw).lower() in title_lower for kw in include_keywords):
             shown = ", ".join(f'"{kw}"' for kw in include_keywords[:4])
             if len(include_keywords) > 4:
                 shown += f" +{len(include_keywords)-4} more"
@@ -287,6 +398,13 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
         for kw in exclude_keywords:
             if str(kw).lower() in title_lower:
                 return f'{_vpfx}excluded keyword "{kw}"'
+
+    hunt_subtype = rules.get("hunt_subtype")
+    title_lower = listing.title.lower()
+    if hunt_subtype == "gpu" and _looks_like_gpu_whole_system(title_lower):
+        return f"{_vpfx}whole system/laptop listing (GPU card hunt)"
+    if hunt_subtype == "ram" and _looks_like_ram_whole_computer(title_lower):
+        return f"{_vpfx}whole computer listing (RAM kit hunt)"
 
     # --- structured constraints extracted from title ---
     # Conservative: if the value cannot be parsed from the title, pass through.

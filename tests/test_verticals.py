@@ -87,6 +87,12 @@ def sim_rules(t) -> dict:
         rules["max_size_inches"] = int(ao["max_size_inches"])
     if ao.get("min_gpu_class"):
         rules["min_gpu_class"] = ao["min_gpu_class"]
+    if ao.get("make"):
+        rules["vehicle_make"] = ao["make"]
+    if ao.get("model"):
+        rules["vehicle_model"] = ao["model"]
+    if ao.get("hunt_subtype"):
+        rules["hunt_subtype"] = ao["hunt_subtype"]
     return rules
 
 
@@ -511,6 +517,18 @@ class TestAcceptanceVehicleSequoia:
 
     def test_pass_valid_listing(self, rules):
         assert_passes("2019 Toyota Sequoia SR5 4WD 65k miles", 32000, rules)
+
+    def test_pass_model_only_sequoia_title(self, rules):
+        assert_passes("SEQUOIA 2018 LIMITED", 25000, rules,
+                      msg="distinctive model without make word in title")
+
+    def test_fail_mixed_models(self, rules):
+        assert_fails(
+            "Toyota Tacoma 4runner Tundra and sequoia",
+            25000,
+            rules,
+            msg="multi-model ambiguous listing",
+        )
 
     def test_fail_year_too_old(self, rules):
         assert_fails("2014 Toyota Sequoia Platinum 90k miles", 25000, rules,

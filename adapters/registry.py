@@ -72,9 +72,9 @@ _CAPABILITIES: dict[str, dict] = {
     # logged for observability but does not affect which listings are returned.
     # -------------------------------------------------------------------------
     "offerup": {
-        "status": "beta",
-        "stable": True,
-        "experimental": False,
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
         "requires_browser": False,
         "requires_login": False,
         "supports_location": False,
@@ -128,9 +128,9 @@ _CAPABILITIES: dict[str, dict] = {
     # Vertical: vehicles only. Not a general marketplace.
     # -------------------------------------------------------------------------
     "carsdotcom": {
-        "status": "beta",
-        "stable": True,
-        "experimental": False,
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
         "flaky": True,
         "browser_sensitive": True,
         "blocking_risk": "cloudflare_akamai",

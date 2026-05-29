@@ -166,7 +166,7 @@ This batch should be committed only after live confirmation that:
 
 ## Test execution in this session
 
-- `python3 -m pytest` (repo root): **failed** due to test collection hitting `scripts/test_multi_source.py` (script exits via `SystemExit` and also surfaced missing optional runtime dependency `bs4` in that script path).
+- `python3 -m pytest` (repo root): **failed** due to test collection hitting `scripts/smoke_multi_source.py` predecessor `scripts/test_multi_source.py` (script exited via `SystemExit` at import time).
 - `python3 -m pytest tests`: **passed** (`210 passed`).
 
 Interpretation:

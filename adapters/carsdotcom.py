@@ -396,12 +396,16 @@ def _fetch_html(query: str, zip_code: str, radius_miles: int = _DEFAULT_RADIUS_M
                 if "http2_protocol_error" in err or "err_http2" in err:
                     log.error(
                         "carsdotcom: ERR_HTTP2_PROTOCOL_ERROR for query %r — "
-                        "Cloudflare RST-stream block. "
-                        "Run from a residential IP (Raven). "
-                        "Detail: %s", query, str(exc)[:120],
+                        "Cloudflare RST-stream block (HTTP/2). "
+                        "Run from a residential IP (Raven).",
+                        query,
                     )
                 else:
-                    log.error("carsdotcom: navigation error for query %r: %s", query, exc)
+                    log.error(
+                        "carsdotcom: navigation error for query %r: %s",
+                        query,
+                        str(exc)[:200],
+                    )
                 browser.close()
                 return None
 
