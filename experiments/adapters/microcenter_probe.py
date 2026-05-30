@@ -707,8 +707,8 @@ def run_assessment(results: list[ProbeResult], *, used_cffi: bool) -> None:
         )
     elif browser_likely:
         print(
-            "  1. Run experiments/adapters/microcenter_playwright_probe.py (not yet created) "
-            "from a residential or Raven host with `playwright install`.\n"
+            "  1. Run experiments/adapters/microcenter_playwright_probe.py "
+            "from a residential or Raven host with `playwright install chromium`.\n"
             "  2. Confirm product grid selectors (#productGrid, .product_wrapper) on real HTML.\n"
             "  3. Test ?storeid=115 vs 141 for price/inventory deltas.\n"
             "  4. If Playwright + cf_clearance cookie works, evaluate periodic session refresh "

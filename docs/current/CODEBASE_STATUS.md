@@ -106,7 +106,7 @@ Vulture is a **personal/self-hosted** system for a single operator (e.g. Raven),
 | Source / area | Classification | Evidence |
 |---|---|---|
 | eBay (`experiments/adapters/ebay_*`) | **probe only** | Probes document repeated 403/network-layer blocking; no production adapter file |
-| Micro Center (`experiments/adapters/microcenter_probe.py`) | **probe only** | Probe script exists, no runtime adapter |
+| Micro Center (`experiments/adapters/microcenter_probe.py`, `microcenter_playwright_probe.py`) | **probe only** | requests probe + Playwright probe; Cloudflare blocks plain HTTP; no runtime adapter |
 | Cars.com request/playwright probes | **probe only + informs experimental adapter** | Recon scripts exist; production adapter present but still marked experimental |
 | OfferUp location probe | **probe only + informs experimental adapter** | Probe confirms GeoIP-only location behavior |
 | Craigslist probe script | **probe only** | Runtime adapter exists separately and is stable |
