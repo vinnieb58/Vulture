@@ -47,6 +47,10 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": [
             "general_marketplace",
             "computer_parts",
+            "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
             "vehicles",
             "home_theater",
         ],
@@ -86,6 +90,9 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
             "home_theater",
             "vehicles",
         ],
@@ -103,6 +110,9 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
             "home_theater",
         ],
     },
@@ -143,6 +153,75 @@ _CAPABILITIES: dict[str, dict] = {
         "supports_radius": False,
         "supports_price_filter_in_url": False,
         "verticals": ["vehicles"],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Probe-only / future source metadata (not in _REGISTRY — no runtime adapter)
+#
+# Documents vertical groupings for retail and peer-marketplace sources.
+# resolve_source_sites() never returns these; they are for candidate routing
+# and manual planning until a dedicated adapter is promoted.
+# ---------------------------------------------------------------------------
+
+_PROBE_CAPABILITIES: dict[str, dict] = {
+    "bestbuy": {
+        "status": "probe_only",
+        "stable": False,
+        "experimental": False,
+        "probe_only": True,
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "laptops",
+        ],
+    },
+    "microcenter": {
+        "status": "probe_only",
+        "stable": False,
+        "experimental": False,
+        "probe_only": True,
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+        ],
+    },
+    "swappa": {
+        "status": "unregistered",
+        "stable": False,
+        "experimental": True,
+        "probe_only": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
+            "laptops",
+        ],
     },
 }
 
@@ -200,10 +279,33 @@ def get_adapter(source: str) -> Optional[Callable]:
 
 
 def get_capabilities(source: str) -> Optional[dict]:
-    """Return the capability metadata dict for *source*, or None if unknown."""
+    """Return runtime adapter capability metadata, or None if unknown."""
     return _CAPABILITIES.get(normalize_source(source))
+
+
+def get_probe_capabilities(source: str) -> Optional[dict]:
+    """Return probe-only / future source metadata, or None if unknown."""
+    return _PROBE_CAPABILITIES.get(normalize_source(source))
+
+
+def get_source_metadata(source: str) -> Optional[dict]:
+    """Return runtime or probe-only metadata for *source*."""
+    key = normalize_source(source)
+    if key in _CAPABILITIES:
+        return _CAPABILITIES[key]
+    return _PROBE_CAPABILITIES.get(key)
+
+
+def is_registered_source(source: str) -> bool:
+    """True when *source* has a runtime search adapter in _REGISTRY."""
+    return normalize_source(source) in _REGISTRY
 
 
 def list_sources() -> list[str]:
     """Return a sorted list of all registered source names."""
     return sorted(_REGISTRY.keys())
+
+
+def list_probe_sources() -> list[str]:
+    """Return probe-only / future source names (no runtime adapter)."""
+    return sorted(_PROBE_CAPABILITIES.keys())
