@@ -24,6 +24,7 @@ from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
 from adapters.offerup import search_offerup
+from adapters.swappa import search_swappa
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +145,32 @@ _CAPABILITIES: dict[str, dict] = {
         "supports_price_filter_in_url": False,
         "verticals": ["vehicles"],
     },
+    # -------------------------------------------------------------------------
+    # Swappa — experimental (electronics / gaming / computer hunts)
+    #
+    # Parsing: requests + BeautifulSoup on server-rendered HTML.
+    # Flow: /search?q=... → /listings/{slug} → .xui_card_wrapper cards.
+    # No browser automation or login required for basic search (May 2026 probe).
+    #
+    # Location: not targetable via URL/cookies. Per-listing ship-from city/state
+    # may appear in .ships_from when the seller exposes it.
+    # -------------------------------------------------------------------------
+    "swappa": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "general_marketplace",
+            "computer_parts",
+            "gaming",
+        ],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -169,6 +196,7 @@ _REGISTRY: dict[str, Callable] = {
     "craigslist": search_craigslist,
     "offerup": search_offerup,
     "mercari": search_mercari,
+    "swappa": search_swappa,
 }
 
 
