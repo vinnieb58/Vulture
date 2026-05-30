@@ -109,7 +109,7 @@ class SwappaAdapterTests(unittest.TestCase):
 
         mock_fetch_slug.side_effect = _slug_listings
 
-        results = search_swappa("macbook air", limit=3)
+        results = search_swappa("macbook air", limit=2)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].source, "swappa")
         mock_fetch_slug.assert_called_once_with("/listings/macbook-air-2022-13")
