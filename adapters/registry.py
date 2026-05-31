@@ -20,6 +20,7 @@ Usage:
 import logging
 from typing import Callable, Optional
 
+from adapters.bestbuy import search_bestbuy
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
@@ -171,6 +172,45 @@ _CAPABILITIES: dict[str, dict] = {
             "gaming",
         ],
     },
+    # -------------------------------------------------------------------------
+    # Best Buy — experimental (Playwright required; Raven-validated May 2026)
+    #
+    # Parsing: Playwright Chromium → BeautifulSoup on rendered SRP HTML.
+    # Two card layouts: ``.list-item`` (grid) and ``li.product-list-item`` (list).
+    #
+    # Anti-bot: Akamai blocks plain requests/curl from Raven; Playwright Chromium
+    # loads ~1.8–2.1 MB pages in ~18–36 s. Layout/bot changes may break parsing.
+    #
+    # Location: store pickup/fulfillment text when visible in card DOM; no store
+    # selection via URL. ``city`` arg is ignored.
+    #
+    # Manual source only — not in default vertical profiles. Use
+    # ``source_sites=["bestbuy"]`` on hunts.
+    # -------------------------------------------------------------------------
+    "bestbuy": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "akamai",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "general_marketplace",
+        ],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -192,6 +232,7 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
+    "bestbuy": search_bestbuy,
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
     "offerup": search_offerup,
