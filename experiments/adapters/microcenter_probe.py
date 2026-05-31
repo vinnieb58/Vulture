@@ -736,7 +736,18 @@ def probe_location_smoke(*, use_cffi: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Micro Center recon probe (no runtime side effects)")
-    parser.add_argument("queries", nargs="*", help="Search terms (default: 4 preset queries)")
+    parser.add_argument(
+        "queries",
+        nargs="*",
+        help="Search terms (default: 4 preset queries). Prefer --query on Raven.",
+    )
+    parser.add_argument(
+        "--query",
+        action="append",
+        dest="query_flags",
+        default=None,
+        help="Search term (repeatable). Example: --query \"rtx 4070\"",
+    )
     parser.add_argument("--storeid", help="Append storeid= to search URL (e.g. 115 Brooklyn)")
     parser.add_argument(
         "--cffi",
