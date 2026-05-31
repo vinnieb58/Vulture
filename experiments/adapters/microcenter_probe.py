@@ -7,7 +7,7 @@ touch .env, change DB schema, or register in adapters/registry.py.
 Usage:
     python experiments/adapters/microcenter_probe.py
     python experiments/adapters/microcenter_probe.py "rtx 4070"
-    python experiments/adapters/microcenter_probe.py "rtx 4070" --storeid 115
+    python experiments/adapters/microcenter_probe.py --query "rtx 4070" --storeid 115
     python experiments/adapters/microcenter_probe.py --cffi
 
 Default queries (no args): rtx 4070, ryzen 5600, gaming laptop, macbook
@@ -761,7 +761,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    queries = args.queries if args.queries else DEFAULT_QUERIES
+    if args.query_flags and args.queries:
+        parser.error("Use either positional queries or --query, not both")
+    if args.query_flags:
+        queries = args.query_flags
+    elif args.queries:
+        queries = args.queries
+    else:
+        queries = DEFAULT_QUERIES
 
     print("=" * 70)
     print("MICRO CENTER PROBE — Vulture 2.0 recon (probe-only)")

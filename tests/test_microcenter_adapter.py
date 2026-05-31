@@ -28,12 +28,12 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 class TestMicrocenterRegistry:
-    def test_registered_experimental(self):
+    def test_registered_beta_browser_required(self):
         assert "microcenter" in list_sources()
         caps = get_capabilities("microcenter")
         assert caps is not None
-        assert caps["stable"] is False
-        assert caps["experimental"] is True
+        assert caps["stable"] is True
+        assert caps["experimental"] is False
         assert caps["requires_browser"] is True
         assert caps["requires_login"] is False
         assert caps["supports_location"] is True
@@ -41,11 +41,12 @@ class TestMicrocenterRegistry:
         assert caps["supports_radius"] is False
         assert caps["supports_price_filter_in_url"] is False
         assert "retail" in caps["verticals"]
+        assert "computer_parts" in caps["verticals"]
         assert get_adapter("microcenter") is not None
 
-    def test_not_default_computer_parts_source(self):
+    def test_in_computer_parts_vertical_profile(self):
         sites = resolve_source_sites("computer_parts")
-        assert "microcenter" not in sites
+        assert "microcenter" in sites
 
 
 class TestMicrocenterUrlAndStore:
@@ -66,6 +67,9 @@ class TestMicrocenterUrlAndStore:
 
     def test_resolve_storeid_default(self):
         assert resolve_storeid(None, None) == "141"
+
+    def test_resolve_storeid_explicit_over_city_map(self):
+        assert resolve_storeid("houston", "141") == "141"
 
 
 class TestMicrocenterParsing:

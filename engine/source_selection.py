@@ -3,9 +3,10 @@ engine/source_selection.py
 
 Vertical-aware source_sites selection for translated hunts.
 
-Personal/self-hosted deployment: Craigslist, OfferUp, Mercari, and Cars.com
-participate in normal vertical profiles. Capability metadata in the registry
-documents caveats (geoip_only, requires_browser, etc.) without blocking runtime.
+Personal/self-hosted deployment: Craigslist, OfferUp, Mercari, Cars.com, and
+Micro Center participate in normal vertical profiles where appropriate.
+Capability metadata in the registry documents caveats (geoip_only,
+requires_browser, etc.) without blocking runtime.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ _STABLE_DEFAULT = ["craigslist"]
 
 # Vertical keys match VERTICALS in llm_translator.py and v2 classify_vertical().
 _VERTICAL_PROFILES: dict[str, list[str]] = {
-    "computer_parts": ["craigslist", "mercari", "offerup"],
-    "laptops_computers": ["craigslist", "mercari", "offerup"],
+    "computer_parts": ["craigslist", "mercari", "offerup", "microcenter"],
+    "laptops_computers": ["craigslist", "mercari", "offerup", "microcenter"],
     "vehicles": ["craigslist", "carsdotcom", "offerup"],
     "tv_home_theater": ["craigslist", "offerup"],
     "home_theater": ["craigslist", "offerup"],
@@ -30,6 +31,12 @@ _VERTICAL_PROFILES: dict[str, list[str]] = {
 
 _VERTICAL_ONLY_SOURCES: dict[str, frozenset[str]] = {
     "carsdotcom": frozenset({"vehicles"}),
+    "microcenter": frozenset({
+        "computer_parts",
+        "laptops_computers",
+        "gaming",
+        "retail",
+    }),
     "mercari": frozenset({
         "computer_parts",
         "laptops_computers",

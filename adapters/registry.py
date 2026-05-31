@@ -146,22 +146,22 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": ["vehicles"],
     },
     # -------------------------------------------------------------------------
-    # Micro Center — experimental; Playwright required (requests blocked by CF)
+    # Micro Center — production-usable on Raven; Playwright required (requests blocked)
     #
     # Parsing: Playwright Chromium → #productGrid li.product_wrapper,
     # data-name / data-price on product anchors, .price_wrapper for stock text.
     #
     # Plain HTTP returns 403 "Just a moment..." from datacenter IPs.
-    # Validated on Raven (residential) May 2026 with headless Chromium.
+    # Validated on Raven (residential) May 2026 — smoke + in-stock store compare.
     #
-    # Location: storeid query param (e.g. 115 Brooklyn, 141 Columbus).
-    # Not included in default translated hunt source_sites — opt-in via explicit
-    # source_sites on a hunt row.
+    # Location: storeid query param (e.g. 115 Brooklyn, 141 Columbus). Pass via
+    # hunt adapter_options["storeid"] or city names/ids (see search_microcenter).
+    # Included in computer_parts / laptops_computers vertical source profiles.
     # -------------------------------------------------------------------------
     "microcenter": {
-        "status": "experimental",
-        "stable": False,
-        "experimental": True,
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
         "flaky": True,
         "browser_sensitive": True,
         "blocking_risk": "cloudflare",
@@ -173,7 +173,7 @@ _CAPABILITIES: dict[str, dict] = {
         "recommended_runtime": "residential_ip",
         "supports_radius": False,
         "supports_price_filter_in_url": False,
-        "verticals": ["retail", "computer_parts", "gaming"],
+        "verticals": ["retail", "computer_parts", "gaming", "laptops_computers"],
     },
 }
 

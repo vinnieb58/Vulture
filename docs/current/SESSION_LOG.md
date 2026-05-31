@@ -159,13 +159,13 @@ This batch should be committed only after live confirmation that:
 - Micro Center: runtime adapter registered **experimental**; requires Playwright on Raven; plain HTTP still blocked; not promoted to stable until repeated hunt smoke passes.
 - eBay scraping remains probe-only with documented blocking; no runtime adapter.
 
-## 2026-05-31 — Micro Center experimental adapter
+## 2026-05-31 — Micro Center adapter + vertical source selection
 
 - Added `adapters/microcenter.py` (Playwright, `storeid` scoping, returns `[]` on Cloudflare block).
-- Registered in `adapters/registry.py` as experimental / `requires_browser` / `location_control: storeid`.
-- **Not** added to `engine/source_selection.py` vertical defaults — hunts must set `source_sites: ["microcenter"]` explicitly.
-- Raven Playwright probe smoke (May 2026): HTTP 200, `#productGrid li.product_wrapper`, in-stock 7800X3D at storeid 115/141.
-- `scripts/smoke_microcenter_adapter.py` for on-host verification.
+- Registry: `stable=True`, `experimental=False`, `requires_browser=True`, `location_control: storeid`.
+- Included in `resolve_source_sites()` for `computer_parts` and `laptops_computers` (not vehicles/TV/general).
+- Raven smoke: `scripts/smoke_microcenter_adapter.py --query "ryzen 7 7800x3d" --storeid 141` → `[PASS]`, 5 listings.
+- `main.py` passes `adapter_options["storeid"]` when source is `microcenter`.
 - Live production reliability of non-craigslist adapters is not asserted as stable.
 
 ## What should happen next

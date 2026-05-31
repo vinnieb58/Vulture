@@ -649,8 +649,8 @@ def print_final_assessment(snaps: list[RunSnapshot]) -> None:
     print(f"  Navigation errors?         : {'YES' if any_nav_fail else 'NO'}")
     print(f"  Total candidates (all runs): {sum(len(s.candidates) for s in snaps)}")
     print(
-        "  Remain probe-only?         : YES — experimental adapter only after "
-        "repeatable Raven runs + in-stock validation"
+        "  Runtime adapter?           : adapters/microcenter.py (experimental; "
+        "opt-in source_sites only)"
     )
 
     working = [s.selector_meta.get("selector_used") for s in snaps if s.selector_meta.get("selector_used")]
