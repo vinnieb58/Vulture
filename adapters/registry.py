@@ -20,10 +20,12 @@ Usage:
 import logging
 from typing import Callable, Optional
 
+from adapters.bestbuy import search_bestbuy
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
 from adapters.microcenter import search_microcenter
+from adapters.newegg import search_newegg
 from adapters.offerup import search_offerup
 from adapters.swappa import search_swappa
 
@@ -49,6 +51,9 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": [
             "general_marketplace",
             "computer_parts",
+            "gaming",
+            "electronics",
+            "phones_tablets",
             "vehicles",
             "home_theater",
         ],
@@ -88,6 +93,8 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "phones_tablets",
             "home_theater",
             "vehicles",
         ],
@@ -105,6 +112,9 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
             "home_theater",
         ],
     },
@@ -174,7 +184,14 @@ _CAPABILITIES: dict[str, dict] = {
         "recommended_runtime": "residential_ip",
         "supports_radius": False,
         "supports_price_filter_in_url": False,
-        "verticals": ["retail", "computer_parts", "gaming", "laptops_computers"],
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+        ],
     },
     # -------------------------------------------------------------------------
     # Swappa — experimental (electronics / gaming / computer hunts)
@@ -199,10 +216,80 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": [
             "general_marketplace",
             "computer_parts",
+            "pc_components",
             "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
+            "laptops",
+        ],
+    },
+    # -------------------------------------------------------------------------
+    # Best Buy — experimental (Playwright required; Raven-validated May 2026)
+    #
+    # Parsing: Playwright Chromium → BeautifulSoup on rendered SRP HTML.
+    # Anti-bot: Akamai blocks plain requests; Playwright loads full pages.
+    # Location: pickup/fulfillment text when visible; ``city`` arg is ignored.
+    # -------------------------------------------------------------------------
+    "bestbuy": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "akamai",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "laptops",
+            "general_marketplace",
+        ],
+    },
+    # -------------------------------------------------------------------------
+    # Newegg — experimental (retail / computer parts / gaming / electronics)
+    #
+    # Parsing: requests + BeautifulSoup on server-rendered search HTML.
+    # Accept-Encoding must omit Brotli unless brotlicffi is installed.
+    # Location: not targetable; ``city`` arg is advisory only.
+    # -------------------------------------------------------------------------
+    "newegg": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "failure_mode": "returns_empty_list",
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "laptops",
+            "general_marketplace",
         ],
     },
 }
+
+# Reserved for future probe-only sources (no runtime adapter yet).
+_PROBE_CAPABILITIES: dict[str, dict] = {}
 
 # ---------------------------------------------------------------------------
 # Adapter registry
@@ -223,9 +310,11 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
+    "bestbuy": search_bestbuy,
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
     "microcenter": search_microcenter,
+    "newegg": search_newegg,
     "offerup": search_offerup,
     "mercari": search_mercari,
     "swappa": search_swappa,
@@ -260,10 +349,33 @@ def get_adapter(source: str) -> Optional[Callable]:
 
 
 def get_capabilities(source: str) -> Optional[dict]:
-    """Return the capability metadata dict for *source*, or None if unknown."""
+    """Return runtime adapter capability metadata, or None if unknown."""
     return _CAPABILITIES.get(normalize_source(source))
+
+
+def get_probe_capabilities(source: str) -> Optional[dict]:
+    """Return probe-only / future source metadata, or None if unknown."""
+    return _PROBE_CAPABILITIES.get(normalize_source(source))
+
+
+def get_source_metadata(source: str) -> Optional[dict]:
+    """Return runtime or probe-only metadata for *source*."""
+    key = normalize_source(source)
+    if key in _CAPABILITIES:
+        return _CAPABILITIES[key]
+    return _PROBE_CAPABILITIES.get(key)
+
+
+def is_registered_source(source: str) -> bool:
+    """True when *source* has a runtime search adapter in _REGISTRY."""
+    return normalize_source(source) in _REGISTRY
 
 
 def list_sources() -> list[str]:
     """Return a sorted list of all registered source names."""
     return sorted(_REGISTRY.keys())
+
+
+def list_probe_sources() -> list[str]:
+    """Return probe-only / future source names (no runtime adapter)."""
+    return sorted(_PROBE_CAPABILITIES.keys())
