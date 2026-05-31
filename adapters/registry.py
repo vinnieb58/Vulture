@@ -23,6 +23,7 @@ from typing import Callable, Optional
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
+from adapters.microcenter import search_microcenter
 from adapters.offerup import search_offerup
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,36 @@ _CAPABILITIES: dict[str, dict] = {
         "supports_price_filter_in_url": False,
         "verticals": ["vehicles"],
     },
+    # -------------------------------------------------------------------------
+    # Micro Center — experimental; Playwright required (requests blocked by CF)
+    #
+    # Parsing: Playwright Chromium → #productGrid li.product_wrapper,
+    # data-name / data-price on product anchors, .price_wrapper for stock text.
+    #
+    # Plain HTTP returns 403 "Just a moment..." from datacenter IPs.
+    # Validated on Raven (residential) May 2026 with headless Chromium.
+    #
+    # Location: storeid query param (e.g. 115 Brooklyn, 141 Columbus).
+    # Not included in default translated hunt source_sites — opt-in via explicit
+    # source_sites on a hunt row.
+    # -------------------------------------------------------------------------
+    "microcenter": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "cloudflare",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": True,
+        "location_control": "storeid",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": ["retail", "computer_parts", "gaming"],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -167,6 +198,7 @@ _CAPABILITIES: dict[str, dict] = {
 _REGISTRY: dict[str, Callable] = {
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
+    "microcenter": search_microcenter,
     "offerup": search_offerup,
     "mercari": search_mercari,
 }

@@ -131,6 +131,7 @@ This batch should be committed only after live confirmation that:
   - `craigslist` (stable)
   - `offerup` (experimental)
   - `carsdotcom` (experimental)
+  - `microcenter` (experimental, Playwright, opt-in only — not in default translated sources)
 - DB-backed hunt lifecycle is implemented in service/repository layers.
 - Multi-source hunt fan-out is implemented (`source_sites` expansion per source run).
 - Deterministic rules engine enforces price, keyword, TV/GPU/RAM/vehicle structured constraints.
@@ -155,7 +156,16 @@ This batch should be committed only after live confirmation that:
 
 - OfferUp location targeting remains GeoIP-only (city input is advisory).
 - Cars.com reliability across varied network/runtime environments remains experimental.
+- Micro Center: runtime adapter registered **experimental**; requires Playwright on Raven; plain HTTP still blocked; not promoted to stable until repeated hunt smoke passes.
 - eBay scraping remains probe-only with documented blocking; no runtime adapter.
+
+## 2026-05-31 — Micro Center experimental adapter
+
+- Added `adapters/microcenter.py` (Playwright, `storeid` scoping, returns `[]` on Cloudflare block).
+- Registered in `adapters/registry.py` as experimental / `requires_browser` / `location_control: storeid`.
+- **Not** added to `engine/source_selection.py` vertical defaults — hunts must set `source_sites: ["microcenter"]` explicitly.
+- Raven Playwright probe smoke (May 2026): HTTP 200, `#productGrid li.product_wrapper`, in-stock 7800X3D at storeid 115/141.
+- `scripts/smoke_microcenter_adapter.py` for on-host verification.
 - Live production reliability of non-craigslist adapters is not asserted as stable.
 
 ## What should happen next

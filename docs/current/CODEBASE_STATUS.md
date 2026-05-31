@@ -33,6 +33,7 @@ Last refreshed: 2026-05-28 (UTC)
 - `adapters/offerup.py`: production-usable requests + `__NEXT_DATA__` parser (GeoIP-only location)
 - `adapters/mercari.py`: production-usable requests GraphQL search (canonical `/us/item/` URLs)
 - `adapters/carsdotcom.py`: production-usable Playwright adapter (vehicles; residential IP + Chromium on Raven)
+- `adapters/microcenter.py`: experimental Playwright adapter (retail; storeid scoping; not in default translated sources)
 
 ## Current runtime flow
 
@@ -100,13 +101,14 @@ Vulture is a **personal/self-hosted** system for a single operator (e.g. Raven),
 | `offerup` | **beta** | Production-usable on residential IP; `geoip_only` location (city arg advisory) |
 | `mercari` | **beta** | Production-usable search + relevance filter; listing URLs use `/us/item/{id}/` |
 | `carsdotcom` | **beta** | Production-usable on Raven with Playwright + Chromium; vehicles only; zip targeting; **flaky/browser-sensitive** (Cloudflare HTTP/2 blocks possible — adapter returns `[]`, does not crash hunt cycle) |
+| `microcenter` | **experimental** | Playwright + Chromium on Raven; `storeid` URL scoping; plain `requests` blocked (403); **not** in default translated `source_sites`; opt-in only |
 
 ### Probe/experiment-only (not registered runtime adapters)
 
 | Source / area | Classification | Evidence |
 |---|---|---|
 | eBay (`experiments/adapters/ebay_*`) | **probe only** | Probes document repeated 403/network-layer blocking; no production adapter file |
-| Micro Center (`experiments/adapters/microcenter_probe.py`, `microcenter_playwright_probe.py`) | **probe only** | requests probe + Playwright probe; Cloudflare blocks plain HTTP; no runtime adapter |
+| Micro Center probes (`experiments/adapters/microcenter_probe.py`, `microcenter_playwright_probe.py`) | **probe + informs experimental adapter** | Recon scripts; runtime adapter `adapters/microcenter.py` registered experimental |
 | Cars.com request/playwright probes | **probe only + informs experimental adapter** | Recon scripts exist; production adapter present but still marked experimental |
 | OfferUp location probe | **probe only + informs experimental adapter** | Probe confirms GeoIP-only location behavior |
 | Craigslist probe script | **probe only** | Runtime adapter exists separately and is stable |
