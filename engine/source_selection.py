@@ -3,10 +3,12 @@ engine/source_selection.py
 
 Vertical-aware source_sites selection for translated hunts.
 
-Personal/self-hosted deployment: Craigslist, OfferUp, Mercari, Cars.com, and
-Micro Center participate in normal vertical profiles where appropriate.
+Personal/self-hosted deployment: Craigslist, OfferUp, Mercari, Cars.com,
+Micro Center, and experimental retail/computer sources (Newegg, Best Buy,
+Swappa when registered) participate in vertical profiles where appropriate.
 Capability metadata in the registry documents caveats (geoip_only,
-requires_browser, etc.) without blocking runtime.
+requires_browser, etc.) without blocking runtime when
+INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS is enabled.
 """
 
 from __future__ import annotations
@@ -17,10 +19,48 @@ from adapters.registry import get_capabilities, list_sources, normalize_source
 
 _STABLE_DEFAULT = ["craigslist"]
 
+# When True, registered experimental retail/computer adapters (Newegg, Best Buy,
+# Swappa) are included in computer/electronics/gaming/laptop/retail vertical
+# defaults. They remain experimental=True in registry metadata.
+INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS = True
+
+_EXPERIMENTAL_COMPUTER_RETAIL_SOURCES = [
+    "newegg",
+    "bestbuy",
+    "swappa",
+]
+
+_STABLE_COMPUTER_SOURCES = [
+    "craigslist",
+    "mercari",
+    "offerup",
+    "microcenter",
+]
+
+
+def _computer_electronics_profile() -> list[str]:
+    """Shared profile for computer_parts, laptops_computers, gaming, electronics."""
+    sources = list(_STABLE_COMPUTER_SOURCES)
+    if INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS:
+        sources.extend(_EXPERIMENTAL_COMPUTER_RETAIL_SOURCES)
+    return sources
+
+
+def _retail_profile() -> list[str]:
+    """Retail-first sources (no local marketplace defaults)."""
+    sources = ["newegg", "bestbuy"]
+    if INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS:
+        return sources
+    return list(_STABLE_DEFAULT)
+
+
 # Vertical keys match VERTICALS in llm_translator.py and v2 classify_vertical().
 _VERTICAL_PROFILES: dict[str, list[str]] = {
-    "computer_parts": ["craigslist", "mercari", "offerup", "microcenter"],
-    "laptops_computers": ["craigslist", "mercari", "offerup", "microcenter"],
+    "computer_parts": _computer_electronics_profile(),
+    "laptops_computers": _computer_electronics_profile(),
+    "gaming": _computer_electronics_profile(),
+    "electronics": _computer_electronics_profile(),
+    "retail": _retail_profile(),
     "vehicles": ["craigslist", "carsdotcom", "offerup"],
     "tv_home_theater": ["craigslist", "offerup"],
     "home_theater": ["craigslist", "offerup"],
@@ -35,12 +75,14 @@ _VERTICAL_ONLY_SOURCES: dict[str, frozenset[str]] = {
         "computer_parts",
         "laptops_computers",
         "gaming",
+        "electronics",
         "retail",
     }),
     "mercari": frozenset({
         "computer_parts",
         "laptops_computers",
         "gaming",
+        "electronics",
         "general",
         "general_marketplace",
     }),

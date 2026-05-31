@@ -20,6 +20,7 @@ Usage:
 import logging
 from typing import Callable, Optional
 
+from adapters.bestbuy import search_bestbuy
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
@@ -50,6 +51,9 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": [
             "general_marketplace",
             "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
             "vehicles",
             "home_theater",
         ],
@@ -178,6 +182,36 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": ["retail", "computer_parts", "gaming", "laptops_computers"],
     },
     # -------------------------------------------------------------------------
+    # Best Buy — experimental (Playwright required; plain HTTP fails on Raven)
+    #
+    # Parsing: Playwright Chromium → .list-item / li.product-list-item cards.
+    # Included in computer/electronics vertical profiles when
+    # INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS is enabled.
+    # -------------------------------------------------------------------------
+    "bestbuy": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "edge_http2",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+        ],
+    },
+    # -------------------------------------------------------------------------
     # Swappa — experimental (electronics / gaming / computer hunts)
     #
     # Parsing: requests + BeautifulSoup on server-rendered HTML.
@@ -201,6 +235,8 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "laptops_computers",
         ],
     },
     # -------------------------------------------------------------------------
@@ -214,7 +250,8 @@ _CAPABILITIES: dict[str, dict] = {
     # Advertising "br" without a decoder returns truncated HTML (~75 KB, 0 cards).
     #
     # Location: not targetable. city argument is advisory only.
-    # Manual-only: not in default vertical profiles; use source_sites=["newegg"].
+    # Included in computer/electronics vertical profiles when
+    # INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS is enabled.
     # -------------------------------------------------------------------------
     "newegg": {
         "status": "experimental",
@@ -257,6 +294,7 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
+    "bestbuy": search_bestbuy,
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
     "microcenter": search_microcenter,

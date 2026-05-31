@@ -120,9 +120,9 @@ class TestNeweggRegistry:
         assert _source_allowed_for_vertical("newegg", "computer_parts") is True
         assert _source_allowed_for_vertical("newegg", "vehicles") is False
 
-    def test_not_in_default_vertical_profiles(self):
-        assert "newegg" not in resolve_source_sites("computer_parts")
-        assert "newegg" not in resolve_source_sites("laptops_computers")
+    def test_in_default_vertical_profiles(self):
+        assert "newegg" in resolve_source_sites("computer_parts")
+        assert "newegg" in resolve_source_sites("laptops_computers")
         assert resolve_source_sites("computer_parts", explicit_sources=["newegg"]) == ["newegg"]
 
     def test_vehicle_profile_unchanged(self):
