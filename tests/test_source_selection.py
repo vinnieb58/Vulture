@@ -13,12 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from adapters.registry import (
-    get_probe_capabilities,
-    get_source_metadata,
-    is_registered_source,
-    list_probe_sources,
-)
+from adapters.registry import get_source_metadata, is_registered_source, list_probe_sources
 from engine.llm_translator import translate
 from engine.source_selection import (
     is_executable_source,
@@ -35,35 +30,73 @@ def _expand_hunt_sources(hunt: dict) -> list[dict]:
     return [{**hunt, "source": site} for site in source_sites]
 
 
+_COMPUTER_PARTS_DEFAULTS = [
+    "craigslist",
+    "mercari",
+    "offerup",
+    "microcenter",
+    "swappa",
+    "bestbuy",
+    "newegg",
+]
+
+_GAMING_DEFAULTS = [
+    "craigslist",
+    "mercari",
+    "offerup",
+    "swappa",
+    "bestbuy",
+    "newegg",
+]
+
+
 class TestVerticalProfiles:
-    def test_computer_parts_multi_source(self):
-        assert resolve_source_sites("computer_parts") == [
-            "craigslist", "mercari", "offerup", "microcenter",
+    def test_computer_parts_includes_retail_and_swappa(self):
+        assert resolve_source_sites("computer_parts") == _COMPUTER_PARTS_DEFAULTS
+
+    def test_laptops_computers_includes_retail_and_swappa(self):
+        sites = resolve_source_sites("laptops_computers")
+        assert sites == ["mercari", "microcenter", "swappa", "bestbuy", "newegg"]
+
+    def test_gaming_includes_swappa_bestbuy_newegg(self):
+        assert resolve_source_sites("gaming") == _GAMING_DEFAULTS
+
+    def test_electronics_includes_all_computer_retail(self):
+        assert resolve_source_sites("electronics") == _COMPUTER_PARTS_DEFAULTS
+
+    def test_phones_tablets_includes_swappa(self):
+        assert resolve_source_sites("phones_tablets") == [
+            "craigslist", "offerup", "swappa",
         ]
 
-    def test_laptops_computers_includes_microcenter(self):
-        # Craigslist/OfferUp omit laptops_computers in registry verticals (pre-existing).
-        sites = resolve_source_sites("laptops_computers")
-        assert sites == ["mercari", "microcenter"]
+    def test_retail_includes_all_retail_adapters(self):
+        assert resolve_source_sites("retail") == [
+            "bestbuy", "microcenter", "newegg",
+        ]
 
-    def test_vehicles_profile(self):
+    def test_vehicles_profile_unchanged(self):
         sites = resolve_source_sites("vehicles")
         assert "microcenter" not in sites
+        assert "swappa" not in sites
+        assert "bestbuy" not in sites
+        assert "newegg" not in sites
         assert sites == ["craigslist", "carsdotcom", "offerup"]
 
-    def test_tv_no_mercari(self):
+    def test_tv_no_retail_sources(self):
         sites = resolve_source_sites("tv_home_theater")
-        assert "microcenter" not in sites
         assert sites == ["craigslist", "offerup"]
-
-    def test_general_includes_mercari(self):
-        sites = resolve_source_sites("general")
         assert "microcenter" not in sites
-        assert sites == ["craigslist", "offerup", "mercari"]
+        assert "swappa" not in sites
 
-    def test_carsdotcom_not_on_gpu_vertical(self):
-        sites = resolve_source_sites("computer_parts")
-        assert "carsdotcom" not in sites
+    def test_general_includes_mercari_not_retail(self):
+        sites = resolve_source_sites("general")
+        assert sites == ["craigslist", "offerup", "mercari"]
+        assert "bestbuy" not in sites
+
+    def test_pc_components_alias_matches_computer_parts(self):
+        assert resolve_source_sites("pc_components") == resolve_source_sites(
+            "computer_parts"
+        )
 
     def test_explicit_sources_override(self):
         sites = resolve_source_sites(
@@ -72,131 +105,51 @@ class TestVerticalProfiles:
         )
         assert sites == ["craigslist", "offerup"]
 
-    def test_pc_components_alias_matches_computer_parts(self):
-        assert resolve_source_sites("pc_components") == resolve_source_sites(
-            "computer_parts"
-        )
-
-    def test_gaming_vertical_runtime_sources(self):
-        assert resolve_source_sites("gaming") == [
-            "craigslist", "mercari", "offerup",
-        ]
-
-    def test_electronics_vertical_runtime_sources(self):
-        assert resolve_source_sites("electronics") == [
-            "craigslist", "mercari", "offerup",
-        ]
-
-    def test_phones_tablets_no_mercari(self):
-        assert resolve_source_sites("phones_tablets") == ["craigslist", "offerup"]
-
-    def test_retail_includes_microcenter(self):
-        assert resolve_source_sites("retail") == ["microcenter"]
-
 
 class TestCandidateMappings:
-    def test_computer_parts_candidates_include_retail_probe_and_runtime(self):
-        candidates = resolve_candidate_sources("computer_parts")
-        assert "swappa" in candidates
-        assert "bestbuy" in candidates
-        assert "newegg" in candidates
-        assert "microcenter" in candidates
+    def test_candidates_match_runtime_profiles(self):
+        for vertical in (
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "retail",
+            "phones_tablets",
+        ):
+            assert resolve_candidate_sources(vertical) == resolve_source_sites(vertical)
 
-    def test_retail_candidates_include_probe_stores(self):
-        assert resolve_candidate_sources("retail") == [
-            "bestbuy", "microcenter", "newegg",
-        ]
+    def test_retail_adapters_registered(self):
+        for name in ("swappa", "bestbuy", "newegg", "microcenter"):
+            assert is_registered_source(name) is True
+            assert is_executable_source(name) is True
 
-    def test_phones_tablets_candidates_include_swappa(self):
-        candidates = resolve_candidate_sources("phones_tablets")
-        assert "swappa" in candidates
-        assert "bestbuy" not in candidates
-
-    def test_probe_only_sources_not_in_runtime_defaults(self):
-        for vertical in ("computer_parts", "gaming", "electronics"):
-            runtime = resolve_source_sites(vertical)
-            assert "bestbuy" not in runtime
-            assert "newegg" not in runtime
-            assert "swappa" not in runtime
-
-    def test_microcenter_in_computer_parts_runtime_defaults(self):
-        assert "microcenter" in resolve_source_sites("computer_parts")
-
-    def test_probe_metadata_marked_probe_only(self):
-        for name in ("bestbuy", "newegg"):
-            caps = get_probe_capabilities(name)
+    def test_experimental_sources_not_marked_stable(self):
+        for name in ("swappa", "bestbuy", "newegg"):
+            caps = get_source_metadata(name)
             assert caps is not None
-            assert caps["probe_only"] is True
             assert caps["stable"] is False
-            assert is_registered_source(name) is False
+            assert caps["experimental"] is True
 
-    def test_swappa_registered_experimental_not_stable(self):
-        caps = get_source_metadata("swappa")
-        assert caps is not None
-        assert caps["stable"] is False
-        assert caps["experimental"] is True
-        assert is_registered_source("swappa") is True
-        assert get_probe_capabilities("swappa") is None
-
-    def test_microcenter_registered_not_probe_only(self):
-        caps = get_source_metadata("microcenter")
-        assert caps is not None
-        assert caps["stable"] is True
-        assert is_registered_source("microcenter") is True
-        assert get_probe_capabilities("microcenter") is None
-
-    def test_list_probe_sources(self):
-        assert set(list_probe_sources()) == {"bestbuy", "newegg"}
-
-    def test_is_executable_source_registered_only(self):
-        assert is_executable_source("craigslist") is True
-        assert is_executable_source("microcenter") is True
-        assert is_executable_source("swappa") is True
-        assert is_executable_source("bestbuy") is False
-        assert is_executable_source("newegg") is False
+    def test_list_probe_sources_empty(self):
+        assert list_probe_sources() == []
 
 
 class TestTranslatorIntegration:
-    def test_gpu_multi_source_by_default(self):
+    def test_gpu_includes_swappa_bestbuy_newegg(self):
         t = translate("rtx 3080 under $400")
-        assert t.source_sites == [
-            "craigslist", "mercari", "offerup", "microcenter",
-        ]
+        assert t.source_sites == _COMPUTER_PARTS_DEFAULTS
 
-    def test_ryzen_cpu_includes_microcenter(self):
-        t = translate("ryzen 7 7800x3d under $400")
-        assert "microcenter" in t.source_sites
-
-    def test_gaming_laptop_includes_microcenter(self):
+    def test_gaming_laptop_includes_retail_sources(self):
         t = translate("gaming laptop under $800")
-        assert "microcenter" in t.source_sites
+        for source in ("microcenter", "swappa", "bestbuy", "newegg"):
+            assert source in t.source_sites
 
     def test_vehicle_multi_source(self):
         t = translate("toyota sequoia under 50k miles under $30k")
-        assert "microcenter" not in t.source_sites
         assert t.source_sites == ["craigslist", "carsdotcom", "offerup"]
 
     def test_tv_home_theater_unchanged(self):
         t = translate("75 inch 4K TV under $500")
         assert t.source_sites == ["craigslist", "offerup"]
-
-    def test_swappa_not_in_translated_defaults(self):
-        t = translate("rtx 3080 under $400")
-        assert "swappa" not in t.source_sites
-
-    def test_explicit_swappa_allowed_when_registered(self):
-        sites = resolve_source_sites(
-            "computer_parts",
-            explicit_sources=["craigslist", "swappa"],
-        )
-        assert sites == ["craigslist", "swappa"]
-
-    def test_explicit_newegg_filtered_when_unregistered(self):
-        sites = resolve_source_sites(
-            "computer_parts",
-            explicit_sources=["craigslist", "newegg"],
-        )
-        assert sites == ["craigslist"]
 
 
 class TestMultiSourceFanOut:
