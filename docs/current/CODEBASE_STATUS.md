@@ -33,7 +33,7 @@ Last refreshed: 2026-05-28 (UTC)
 - `adapters/offerup.py`: production-usable requests + `__NEXT_DATA__` parser (GeoIP-only location)
 - `adapters/mercari.py`: production-usable requests GraphQL search (canonical `/us/item/` URLs)
 - `adapters/carsdotcom.py`: production-usable Playwright adapter (vehicles; residential IP + Chromium on Raven)
-- `adapters/microcenter.py`: experimental Playwright adapter (retail; storeid scoping; not in default translated sources)
+- `adapters/microcenter.py`: Playwright adapter (beta; storeid scoping; in computer_parts / laptops_computers source profiles)
 
 ## Current runtime flow
 
@@ -101,7 +101,7 @@ Vulture is a **personal/self-hosted** system for a single operator (e.g. Raven),
 | `offerup` | **beta** | Production-usable on residential IP; `geoip_only` location (city arg advisory) |
 | `mercari` | **beta** | Production-usable search + relevance filter; listing URLs use `/us/item/{id}/` |
 | `carsdotcom` | **beta** | Production-usable on Raven with Playwright + Chromium; vehicles only; zip targeting; **flaky/browser-sensitive** (Cloudflare HTTP/2 blocks possible — adapter returns `[]`, does not crash hunt cycle) |
-| `microcenter` | **experimental** | Playwright + Chromium on Raven; `storeid` URL scoping; plain `requests` blocked (403); **not** in default translated `source_sites`; opt-in only |
+| `microcenter` | **beta** | Playwright + Chromium on Raven; `storeid` URL scoping; plain `requests` blocked (403); auto-included for **computer_parts** and **laptops_computers** translated hunts (not vehicles/TV/general) |
 
 ### Probe/experiment-only (not registered runtime adapters)
 

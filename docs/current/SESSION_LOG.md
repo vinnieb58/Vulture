@@ -131,7 +131,7 @@ This batch should be committed only after live confirmation that:
   - `craigslist` (stable)
   - `offerup` (experimental)
   - `carsdotcom` (experimental)
-  - `microcenter` (experimental, Playwright, opt-in only — not in default translated sources)
+  - `microcenter` (beta, Playwright, vertical profiles: computer_parts + laptops_computers)
 - DB-backed hunt lifecycle is implemented in service/repository layers.
 - Multi-source hunt fan-out is implemented (`source_sites` expansion per source run).
 - Deterministic rules engine enforces price, keyword, TV/GPU/RAM/vehicle structured constraints.

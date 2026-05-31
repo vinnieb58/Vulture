@@ -3,10 +3,10 @@ adapters/microcenter.py
 
 Micro Center retail search adapter for Vulture.
 
-Status: EXPERIMENTAL — requires Playwright Chromium on a host that can pass
-Cloudflare (validated on Raven residential IP, May 2026).
+Status: BETA — runtime-usable on Raven with Playwright Chromium (May 2026 smoke passed).
+Requires browser automation; plain ``requests`` / ``curl_cffi`` return HTTP 403.
 ----------------------------------------------------------------------
-Plain ``requests`` / ``curl_cffi`` return HTTP 403 ("Just a moment...").
+Included in vertical source profiles: ``computer_parts``, ``laptops_computers``.
 Use headless Chromium per search call; do not assume a long-lived browser.
 
 Store scoping: append ``&storeid=<id>`` to search URLs. Availability text in
