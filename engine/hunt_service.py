@@ -488,5 +488,6 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
         "query":        " ".join(hunt.search_terms),
         "city":         raw_city,
         "limit":        hunt.adapter_options.get("limit", 10),
+        "adapter_options": dict(hunt.adapter_options or {}),
         "rules":        rules,
     }

@@ -3,9 +3,11 @@ engine/source_selection.py
 
 Vertical-aware source_sites selection for translated hunts.
 
-Runtime defaults use only registered adapters (_VERTICAL_PROFILES).
-Candidate mappings (_VERTICAL_CANDIDATES) document probe-only and future
-sources (Swappa, Best Buy, Micro Center) without adding them to normal hunts.
+Runtime defaults use registered adapters (_VERTICAL_PROFILES). Micro Center
+participates in computer/laptop vertical defaults from main. Swappa is
+registered but excluded from translated defaults (_NON_DEFAULT_RUNTIME_SOURCES).
+Candidate mappings (_VERTICAL_CANDIDATES) document probe-only sources
+(Best Buy, Newegg) without adding them to normal hunts.
 """
 
 from __future__ import annotations
@@ -29,16 +31,16 @@ _VERTICAL_ALIASES: dict[str, str] = {
     "home_theater": "tv_home_theater",
 }
 
-# Runtime default profiles — registered adapters only; unchanged stable behavior.
+# Runtime default profiles — registered adapters only.
 _VERTICAL_PROFILES: dict[str, list[str]] = {
-    "computer_parts": ["craigslist", "mercari", "offerup"],
-    "pc_components": ["craigslist", "mercari", "offerup"],
-    "laptops_computers": ["craigslist", "mercari", "offerup"],
-    "laptops": ["craigslist", "mercari", "offerup"],
+    "computer_parts": ["craigslist", "mercari", "offerup", "microcenter"],
+    "pc_components": ["craigslist", "mercari", "offerup", "microcenter"],
+    "laptops_computers": ["craigslist", "mercari", "offerup", "microcenter"],
+    "laptops": ["craigslist", "mercari", "offerup", "microcenter"],
     "gaming": ["craigslist", "mercari", "offerup"],
     "electronics": ["craigslist", "mercari", "offerup"],
     "phones_tablets": ["craigslist", "offerup"],
-    "retail": ["craigslist"],
+    "retail": ["microcenter"],
     "vehicles": ["craigslist", "carsdotcom", "offerup"],
     "tv_home_theater": ["craigslist", "offerup"],
     "home_theater": ["craigslist", "offerup"],
@@ -50,21 +52,28 @@ _VERTICAL_PROFILES: dict[str, list[str]] = {
 # Full vertical → source map including probe-only / future candidates.
 _VERTICAL_CANDIDATES: dict[str, list[str]] = {
     "computer_parts": [
-        "craigslist", "mercari", "offerup", "swappa", "bestbuy", "microcenter",
+        "craigslist", "mercari", "offerup", "microcenter",
+        "swappa", "bestbuy", "newegg",
     ],
     "pc_components": [
-        "craigslist", "mercari", "offerup", "swappa", "bestbuy", "microcenter",
+        "craigslist", "mercari", "offerup", "microcenter",
+        "swappa", "bestbuy", "newegg",
     ],
     "laptops_computers": [
-        "craigslist", "mercari", "offerup", "swappa", "bestbuy",
+        "craigslist", "mercari", "offerup", "microcenter",
+        "swappa", "bestbuy", "newegg",
     ],
-    "laptops": ["craigslist", "mercari", "offerup", "swappa", "bestbuy"],
-    "gaming": ["craigslist", "mercari", "offerup", "swappa"],
+    "laptops": [
+        "craigslist", "mercari", "offerup", "microcenter",
+        "swappa", "bestbuy", "newegg",
+    ],
+    "gaming": ["craigslist", "mercari", "offerup", "swappa", "bestbuy", "newegg"],
     "electronics": [
-        "craigslist", "mercari", "offerup", "swappa", "bestbuy", "microcenter",
+        "craigslist", "mercari", "offerup", "microcenter",
+        "swappa", "bestbuy", "newegg",
     ],
     "phones_tablets": ["craigslist", "offerup", "swappa"],
-    "retail": ["bestbuy", "microcenter"],
+    "retail": ["bestbuy", "microcenter", "newegg"],
     "vehicles": ["craigslist", "carsdotcom", "offerup"],
     "tv_home_theater": ["craigslist", "offerup"],
     "home_theater": ["craigslist", "offerup"],
@@ -80,6 +89,15 @@ _NON_DEFAULT_RUNTIME_SOURCES: frozenset[str] = frozenset({
 
 _VERTICAL_ONLY_SOURCES: dict[str, frozenset[str]] = {
     "carsdotcom": frozenset({"vehicles"}),
+    "microcenter": frozenset({
+        "computer_parts",
+        "pc_components",
+        "laptops_computers",
+        "laptops",
+        "gaming",
+        "electronics",
+        "retail",
+    }),
     "mercari": frozenset({
         "computer_parts",
         "pc_components",

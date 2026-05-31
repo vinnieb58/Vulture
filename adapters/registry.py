@@ -23,7 +23,9 @@ from typing import Callable, Optional
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
+from adapters.microcenter import search_microcenter
 from adapters.offerup import search_offerup
+from adapters.swappa import search_swappa
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +52,6 @@ _CAPABILITIES: dict[str, dict] = {
             "gaming",
             "electronics",
             "phones_tablets",
-            "laptops_computers",
             "vehicles",
             "home_theater",
         ],
@@ -92,7 +93,6 @@ _CAPABILITIES: dict[str, dict] = {
             "gaming",
             "electronics",
             "phones_tablets",
-            "laptops_computers",
             "home_theater",
             "vehicles",
         ],
@@ -154,12 +154,78 @@ _CAPABILITIES: dict[str, dict] = {
         "supports_price_filter_in_url": False,
         "verticals": ["vehicles"],
     },
+    # -------------------------------------------------------------------------
+    # Micro Center — production-usable on Raven; Playwright required (requests blocked)
+    #
+    # Parsing: Playwright Chromium → #productGrid li.product_wrapper,
+    # data-name / data-price on product anchors, .price_wrapper for stock text.
+    #
+    # Plain HTTP returns 403 "Just a moment..." from datacenter IPs.
+    # Validated on Raven (residential) May 2026 — smoke + in-stock store compare.
+    #
+    # Location: storeid query param (e.g. 115 Brooklyn, 141 Columbus). Pass via
+    # hunt adapter_options["storeid"] or city names/ids (see search_microcenter).
+    # Included in computer_parts / laptops_computers vertical source profiles.
+    # -------------------------------------------------------------------------
+    "microcenter": {
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "cloudflare",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": True,
+        "location_control": "storeid",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "pc_components",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+        ],
+    },
+    # -------------------------------------------------------------------------
+    # Swappa — experimental (electronics / gaming / computer hunts)
+    #
+    # Parsing: requests + BeautifulSoup on server-rendered HTML.
+    # Flow: /search?q=... → /listings/{slug} → .xui_card_wrapper cards.
+    # No browser automation or login required for basic search (May 2026 probe).
+    #
+    # Location: not targetable via URL/cookies. Per-listing ship-from city/state
+    # may appear in .ships_from when the seller exposes it.
+    # -------------------------------------------------------------------------
+    "swappa": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "general_marketplace",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "phones_tablets",
+            "laptops_computers",
+        ],
+    },
 }
 
 # ---------------------------------------------------------------------------
 # Probe-only / future source metadata (not in _REGISTRY — no runtime adapter)
 #
-# Documents vertical groupings for retail and peer-marketplace sources.
+# Documents vertical groupings for retail sources without runtime adapters.
 # resolve_source_sites() never returns these; they are for candidate routing
 # and manual planning until a dedicated adapter is promoted.
 # ---------------------------------------------------------------------------
@@ -185,12 +251,12 @@ _PROBE_CAPABILITIES: dict[str, dict] = {
             "laptops",
         ],
     },
-    "microcenter": {
+    "newegg": {
         "status": "probe_only",
         "stable": False,
         "experimental": False,
         "probe_only": True,
-        "requires_browser": True,
+        "requires_browser": False,
         "requires_login": False,
         "supports_location": False,
         "supports_radius": False,
@@ -201,26 +267,9 @@ _PROBE_CAPABILITIES: dict[str, dict] = {
             "pc_components",
             "gaming",
             "electronics",
-        ],
-    },
-    "swappa": {
-        "status": "unregistered",
-        "stable": False,
-        "experimental": True,
-        "probe_only": True,
-        "requires_browser": False,
-        "requires_login": False,
-        "supports_location": False,
-        "supports_radius": False,
-        "supports_price_filter_in_url": False,
-        "verticals": [
-            "computer_parts",
-            "pc_components",
-            "gaming",
-            "electronics",
-            "phones_tablets",
             "laptops_computers",
             "laptops",
+            "general_marketplace",
         ],
     },
 }
@@ -246,8 +295,10 @@ _PROBE_CAPABILITIES: dict[str, dict] = {
 _REGISTRY: dict[str, Callable] = {
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
+    "microcenter": search_microcenter,
     "offerup": search_offerup,
     "mercari": search_mercari,
+    "swappa": search_swappa,
 }
 
 
