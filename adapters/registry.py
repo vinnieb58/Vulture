@@ -24,6 +24,7 @@ from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
 from adapters.offerup import search_offerup
+from adapters.newegg import search_newegg
 from adapters.swappa import search_swappa
 
 log = logging.getLogger(__name__)
@@ -171,6 +172,39 @@ _CAPABILITIES: dict[str, dict] = {
             "gaming",
         ],
     },
+    # -------------------------------------------------------------------------
+    # Newegg — experimental (retail / computer parts / gaming / electronics)
+    #
+    # Parsing: requests + BeautifulSoup on server-rendered search HTML.
+    # Flow: /p/pl?d={query} → .item-cell product cards.
+    # No browser automation or login required (May 2026 probe).
+    #
+    # Encoding: Accept-Encoding must omit Brotli unless brotlicffi is installed.
+    # Advertising "br" without a decoder returns truncated HTML (~75 KB, 0 cards).
+    #
+    # Location: not targetable. city argument is advisory only.
+    # Manual-only: not in default vertical profiles; use source_sites=["newegg"].
+    # -------------------------------------------------------------------------
+    "newegg": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "failure_mode": "returns_empty_list",
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "general_marketplace",
+        ],
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -197,6 +231,7 @@ _REGISTRY: dict[str, Callable] = {
     "offerup": search_offerup,
     "mercari": search_mercari,
     "swappa": search_swappa,
+    "newegg": search_newegg,
 }
 
 
