@@ -662,8 +662,9 @@ def print_final_assessment(snaps: list[RunSnapshot]) -> None:
     print("\n  Recommended next step:")
     if any_candidates:
         print(
-            "    Raven/residential Playwright path is viable. Next: --compare-stores 115 141 "
-            "on in-stock SKUs; then sketch adapters/microcenter.py (experimental, Playwright)."
+            "    Playwright path validated. Next on Raven: "
+            "python scripts/smoke_microcenter_adapter.py --query \"ryzen 7 7800x3d\" "
+            "--storeid 141 --limit 5"
         )
     else:
         print(
