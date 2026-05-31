@@ -20,11 +20,13 @@ Usage:
 import logging
 from typing import Callable, Optional
 
+from adapters.bestbuy import search_bestbuy
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
 from adapters.microcenter import search_microcenter
 from adapters.offerup import search_offerup
+from adapters.newegg import search_newegg
 from adapters.swappa import search_swappa
 
 log = logging.getLogger(__name__)
@@ -49,6 +51,9 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": [
             "general_marketplace",
             "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
             "vehicles",
             "home_theater",
         ],
@@ -177,6 +182,36 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": ["retail", "computer_parts", "gaming", "laptops_computers"],
     },
     # -------------------------------------------------------------------------
+    # Best Buy — experimental (Playwright required; plain HTTP fails on Raven)
+    #
+    # Parsing: Playwright Chromium → .list-item / li.product-list-item cards.
+    # Included in computer/electronics vertical profiles when
+    # INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS is enabled.
+    # -------------------------------------------------------------------------
+    "bestbuy": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "edge_http2",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+        ],
+    },
+    # -------------------------------------------------------------------------
     # Swappa — experimental (electronics / gaming / computer hunts)
     #
     # Parsing: requests + BeautifulSoup on server-rendered HTML.
@@ -200,6 +235,42 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
             "computer_parts",
             "gaming",
+            "electronics",
+            "laptops_computers",
+        ],
+    },
+    # -------------------------------------------------------------------------
+    # Newegg — experimental (retail / computer parts / gaming / electronics)
+    #
+    # Parsing: requests + BeautifulSoup on server-rendered search HTML.
+    # Flow: /p/pl?d={query} → .item-cell product cards.
+    # No browser automation or login required (May 2026 probe).
+    #
+    # Encoding: Accept-Encoding must omit Brotli unless brotlicffi is installed.
+    # Advertising "br" without a decoder returns truncated HTML (~75 KB, 0 cards).
+    #
+    # Location: not targetable. city argument is advisory only.
+    # Included in computer/electronics vertical profiles when
+    # INCLUDE_EXPERIMENTAL_COMPUTER_RETAIL_DEFAULTS is enabled.
+    # -------------------------------------------------------------------------
+    "newegg": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "requires_browser": False,
+        "requires_login": False,
+        "supports_location": False,
+        "location_control": "not_supported",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "failure_mode": "returns_empty_list",
+        "verticals": [
+            "retail",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "laptops_computers",
+            "general_marketplace",
         ],
     },
 }
@@ -223,12 +294,14 @@ _CAPABILITIES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable] = {
+    "bestbuy": search_bestbuy,
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
     "microcenter": search_microcenter,
     "offerup": search_offerup,
     "mercari": search_mercari,
     "swappa": search_swappa,
+    "newegg": search_newegg,
 }
 
 
