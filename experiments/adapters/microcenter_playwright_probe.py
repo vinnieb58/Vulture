@@ -25,6 +25,7 @@ Raven setup:
 
 Store comparison (Brooklyn vs Columbus):
     python experiments/adapters/microcenter_playwright_probe.py --compare-stores --query "rtx 4070"
+    python experiments/adapters/microcenter_playwright_probe.py --compare-stores 115 141 --query "rtx 4070"
 """
 
 from __future__ import annotations
@@ -578,13 +579,18 @@ def print_run_report(snap: RunSnapshot) -> None:
 
 
 def print_store_comparison(a: RunSnapshot, b: RunSnapshot) -> None:
+    label_a = f"{a.store_id} ({STORE_COMPARE_IDS.get(a.store_id or '', 'store A')})"
+    label_b = f"{b.store_id} ({STORE_COMPARE_IDS.get(b.store_id or '', 'store B')})"
     print("\n" + "=" * 72)
-    print("STORE COMPARISON — storeid 115 (Brooklyn) vs 141 (Columbus)")
+    print(f"STORE COMPARISON — {label_a} vs {label_b}")
     print("=" * 72)
 
     def _summary(s: RunSnapshot) -> dict[str, Any]:
         titles = [c.get("title") for c in s.candidates[:3] if c.get("title")]
         prices = [c.get("price_display") or c.get("price") for c in s.candidates[:3]]
+        availability = [
+            (c.get("availability") or "")[:80] for c in s.candidates[:3]
+        ]
         return {
             "storeid": s.store_id,
             "final_url": s.final_url,
@@ -592,36 +598,39 @@ def print_store_comparison(a: RunSnapshot, b: RunSnapshot) -> None:
             "candidates": len(s.candidates),
             "sample_titles": titles,
             "sample_prices": prices,
+            "sample_availability": availability,
             "store_snippet": s.store_snippet,
         }
 
     sa = _summary(a)
     sb = _summary(b)
-    print(f"\n  115 Brooklyn:\n{json.dumps(sa, indent=4, ensure_ascii=False)}")
-    print(f"\n  141 Columbus:\n{json.dumps(sb, indent=4, ensure_ascii=False)}")
+    print(f"\n  {label_a}:\n{json.dumps(sa, indent=4, ensure_ascii=False)}")
+    print(f"\n  {label_b}:\n{json.dumps(sb, indent=4, ensure_ascii=False)}")
 
     urls_differ = sa["final_url"] != sb["final_url"]
     counts_differ = sa["candidates"] != sb["candidates"]
     titles_differ = sa["sample_titles"] != sb["sample_titles"]
     prices_differ = sa["sample_prices"] != sb["sample_prices"]
-    snippets_differ = sa["store_snippet"] != sb["store_snippet"]
+    avail_differ = sa["sample_availability"] != sb["sample_availability"]
 
     print("\n  Observations:")
-    print(f"    URLs differ           : {urls_differ}")
-    print(f"    Candidate counts differ: {counts_differ}")
-    print(f"    Sample titles differ  : {titles_differ}")
-    print(f"    Sample prices differ  : {prices_differ}")
-    print(f"    Store snippets differ : {snippets_differ}")
+    print(f"    URLs differ              : {urls_differ}")
+    print(f"    Candidate counts differ  : {counts_differ}")
+    print(f"    Sample titles differ     : {titles_differ}")
+    print(f"    Sample prices differ     : {prices_differ}")
+    print(f"    Sample availability differ: {avail_differ}")
 
     if not sa["candidates"] and not sb["candidates"]:
+        print("\n  No candidates — blocked or selectors missed.")
+    elif avail_differ and not prices_differ:
         print(
-            "\n  Cannot validate per-store pricing until Playwright passes Cloudflare "
-            "and returns product cards on Raven/residential IP."
+            "\n  Store scoping works: same SKUs/prices, availability text differs "
+            "(e.g. Brooklyn vs Columbus in NOT CARRIED message)."
         )
-    elif titles_differ or prices_differ or snippets_differ:
-        print("\n  Store-specific content appears to differ between runs.")
+    elif titles_differ or prices_differ:
+        print("\n  Store-specific titles or prices differ between runs.")
     else:
-        print("\n  No obvious content delta — re-check on unblocked HTML.")
+        print("\n  No obvious delta — try a query with in-stock items at both stores.")
 
     print("=" * 72)
 
@@ -640,8 +649,8 @@ def print_final_assessment(snaps: list[RunSnapshot]) -> None:
     print(f"  Navigation errors?         : {'YES' if any_nav_fail else 'NO'}")
     print(f"  Total candidates (all runs): {sum(len(s.candidates) for s in snaps)}")
     print(
-        "  Remain probe-only?         : YES — until stable normalized listings "
-        "on target network"
+        "  Remain probe-only?         : YES — experimental adapter only after "
+        "repeatable Raven runs + in-stock validation"
     )
 
     working = [s.selector_meta.get("selector_used") for s in snaps if s.selector_meta.get("selector_used")]
@@ -653,8 +662,8 @@ def print_final_assessment(snaps: list[RunSnapshot]) -> None:
     print("\n  Recommended next step:")
     if any_candidates:
         print(
-            "    Confirm selectors on Raven; compare storeid 115 vs 141 prices/pickup; "
-            "then evaluate adapters/microcenter.py behind experimental flag."
+            "    Raven/residential Playwright path is viable. Next: --compare-stores 115 141 "
+            "on in-stock SKUs; then sketch adapters/microcenter.py (experimental, Playwright)."
         )
     else:
         print(
@@ -684,10 +693,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--compare-stores",
-        action="store_true",
-        help="Run storeid 115 and 141 back-to-back and print comparison",
+        nargs="*",
+        default=None,
+        metavar="STOREID",
+        help=(
+            "Compare two stores in one run. Default IDs: 115 (Brooklyn) and 141 (Columbus). "
+            "Examples: --compare-stores  |  --compare-stores 115 141"
+        ),
     )
     args = parser.parse_args()
+
+    compare_store_ids: list[str] | None = None
+    if args.compare_stores is not None:
+        compare_store_ids = args.compare_stores if args.compare_stores else ["115", "141"]
+        if len(compare_store_ids) != 2:
+            parser.error("--compare-stores requires zero args (defaults 115 141) or exactly two STOREIDs")
 
     debug_path = Path(args.debug_html) if args.debug_html else None
 
@@ -698,17 +718,15 @@ def main() -> int:
 
     snapshots: list[RunSnapshot] = []
 
-    if args.compare_stores:
+    if compare_store_ids is not None:
+        store_ids = compare_store_ids
         paths: list[Optional[Path]] = [None, None]
         if debug_path:
             stem = debug_path.stem
             suffix = debug_path.suffix or ".html"
             parent = debug_path.parent
-            paths = [
-                parent / f"{stem}_115{suffix}",
-                parent / f"{stem}_141{suffix}",
-            ]
-        for sid, path in zip(("115", "141"), paths):
+            paths = [parent / f"{stem}_{sid}{suffix}" for sid in store_ids]
+        for sid, path in zip(store_ids, paths):
             print(f"\n>>> Run storeid={sid} ({STORE_COMPARE_IDS.get(sid, sid)})")
             snap = run_probe(
                 args.query,
