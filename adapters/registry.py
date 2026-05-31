@@ -23,6 +23,7 @@ from typing import Callable, Optional
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
 from adapters.mercari import search_mercari
+from adapters.microcenter import search_microcenter
 from adapters.offerup import search_offerup
 from adapters.swappa import search_swappa
 
@@ -146,6 +147,36 @@ _CAPABILITIES: dict[str, dict] = {
         "verticals": ["vehicles"],
     },
     # -------------------------------------------------------------------------
+    # Micro Center — production-usable on Raven; Playwright required (requests blocked)
+    #
+    # Parsing: Playwright Chromium → #productGrid li.product_wrapper,
+    # data-name / data-price on product anchors, .price_wrapper for stock text.
+    #
+    # Plain HTTP returns 403 "Just a moment..." from datacenter IPs.
+    # Validated on Raven (residential) May 2026 — smoke + in-stock store compare.
+    #
+    # Location: storeid query param (e.g. 115 Brooklyn, 141 Columbus). Pass via
+    # hunt adapter_options["storeid"] or city names/ids (see search_microcenter).
+    # Included in computer_parts / laptops_computers vertical source profiles.
+    # -------------------------------------------------------------------------
+    "microcenter": {
+        "status": "beta",
+        "stable": True,
+        "experimental": False,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "cloudflare",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": True,
+        "location_control": "storeid",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "verticals": ["retail", "computer_parts", "gaming", "laptops_computers"],
+    },
+    # -------------------------------------------------------------------------
     # Swappa — experimental (electronics / gaming / computer hunts)
     #
     # Parsing: requests + BeautifulSoup on server-rendered HTML.
@@ -194,6 +225,7 @@ _CAPABILITIES: dict[str, dict] = {
 _REGISTRY: dict[str, Callable] = {
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
+    "microcenter": search_microcenter,
     "offerup": search_offerup,
     "mercari": search_mercari,
     "swappa": search_swappa,

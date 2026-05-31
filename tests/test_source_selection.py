@@ -28,21 +28,28 @@ def _expand_hunt_sources(hunt: dict) -> list[dict]:
 class TestVerticalProfiles:
     def test_computer_parts_multi_source(self):
         assert resolve_source_sites("computer_parts") == [
-            "craigslist", "mercari", "offerup"
+            "craigslist", "mercari", "offerup", "microcenter",
         ]
+
+    def test_laptops_computers_includes_microcenter(self):
+        # Craigslist/OfferUp omit laptops_computers in registry verticals (pre-existing).
+        sites = resolve_source_sites("laptops_computers")
+        assert sites == ["mercari", "microcenter"]
 
     def test_vehicles_profile(self):
-        assert resolve_source_sites("vehicles") == [
-            "craigslist", "carsdotcom", "offerup"
-        ]
+        sites = resolve_source_sites("vehicles")
+        assert "microcenter" not in sites
+        assert sites == ["craigslist", "carsdotcom", "offerup"]
 
     def test_tv_no_mercari(self):
-        assert resolve_source_sites("tv_home_theater") == ["craigslist", "offerup"]
+        sites = resolve_source_sites("tv_home_theater")
+        assert "microcenter" not in sites
+        assert sites == ["craigslist", "offerup"]
 
     def test_general_includes_mercari(self):
-        assert resolve_source_sites("general") == [
-            "craigslist", "offerup", "mercari"
-        ]
+        sites = resolve_source_sites("general")
+        assert "microcenter" not in sites
+        assert sites == ["craigslist", "offerup", "mercari"]
 
     def test_carsdotcom_not_on_gpu_vertical(self):
         sites = resolve_source_sites("computer_parts")
@@ -59,10 +66,21 @@ class TestVerticalProfiles:
 class TestTranslatorIntegration:
     def test_gpu_multi_source_by_default(self):
         t = translate("rtx 3080 under $400")
-        assert t.source_sites == ["craigslist", "mercari", "offerup"]
+        assert t.source_sites == [
+            "craigslist", "mercari", "offerup", "microcenter",
+        ]
+
+    def test_ryzen_cpu_includes_microcenter(self):
+        t = translate("ryzen 7 7800x3d under $400")
+        assert "microcenter" in t.source_sites
+
+    def test_gaming_laptop_includes_microcenter(self):
+        t = translate("gaming laptop under $800")
+        assert "microcenter" in t.source_sites
 
     def test_vehicle_multi_source(self):
         t = translate("toyota sequoia under 50k miles under $30k")
+        assert "microcenter" not in t.source_sites
         assert t.source_sites == ["craigslist", "carsdotcom", "offerup"]
 
 

@@ -60,11 +60,20 @@ def run_hunt(hunt: dict) -> int:
         # Warning already logged by get_adapter; skip this hunt gracefully.
         return 0
 
-    listings = adapter_fn(
-        query=hunt["query"],
-        city=hunt.get("city", "houston"),
-        limit=hunt.get("limit", 10),
-    )
+    adapter_options = hunt.get("adapter_options") or {}
+    if source == "microcenter":
+        listings = adapter_fn(
+            query=hunt["query"],
+            city=hunt.get("city", "houston"),
+            limit=hunt.get("limit", 10),
+            storeid=adapter_options.get("storeid"),
+        )
+    else:
+        listings = adapter_fn(
+            query=hunt["query"],
+            city=hunt.get("city", "houston"),
+            limit=hunt.get("limit", 10),
+        )
 
     new_count = 0
     old_count = 0

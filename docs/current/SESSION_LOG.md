@@ -131,6 +131,7 @@ This batch should be committed only after live confirmation that:
   - `craigslist` (stable)
   - `offerup` (experimental)
   - `carsdotcom` (experimental)
+  - `microcenter` (beta, Playwright, vertical profiles: computer_parts + laptops_computers)
 - DB-backed hunt lifecycle is implemented in service/repository layers.
 - Multi-source hunt fan-out is implemented (`source_sites` expansion per source run).
 - Deterministic rules engine enforces price, keyword, TV/GPU/RAM/vehicle structured constraints.
@@ -155,7 +156,16 @@ This batch should be committed only after live confirmation that:
 
 - OfferUp location targeting remains GeoIP-only (city input is advisory).
 - Cars.com reliability across varied network/runtime environments remains experimental.
+- Micro Center: runtime adapter registered **experimental**; requires Playwright on Raven; plain HTTP still blocked; not promoted to stable until repeated hunt smoke passes.
 - eBay scraping remains probe-only with documented blocking; no runtime adapter.
+
+## 2026-05-31 — Micro Center adapter + vertical source selection
+
+- Added `adapters/microcenter.py` (Playwright, `storeid` scoping, returns `[]` on Cloudflare block).
+- Registry: `stable=True`, `experimental=False`, `requires_browser=True`, `location_control: storeid`.
+- Included in `resolve_source_sites()` for `computer_parts` and `laptops_computers` (not vehicles/TV/general).
+- Raven smoke: `scripts/smoke_microcenter_adapter.py --query "ryzen 7 7800x3d" --storeid 141` → `[PASS]`, 5 listings.
+- `main.py` passes `adapter_options["storeid"]` when source is `microcenter`.
 - Live production reliability of non-craigslist adapters is not asserted as stable.
 
 ## What should happen next
