@@ -127,10 +127,13 @@ CHALLENGE_BODY_MARKERS = [
     "hcaptcha",
 ]
 
-# Best Buy PLP (May 2026): primary cards are `.list-item` with `a.sku-title` /
-# `span.nc-product-title`. Legacy `li.sku-item` may appear on older layouts.
+# Best Buy PLP (May 2026) uses two card layouts:
+#   Grid/list hybrid: `.list-item` + `a.sku-title` + `span.nc-product-title`
+#   Product-list:     `li.product-list-item` + `a.product-list-item-link`
+# Legacy `li.sku-item` may appear on older layouts.
 PRODUCT_CARD_SELECTORS = [
     ".list-item",
+    "li.product-list-item",
     "li.sku-item",
     ".sku-item",
     "section.sku-item-list li",
@@ -142,17 +145,19 @@ PRODUCT_CARD_SELECTORS = [
 
 CARD_WAIT_SELECTORS = [
     ".list-item",
+    "li.product-list-item",
+    "a.product-list-item-link",
     "li.sku-item",
     ".sku-item",
     "a.sku-title",
     "[data-testid='product-card']",
-    "a[href*='/product/']",
 ]
 
 FIELD_SELECTORS = {
     "title": [
         "a.sku-title span.nc-product-title",
         "a.sku-title",
+        "a.product-list-item-link",
         "span.nc-product-title",
         ".sku-title a",
         ".sku-title",
@@ -172,6 +177,7 @@ FIELD_SELECTORS = {
     ],
     "link": [
         "a.sku-title",
+        "a.product-list-item-link",
         ".sku-title a",
         "h4.sku-title a",
         "a.image-link",
@@ -285,7 +291,9 @@ def _select_one_href(card, selectors: list[str]) -> Optional[str]:
     for sel in selectors:
         found = card.select_one(sel)
         if found and found.get("href"):
-            return normalize_link(found["href"])
+            href = normalize_link(found["href"])
+            if href and "/product/" in href:
+                return href
     return None
 
 
@@ -489,6 +497,14 @@ def probe_query_on_page(
     load_ms = int((time.monotonic() - t0) * 1000)
 
     if not nav_error:
+        # Nudge lazy-loaded result rows (macbook air product-list layout).
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+            page.wait_for_timeout(800)
+            page.evaluate("window.scrollTo(0, 0)")
+        except Exception:
+            pass
+
         card_appeared = False
         for sel in CARD_WAIT_SELECTORS:
             try:
