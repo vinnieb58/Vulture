@@ -21,3 +21,8 @@ logs/
 
 # Probe debug artefacts (HTML snapshots, screenshots saved by experiment scripts)
 experiments/debug/
+
+# Simply Fresh Kitchen probe session + run artifacts
+experiments/simplyfresh_probe/.auth/
+experiments/simplyfresh_probe/artifacts/
+*.trace.zip
