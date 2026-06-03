@@ -16,7 +16,10 @@ import pytest
 
 from crow.checks import services, system, vulture
 from crow.checks.services import ServiceStatus
-from crow.formatting import disk_level, format_bytes, join_lines, truncate
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+from crow.formatting import disk_level, format_bytes, format_timestamp, join_lines, truncate
 from crow.commands.help import crow_help_text
 
 
@@ -157,7 +160,7 @@ class TestFormatting:
                 "memory": "n/a",
                 "disk_root": "n/a",
                 "load_average": "n/a",
-                "timestamp": "2026-01-01 00:00:00 UTC",
+                "timestamp": "2026-01-01 00:00:00 CST",
             }
         )
         assert "raven" in msg
@@ -167,3 +170,12 @@ class TestFormatting:
         text = crow_help_text()
         assert "read-only" in text.lower()
         assert "/raven_status" in text
+
+    def test_format_timestamp_central(self):
+        # 2026-01-15 18:00 UTC = 12:00 CST (standard time)
+        dt = datetime(2026, 1, 15, 18, 0, 0, tzinfo=timezone.utc)
+        with patch("crow.formatting.get_display_timezone", return_value=ZoneInfo("America/Chicago")):
+            out = format_timestamp(dt)
+        assert "2026-01-15 12:00:00" in out
+        assert "UTC" not in out
+        assert out.endswith("CST") or out.endswith("CDT")

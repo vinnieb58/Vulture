@@ -85,7 +85,9 @@ def get_load_average() -> str | None:
 
 
 def get_current_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    from crow.formatting import format_timestamp
+
+    return format_timestamp()
 
 
 def parse_df_output(text: str) -> list[DiskEntry]:

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from crow.config import DISPLAY_TIMEZONE
 
 # Discord message limit; leave room for truncation notice.
 MAX_MESSAGE_LEN = 1900
@@ -17,9 +20,28 @@ def truncate(text: str, limit: int = MAX_MESSAGE_LEN) -> str:
     return text[:limit] + "\n…*(truncated)*"
 
 
+def get_display_timezone() -> ZoneInfo:
+    """Timezone for user-facing timestamps (default: US Central)."""
+    try:
+        return ZoneInfo(DISPLAY_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
 def format_timestamp(dt: datetime | None = None) -> str:
-    dt = dt or datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    """
+    Format a moment for Discord display in the configured local timezone.
+
+    Naive datetimes are treated as UTC. Default when omitted is now (UTC).
+    """
+    tz = get_display_timezone()
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(tz)
+    tz_label = local.tzname() or DISPLAY_TIMEZONE
+    return local.strftime(f"%Y-%m-%d %H:%M:%S {tz_label}")
 
 
 def format_bytes(num: int | float | None) -> str:

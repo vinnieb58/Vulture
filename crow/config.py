@@ -34,3 +34,6 @@ EXTRA_DISK_PATHS: list[Path] = [
 
 # Standard mount scan roots
 MOUNT_SCAN_ROOTS = (Path("/mnt"), Path("/media"))
+
+# Display timezone for Crow timestamps (IANA name, e.g. America/Chicago)
+DISPLAY_TIMEZONE = os.getenv("CROW_TIMEZONE", "America/Chicago").strip() or "America/Chicago"

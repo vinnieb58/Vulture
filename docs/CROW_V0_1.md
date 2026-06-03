@@ -27,12 +27,13 @@ Optional Crow-specific paths (no secrets):
 | `CROW_VULTURE_DB_PATH` | SQLite path override |
 | `CROW_VULTURE_LOGS_DIR` | Logs directory override |
 | `CROW_EXTRA_DISK_PATHS` | Comma-separated extra mount paths for `/check_disk` |
+| `CROW_TIMEZONE` | IANA timezone for displayed timestamps (default: `America/Chicago` — Central, CST/CDT) |
 
 ## v0.1 command list (read-only)
 
 | Command | Description |
 |---------|-------------|
-| `/raven_status` | Host summary: hostname, uptime, memory, `/` disk, load average, UTC timestamp |
+| `/raven_status` | Host summary: hostname, uptime, memory, `/` disk, load average, Central-time timestamp |
 | `/check_disk` | Disk usage for `/`, `/mnt` and `/media` mounts, and configured extras; warns ≥80%, critical ≥90% |
 | `/check_memory` | Total / used / available memory and percent used |
 | `/check_services` | Whether Discord bot, scheduler (`main.py`), and `bot` / `scheduler` tmux sessions appear active |

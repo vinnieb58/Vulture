@@ -32,10 +32,10 @@ def _file_mtime_iso(path: Path) -> str | None:
     if not path.is_file():
         return None
     try:
+        from crow.formatting import format_timestamp
+
         ts = path.stat().st_mtime
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
+        return format_timestamp(datetime.fromtimestamp(ts, tz=timezone.utc))
     except OSError:
         return None
 
