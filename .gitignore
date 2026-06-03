@@ -22,6 +22,9 @@ logs/
 # Probe debug artefacts (HTML snapshots, screenshots saved by experiment scripts)
 experiments/debug/
 
+# Facebook Marketplace probe — manual Playwright profiles (never commit session data)
+artifacts/facebook_marketplace_probe/profiles/
+
 # Simply Fresh Kitchen probe session + run artifacts
 experiments/simplyfresh_probe/.auth/
 experiments/simplyfresh_probe/artifacts/

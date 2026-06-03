@@ -6,11 +6,18 @@ register in adapters/registry.py, touch .env, or add Facebook as a runtime sourc
 
 No login automation, stored cookies, or production adapter integration.
 
-Usage:
+Usage (anonymous / no saved session):
     python experiments/adapters/facebook_marketplace_probe.py
     python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080"
     python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080" --limit 10 --screenshot-on-fail
-    python experiments/adapters/facebook_marketplace_probe.py --headed --slowmo 100 --screenshot-on-fail
+
+Manual profile setup (one-time, headed; you log in yourself — no credential automation):
+    python experiments/adapters/facebook_marketplace_probe.py --setup-profile \\
+        --profile-dir artifacts/facebook_marketplace_probe/profiles/manual_fb_profile --headed
+
+Probe with saved profile:
+    python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080" --limit 10 \\
+        --profile-dir artifacts/facebook_marketplace_probe/profiles/manual_fb_profile --screenshot-on-fail
 
 Prerequisites:
     pip install playwright beautifulsoup4 lxml
@@ -33,7 +40,9 @@ from bs4 import BeautifulSoup
 
 try:
     from playwright.sync_api import (
+        BrowserContext,
         Page,
+        Playwright,
         TimeoutError as PlaywrightTimeout,
         sync_playwright,
     )
@@ -53,6 +62,15 @@ MARKETPLACE_SEARCH_BASE = f"{FACEBOOK_ORIGIN}/marketplace/search"
 DEFAULT_QUERIES = ["rtx 3080", "toyota sequoia", "75 inch tv"]
 
 ARTIFACTS_DIR = Path("artifacts/facebook_marketplace_probe")
+DEFAULT_PROFILE_DIR = ARTIFACTS_DIR / "profiles" / "manual_fb_profile"
+MARKETPLACE_HOME_URL = f"{FACEBOOK_ORIGIN}/marketplace"
+
+CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-infobars",
+]
 
 VIEWPORT = {"width": 1280, "height": 900}
 USER_AGENT = (
@@ -425,20 +443,196 @@ def _recommended_next_step(
     challenge_detected: str,
     extraction_quality: str,
     headed: bool,
+    using_profile: bool,
+    profile_login_worked: Optional[bool],
 ) -> str:
     if not reachable:
         return "retry headed"
-    if login_required == "yes":
-        return "try browser profile"
     if challenge_detected == "yes":
         return "retry headed"
+    if using_profile and profile_login_worked is False:
+        return "re-run --setup-profile (session expired or invalid)"
+    if login_required == "yes" and not using_profile:
+        return "try browser profile"
+    if login_required == "yes":
+        return "re-run --setup-profile"
     if extraction_quality == "good":
         return "build experimental adapter"
     if extraction_quality == "partial":
         return "build experimental adapter"
+    if using_profile and profile_login_worked:
+        return "improve parser selectors"
     if not headed:
         return "retry headed"
     return "abandon"
+
+
+def _profile_dir_has_data(profile_dir: Path) -> bool:
+    if not profile_dir.exists():
+        return False
+    try:
+        return any(profile_dir.iterdir())
+    except OSError:
+        return False
+
+
+def _stealth_init_script() -> str:
+    return "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+
+
+def _open_persistent_context(
+    pw: Playwright,
+    profile_dir: Path,
+    *,
+    headed: bool,
+    slowmo: int,
+) -> BrowserContext:
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    context = pw.chromium.launch_persistent_context(
+        str(profile_dir.resolve()),
+        headless=not headed,
+        slow_mo=slowmo,
+        viewport=VIEWPORT,
+        user_agent=USER_AGENT,
+        locale=LOCALE,
+        timezone_id=TIMEZONE,
+        args=CHROMIUM_ARGS,
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        },
+    )
+    context.add_init_script(_stealth_init_script())
+    return context
+
+
+def _open_ephemeral_context(
+    pw: Playwright,
+    *,
+    headed: bool,
+    slowmo: int,
+) -> tuple[Any, BrowserContext]:
+    launch_opts: dict[str, Any] = {
+        "headless": not headed,
+        "slow_mo": slowmo,
+        "args": CHROMIUM_ARGS,
+    }
+    browser = pw.chromium.launch(**launch_opts)
+    context = browser.new_context(
+        viewport=VIEWPORT,
+        user_agent=USER_AGENT,
+        locale=LOCALE,
+        timezone_id=TIMEZONE,
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        },
+    )
+    context.add_init_script(_stealth_init_script())
+    return browser, context
+
+
+def _get_or_new_page(context: BrowserContext) -> Page:
+    if context.pages:
+        return context.pages[0]
+    return context.new_page()
+
+
+def _location_controllability_hint(results: list[QueryDiagnostics]) -> str:
+    """Heuristic: varied listing locations suggest geo is active; URL params suggest URL control."""
+    locations: list[str] = []
+    for r in results:
+        for listing in r.listings:
+            if listing.location:
+                locations.append(listing.location.strip().lower())
+    if not locations:
+        return "unknown (no location strings extracted)"
+    unique = sorted(set(locations))
+    if len(unique) >= 2:
+        return f"possibly yes (saw {len(unique)} distinct location strings; check Marketplace radius UI)"
+    return f"unclear (only {unique[0]!r} observed; try changing Marketplace location in profile UI)"
+
+
+def setup_profile(profile_dir: Path, headed: bool, slowmo: int) -> None:
+    """Headed persistent context: user logs in manually; session saved in profile_dir."""
+    if not headed:
+        print(
+            "WARNING: --setup-profile works best with --headed so you can log in in the browser."
+        )
+    profile_dir = profile_dir.resolve()
+    print()
+    print("=" * 72)
+    print("  FACEBOOK MARKETPLACE — MANUAL PROFILE SETUP")
+    print("=" * 72)
+    print(f"  Profile directory: {profile_dir}")
+    print("  This probe does NOT automate login or store credentials in the repo.")
+    print("  Session data stays on disk only under the profile path (gitignored).")
+    print()
+
+    with sync_playwright() as pw:
+        try:
+            context = _open_persistent_context(pw, profile_dir, headed=True, slowmo=slowmo)
+        except Exception as exc:
+            print(f"ERROR: Could not launch persistent browser: {exc}")
+            print("Install browsers: python -m playwright install chromium")
+            sys.exit(1)
+
+        page = _get_or_new_page(context)
+        try:
+            page.goto(
+                MARKETPLACE_HOME_URL,
+                wait_until="domcontentloaded",
+                timeout=DEFAULT_TIMEOUT_MS,
+            )
+        except Exception as exc:
+            print(f"WARNING: Initial navigation issue (continue in browser): {exc}")
+
+        print("  Instructions:")
+        print("    1. In the browser window, log in to Facebook if prompted.")
+        print("    2. Confirm Marketplace loads (browse/search works).")
+        print("    3. Optionally set your Marketplace location/radius in the UI.")
+        print("    4. Return here and press Enter to save the profile and exit.")
+        print()
+        print("  Do NOT paste passwords or tokens into this terminal.")
+        print()
+
+        try:
+            input("  Press Enter when finished logging in and Marketplace is reachable... ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Setup cancelled — closing browser without further prompts.")
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+    print()
+    if _profile_dir_has_data(profile_dir):
+        print(f"  Profile saved under: {profile_dir}")
+        print("  Next: run probe with --profile-dir pointing at this path.")
+    else:
+        print(f"  WARNING: Profile directory looks empty: {profile_dir}")
+    print("=" * 72)
+    print()
+
+
+def clear_profile_warning_only(profile_dir: Path) -> None:
+    profile_dir = profile_dir.resolve()
+    print()
+    print("=" * 72)
+    print("  CLEAR PROFILE (warning only — no files deleted)")
+    print("=" * 72)
+    if not profile_dir.exists():
+        print(f"  Profile path does not exist: {profile_dir}")
+    elif not _profile_dir_has_data(profile_dir):
+        print(f"  Profile path exists but appears empty: {profile_dir}")
+    else:
+        print(f"  To remove saved session data, delete this directory yourself:")
+        print(f"    rm -rf {profile_dir}")
+        print("  Or on Windows, remove the folder via File Explorer.")
+        print("  Never commit profile contents to git.")
+    print("=" * 72)
+    print()
 
 
 def _print_query_diagnostics(d: QueryDiagnostics) -> None:
@@ -576,7 +770,9 @@ def run_probe(
     slowmo: int,
     timeout_ms: int,
     screenshot_on_fail: bool,
+    profile_dir: Optional[Path] = None,
 ) -> list[QueryDiagnostics]:
+    using_profile = profile_dir is not None
     sep = "=" * 72
     print(sep)
     print("  FACEBOOK MARKETPLACE PLAYWRIGHT PROBE (experimental, isolated)")
@@ -585,6 +781,12 @@ def run_probe(
         f"  mode={'headed' if headed else 'headless'}  limit={limit}  "
         f"slowmo={slowmo}  timeout_ms={timeout_ms}  screenshot_on_fail={screenshot_on_fail}"
     )
+    if using_profile:
+        print(f"  profile_dir={profile_dir.resolve()}")
+        if not _profile_dir_has_data(profile_dir):
+            print("  WARNING: profile directory missing or empty — run --setup-profile first")
+    else:
+        print("  profile_dir=(none — anonymous session)")
     print(sep)
 
     if headed:
@@ -595,37 +797,22 @@ def run_probe(
 
     try:
         with sync_playwright() as pw:
-            launch_opts: dict[str, Any] = {
-                "headless": not headed,
-                "slow_mo": slowmo,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-infobars",
-                ],
-            }
+            browser: Any = None
             try:
-                browser = pw.chromium.launch(**launch_opts)
+                if using_profile:
+                    context = _open_persistent_context(
+                        pw, profile_dir, headed=headed, slowmo=slowmo
+                    )
+                else:
+                    browser, context = _open_ephemeral_context(
+                        pw, headed=headed, slowmo=slowmo
+                    )
             except Exception as exc:
                 print(f"\nERROR: Browser launch failed: {exc}")
                 print("Install browsers: python -m playwright install chromium")
                 sys.exit(1)
 
-            context = browser.new_context(
-                viewport=VIEWPORT,
-                user_agent=USER_AGENT,
-                locale=LOCALE,
-                timezone_id=TIMEZONE,
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
-                },
-            )
-            context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            )
-            page = context.new_page()
+            page = _get_or_new_page(context)
 
             for query in queries:
                 results.append(
@@ -644,7 +831,8 @@ def run_probe(
                         pass
 
             context.close()
-            browser.close()
+            if browser is not None:
+                browser.close()
     except Exception as exc:
         print(f"\nFATAL: Probe failed: {exc}")
         sys.exit(1)
@@ -652,7 +840,36 @@ def run_probe(
     return results
 
 
-def _print_summary(results: list[QueryDiagnostics], headed: bool) -> None:
+def _profile_login_worked(
+    results: list[QueryDiagnostics], using_profile: bool
+) -> Optional[bool]:
+    if not using_profile:
+        return None
+    if not results:
+        return False
+    logged_in_signals = 0
+    for r in results:
+        on_marketplace = "/marketplace" in (r.final_url or "").lower()
+        not_login_url = r.login_required != "yes"
+        has_content = r.marketplace_content or len(r.listings) > 0
+        if on_marketplace and not_login_url and has_content:
+            logged_in_signals += 1
+    if logged_in_signals == len(results):
+        return True
+    if all(r.login_required == "yes" for r in results):
+        return False
+    if any(r.login_required == "yes" for r in results):
+        return False
+    return logged_in_signals > 0
+
+
+def _print_summary(
+    results: list[QueryDiagnostics],
+    headed: bool,
+    profile_dir: Optional[Path] = None,
+) -> None:
+    using_profile = profile_dir is not None
+    profile_login = _profile_login_worked(results, using_profile)
     total_listings = sum(len(r.listings) for r in results)
     reachable = any(
         r.http_status == 200 or (r.html_length > 5_000 and not r.nav_error) for r in results
@@ -688,16 +905,23 @@ def _print_summary(results: list[QueryDiagnostics], headed: bool) -> None:
         challenge_detected=challenge_detected,
         extraction_quality=extraction_quality,
         headed=headed,
+        using_profile=using_profile,
+        profile_login_worked=profile_login,
     )
+    location_hint = _location_controllability_hint(results)
 
     print()
     print("=" * 72)
     print("FACEBOOK MARKETPLACE PROBE SUMMARY")
     print(f"- reachable: {'yes' if reachable else 'no'}")
+    if using_profile:
+        plw = "yes" if profile_login is True else "no" if profile_login is False else "unknown"
+        print(f"- profile_login_worked: {plw}")
     print(f"- login_required: {login_required}")
     print(f"- challenge_detected: {challenge_detected}")
     print(f"- listings_found: {total_listings}")
     print(f"- extraction_quality: {extraction_quality}")
+    print(f"- location_controllability: {location_hint}")
     print(f"- recommended_next_step: {recommended}")
     print("=" * 72)
     print()
@@ -716,8 +940,36 @@ def _build_parser() -> argparse.ArgumentParser:
 Examples:
   python experiments/adapters/facebook_marketplace_probe.py
   python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080" --limit 10
-  python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080" --headed --slowmo 100
+  python experiments/adapters/facebook_marketplace_probe.py --setup-profile \\
+      --profile-dir artifacts/facebook_marketplace_probe/profiles/manual_fb_profile --headed
+  python experiments/adapters/facebook_marketplace_probe.py --query "rtx 3080" --limit 10 \\
+      --profile-dir artifacts/facebook_marketplace_probe/profiles/manual_fb_profile
 """,
+    )
+    p.add_argument(
+        "--profile-dir",
+        type=Path,
+        dest="profile_dir",
+        metavar="PATH",
+        help=(
+            "Playwright persistent profile directory (gitignored). "
+            f"Suggested default: {DEFAULT_PROFILE_DIR}"
+        ),
+    )
+    p.add_argument(
+        "--setup-profile",
+        action="store_true",
+        dest="setup_profile",
+        help=(
+            "Open headed browser at Marketplace for manual login; "
+            "press Enter in terminal when done (requires --profile-dir)"
+        ),
+    )
+    p.add_argument(
+        "--clear-profile-warning-only",
+        action="store_true",
+        dest="clear_profile_warning",
+        help="Print how to delete the profile directory; does not delete files",
     )
     p.add_argument(
         "--query",
@@ -762,6 +1014,20 @@ Examples:
 
 def main() -> None:
     args = _build_parser().parse_args()
+    profile_dir: Optional[Path] = args.profile_dir
+
+    if args.clear_profile_warning:
+        clear_profile_warning_only(profile_dir or DEFAULT_PROFILE_DIR)
+        sys.exit(0)
+
+    if args.setup_profile:
+        if not profile_dir:
+            print("ERROR: --setup-profile requires --profile-dir")
+            print(f"  Example: --profile-dir {DEFAULT_PROFILE_DIR}")
+            sys.exit(1)
+        setup_profile(profile_dir, headed=args.headed or True, slowmo=args.slowmo)
+        sys.exit(0)
+
     queries = args.queries if args.queries else DEFAULT_QUERIES
     results = run_probe(
         queries=queries,
@@ -770,8 +1036,9 @@ def main() -> None:
         slowmo=args.slowmo,
         timeout_ms=args.timeout_ms,
         screenshot_on_fail=args.screenshot_on_fail,
+        profile_dir=profile_dir,
     )
-    _print_summary(results, headed=args.headed)
+    _print_summary(results, headed=args.headed, profile_dir=profile_dir)
     sys.exit(0)
 
 
