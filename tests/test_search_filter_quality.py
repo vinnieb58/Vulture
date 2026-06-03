@@ -54,6 +54,10 @@ def _rules_from_intent(intent: str) -> dict:
         rules["vehicle_model"] = ao["model"]
     if ao.get("hunt_subtype"):
         rules["hunt_subtype"] = ao["hunt_subtype"]
+    if ao.get("product_family"):
+        rules["product_family"] = ao["product_family"]
+    if ao.get("target_product_type"):
+        rules["target_product_type"] = ao["target_product_type"]
     return rules
 
 
@@ -189,6 +193,12 @@ class TestSteamDeckNoiseRejection:
 
     def test_bakery_processing_rejects(self, rules):
         assert _fails("Bakery processing refrigeration unit", rules)
+
+    def test_gripcase_accessory_rejects(self, rules):
+        assert _fails("Skull & Co GripCase for Steam Deck", rules)
+
+    def test_console_bundle_with_case_passes(self, rules):
+        assert _passes("Steam Deck LCD 512GB with carrying case", rules)
 
 
 class TestAdapterRegistryMetadata:
