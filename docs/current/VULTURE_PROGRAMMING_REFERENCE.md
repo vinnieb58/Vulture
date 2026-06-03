@@ -4,7 +4,8 @@ Last updated: 2026-05-28 (UTC)
 
 ## 1) Runtime roles
 
-- `discord_bot.py`: command/control runtime (slash commands -> command router -> hunt service/repository)
+- `discord_bot.py`: command/control runtime (Vulture hunt slash commands + Crow v0.1 read-only ops)
+- `crow/`: read-only Raven host and Vulture health checks (`docs/CROW_V0_1.md`)
 - `main.py`: one hunt cycle executor (load hunts -> run adapters -> rules -> dedupe -> save -> alert)
 
 Keep these roles distinct when debugging.
@@ -16,6 +17,10 @@ Implemented slash commands:
 - `/hunt_list`, `/hunt_show`, `/hunt_create`
 - `/hunt_pause`, `/hunt_resume`, `/hunt_end`
 - `/hunt` (preferred intent create), `/hunt_from_intent` (legacy alias)
+
+Crow v0.1 (same bot runtime, read-only):
+
+- `/raven_status`, `/check_disk`, `/check_memory`, `/check_services`, `/check_vulture`, `/crow_help`
 
 ## 3) Hunt source loading modes
 

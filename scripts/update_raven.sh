@@ -269,7 +269,7 @@ section "Installing requirements"
 # 10. Compile Python source
 # ---------------------------------------------------------------------------
 section "Compiling Python source (syntax check)"
-"$PYTHON_BIN" -m compileall -q adapters engine models main.py discord_bot.py
+"$PYTHON_BIN" -m compileall -q adapters crow engine models main.py discord_bot.py
 echo "  Compile OK"
 
 # ---------------------------------------------------------------------------

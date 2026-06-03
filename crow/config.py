@@ -1,0 +1,39 @@
+"""
+Crow configuration — paths and thresholds only (no secrets).
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# Subprocess safety
+DEFAULT_SUBPROCESS_TIMEOUT = 10.0
+
+# Disk usage thresholds (percent used)
+DISK_WARN_PERCENT = 80
+DISK_CRITICAL_PERCENT = 90
+
+# Project root — cwd when the bot runs (Raven deploy uses repo root)
+PROJECT_ROOT = Path(os.getenv("CROW_PROJECT_ROOT", ".")).resolve()
+
+# Vulture paths (relative to project root unless overridden)
+VULTURE_DB_PATH = Path(
+    os.getenv("CROW_VULTURE_DB_PATH", str(PROJECT_ROOT / "data" / "vulture.db"))
+)
+VULTURE_LOGS_DIR = Path(
+    os.getenv("CROW_VULTURE_LOGS_DIR", str(PROJECT_ROOT / "logs"))
+)
+VULTURE_MAIN_LOG = VULTURE_LOGS_DIR / "vulture.log"
+
+# Extra mount points to check (comma-separated absolute paths in env)
+_extra_mounts = os.getenv("CROW_EXTRA_DISK_PATHS", "").strip()
+EXTRA_DISK_PATHS: list[Path] = [
+    Path(p.strip()) for p in _extra_mounts.split(",") if p.strip()
+]
+
+# Standard mount scan roots
+MOUNT_SCAN_ROOTS = (Path("/mnt"), Path("/media"))
+
+# Display timezone for Crow timestamps (IANA name, e.g. America/Chicago)
+DISPLAY_TIMEZONE = os.getenv("CROW_TIMEZONE", "America/Chicago").strip() or "America/Chicago"

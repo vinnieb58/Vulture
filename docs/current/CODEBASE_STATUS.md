@@ -17,7 +17,8 @@ Last refreshed: 2026-05-28 (UTC)
 ### Runtime entrypoints
 
 - `main.py`: scheduled/one-shot hunt cycle runner
-- `discord_bot.py`: Discord slash-command control surface
+- `discord_bot.py`: Discord slash-command control surface (Vulture hunts + Crow v0.1 read-only ops)
+- `crow/`: Crow v0.1 read-only Raven/Vulture health commands (see `docs/CROW_V0_1.md`)
 
 ### Core implemented modules
 
@@ -65,6 +66,8 @@ discord_bot.py slash command
 ```
 
 Implemented slash commands:
+
+**Vulture hunts**
 - `/hunt_list`
 - `/hunt_show`
 - `/hunt_create`
@@ -73,6 +76,9 @@ Implemented slash commands:
 - `/hunt_end`
 - `/hunt` (preferred NL create command)
 - `/hunt_from_intent` (legacy alias)
+
+**Crow v0.1 (read-only)**
+- `/raven_status`, `/check_disk`, `/check_memory`, `/check_services`, `/check_vulture`, `/crow_help`
 
 ## Current hunt execution flow
 
