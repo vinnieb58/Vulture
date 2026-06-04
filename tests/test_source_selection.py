@@ -138,6 +138,11 @@ class TestTranslatorIntegration:
         t = translate("rtx 3080 under $400")
         assert t.source_sites == _COMPUTER_PARTS_DEFAULTS
 
+    def test_m2_storage_same_sources_as_ddr4(self):
+        ddr4 = translate("32GB DDR4 RAM 3200mhz")
+        m2 = translate("M.2 SATA SSD 256GB under $50")
+        assert m2.source_sites == ddr4.source_sites == _COMPUTER_PARTS_DEFAULTS
+
     def test_gaming_laptop_includes_retail_sources(self):
         t = translate("gaming laptop under $800")
         for source in ("microcenter", "swappa", "bestbuy", "newegg"):

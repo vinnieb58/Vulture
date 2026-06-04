@@ -262,6 +262,27 @@ _HANDHELD_FALSE_POSITIVE_EXCLUDE = [
     "massage chair", "medical equipment",
 ]
 
+# Apple Mac Mini device hunts — longest phrase first.
+_APPLE_MAC_MINI_PHRASES: tuple[str, ...] = (
+    "apple mac mini",
+    "mac mini",
+    "macmini",
+)
+
+_MAC_MINI_INCLUDE: list[str] = ["mac mini", "macmini"]
+
+# Storage / SSD sub-hunts inside computer_parts.
+_STORAGE_EXCLUDE = [
+    "broken", "for parts", "not working",
+    "wanted", "looking for", "iso",
+    "we buy", "wtb", "buying", "cash for", "consign",
+    "laptop", "gaming pc", "gaming desktop", "full pc",
+]
+
+_QUERY_TRAILING_STOPWORDS = frozenset({
+    "for", "with", "under", "below", "less", "than", "around", "near", "in", "from",
+})
+
 # Additional exclude keywords used only for RAM sub-hunts inside computer_parts.
 # Not part of VERTICALS so they don't pollute GPU/CPU searches.
 _RAM_EXCLUDE = [
@@ -801,6 +822,128 @@ def _extract_handheld_target(intent_lower: str) -> Optional[str]:
     return None
 
 
+def _strip_search_query_noise(text: str) -> str:
+    """
+    Strip price constraints and trailing connector/stop words from a search phrase.
+
+    Ensures queries like "mac mini for under 50" become "Mac Mini", not "Mac Mini For".
+    """
+    clean = text.lower()
+    clean = re.sub(
+        r'(?:under|below|less\s+than|at\s+most|up\s+to|max(?:imum)?|over|above'
+        r'|more\s+than|around|near)\s*\$?\s*\d[\d,]*'
+        r'|\$\s*\d[\d,]*',
+        '', clean, flags=re.IGNORECASE,
+    )
+    clean = _PRICE_RE.sub("", clean)
+    clean = _MILES_RE.sub("", clean)
+    clean = re.sub(
+        r'\b(?:dollars?|bucks?|usd|miles?|km)\b',
+        '', clean, flags=re.IGNORECASE,
+    )
+    words = clean.split()
+    while words and words[0] in _QUERY_TRAILING_STOPWORDS:
+        words.pop(0)
+    while words and words[-1] in _QUERY_TRAILING_STOPWORDS:
+        words.pop()
+    return re.sub(r'\s+', ' ', ' '.join(words)).strip()
+
+
+def _is_apple_mac_mini_hunt(intent_lower: str) -> bool:
+    return any(phrase in intent_lower for phrase in _APPLE_MAC_MINI_PHRASES)
+
+
+def _build_mac_mini_translation(
+    intent_lower: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Apple Mac Mini device hunt.
+
+    Returns (search_terms, include_keywords, exclude_keywords).
+    """
+    clean = _strip_search_query_noise(intent_lower)
+    if "apple" in clean or re.search(r'\bm[1-4]\b', clean):
+        search = "Apple Mac Mini"
+    else:
+        search = "Mac Mini"
+    return [search], list(_MAC_MINI_INCLUDE), []
+
+
+def _is_storage_hunt(intent_lower: str) -> bool:
+    """Return True when intent is about SSD/storage, not RAM or GPU."""
+    if _is_ram_hunt(intent_lower):
+        return False
+    if _extract_gpu_model(intent_lower):
+        return False
+    storage_kws = (
+        "ssd", "nvme", "m.2", "m2 ", "m2,", " m2", "hard drive", "hdd",
+        "sata ssd", "solid state", "solid-state",
+    )
+    return any(kw in intent_lower for kw in storage_kws)
+
+
+def _extract_storage_capacities_gb(intent_lower: str) -> list[int]:
+    caps: list[int] = []
+    for m in re.finditer(r'\b(\d+)\s*(gb|tb)\b', intent_lower):
+        val = int(m.group(1))
+        if m.group(2) == "tb":
+            val *= 1024
+        if val not in caps:
+            caps.append(val)
+    return caps
+
+
+def _build_storage_translation(
+    intent_lower: str,
+) -> tuple[list[str], list[str], list[str], dict]:
+    """
+    Storage / SSD hunt (M.2 SATA, NVMe, etc.).
+
+    Returns (search_terms, include_keywords, exclude_keywords, storage_opts).
+    """
+    storage_opts: dict = {"reject_bulk_lots": True}
+
+    is_m2 = bool(re.search(r'\bm\.?\s*2\b', intent_lower)) or "m2" in intent_lower.split()
+    is_sata = "sata" in intent_lower
+    is_nvme = "nvme" in intent_lower
+
+    if is_m2 or "2230" in intent_lower or "2280" in intent_lower:
+        storage_opts["storage_form_factor"] = "m2"
+    elif "2.5" in intent_lower:
+        storage_opts["storage_form_factor"] = "2.5"
+
+    if is_sata:
+        storage_opts["storage_protocol"] = "sata"
+        if is_m2 and not is_nvme:
+            storage_opts["excluded_storage_protocols"] = ["nvme"]
+    elif is_nvme:
+        storage_opts["storage_protocol"] = "nvme"
+
+    caps = _extract_storage_capacities_gb(intent_lower)
+    if caps:
+        storage_opts["allowed_capacity_gb"] = caps
+
+    parts: list[str] = []
+    if storage_opts.get("storage_form_factor") == "m2":
+        parts.append("M.2")
+    if is_sata:
+        parts.append("SATA")
+    elif is_nvme:
+        parts.append("NVMe")
+    parts.append("SSD")
+    search = " ".join(parts) if parts else _strip_search_query_noise(intent_lower).title() or "SSD"
+
+    include_kw: list[str] = []
+    if is_sata:
+        include_kw.append("sata")
+    if is_nvme:
+        include_kw.append("nvme")
+    if storage_opts.get("storage_form_factor") == "m2":
+        include_kw.extend(["m.2", "m2"])
+
+    return [search], include_kw, list(_STORAGE_EXCLUDE), storage_opts
+
+
 def _build_handheld_translation(
     target: str,
     intent_lower: str,
@@ -1321,16 +1464,7 @@ def _build_gpu_translation(
     else:
         # No specific model detected — strip price constraints and query-noise
         # words so Craigslist gets a clean search phrase instead of raw intent.
-        clean = re.sub(
-            r'(?:under|below|less\s+than|at\s+most|up\s+to|max(?:imum)?)\s*\$?\s*\d[\d,]*'
-            r'|\$\s*\d[\d,]*',
-            '', intent.lower(), flags=re.IGNORECASE,
-        )
-        clean = re.sub(
-            r'\b(?:dollars?|bucks?|usd|for|with|and|or|the|a|an)\b',
-            '', clean, flags=re.IGNORECASE,
-        )
-        clean = re.sub(r'\s+', ' ', clean).strip()
+        clean = _strip_search_query_noise(intent)
         search_terms = [(clean.title() if clean else intent)]
         include_kw   = []
         model_excl   = list(_GPU_SYSTEM_EXCLUDE)
@@ -1528,11 +1662,20 @@ def _translate_v1_non_vehicle(
 
     _is_ram   = _is_ram_hunt(intent_lower_orig)
     _pre_gpu  = _extract_gpu_model(intent_lower_orig) if not _is_ram else None
+    _mac_mini = _is_apple_mac_mini_hunt(intent_lower_orig)
+    _storage  = (
+        _is_storage_hunt(intent_lower_orig)
+        if not _is_ram and not _pre_gpu
+        else False
+    )
     _handheld = (
         _extract_handheld_target(intent_lower_orig)
-        if vertical == "computer_parts" and not _is_ram and not _pre_gpu
+        if vertical == "computer_parts" and not _is_ram and not _pre_gpu and not _storage
         else None
     )
+    if _mac_mini and vertical != "laptops_computers":
+        vertical = "laptops_computers"
+        v_cfg    = VERTICALS["laptops_computers"]
     if _pre_gpu and vertical != "computer_parts":
         vertical = "computer_parts"
         v_cfg    = VERTICALS["computer_parts"]
@@ -1583,14 +1726,22 @@ def _translate_v1_non_vehicle(
     ram_specific_exclude: list[str] = []
     gpu_model_excl:       list[str] = []
     handheld_excl:        list[str] = []
+    storage_excl:         list[str] = []
+    storage_opts:         dict = {}
     tv_require_all:       list[str] = []
 
     if vertical == "tv_home_theater":
         search_terms, include_kw, tv_require_all = _build_tv_translation(
             size, resolution, brand=tv_brand, panel=tv_panel
         )
+    elif vertical == "laptops_computers" and _mac_mini:
+        search_terms, include_kw, _mac_excl = _build_mac_mini_translation(intent_lower_orig)
     elif vertical == "computer_parts" and _is_ram:
         search_terms, include_kw, ram_specific_exclude = _build_ram_translation(ram_type, min_gb)
+    elif vertical == "computer_parts" and _storage:
+        search_terms, include_kw, storage_excl, storage_opts = _build_storage_translation(
+            intent_lower_orig
+        )
     elif vertical == "computer_parts" and _handheld:
         search_terms, include_kw, handheld_excl = _build_handheld_translation(
             _handheld, intent_lower_orig
@@ -1602,15 +1753,14 @@ def _translate_v1_non_vehicle(
     elif vertical == "vehicles":
         search_terms, include_kw = _build_vehicle_translation(make or "", model or "", intent)
     else:
-        clean = _PRICE_RE.sub("", intent_lower_num).strip()
-        clean = _MILES_RE.sub("", clean).strip()
-        clean = re.sub(r'\b(?:dollars?|bucks?|usd|miles?|km)\b', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\s+', ' ', clean).strip()
+        clean = _strip_search_query_noise(intent_lower_num)
         search_terms = [clean.title() if clean else intent]
         include_kw   = []
 
     if ram_specific_exclude:
         exclude_kw: list[str] = ram_specific_exclude
+    elif storage_excl:
+        exclude_kw = storage_excl
     else:
         exclude_kw = list(v_cfg.get("default_exclude", [])) + gpu_model_excl + handheld_excl
         if _card_only:
@@ -1649,8 +1799,13 @@ def _translate_v1_non_vehicle(
     if vertical == "computer_parts":
         if _handheld:
             adapter_opts["hunt_subtype"] = "handheld"
+            adapter_opts["product_family"] = _handheld
+            adapter_opts["target_product_type"] = "console"
         elif _is_ram:
             adapter_opts["hunt_subtype"] = "ram"
+        elif _storage:
+            adapter_opts["hunt_subtype"] = "storage"
+            adapter_opts.update(storage_opts)
         else:
             adapter_opts["hunt_subtype"] = "gpu"
         if _is_ram:
@@ -1663,7 +1818,7 @@ def _translate_v1_non_vehicle(
                 # Enforcement is via include_keywords (title must contain the
                 # DDR type); this field is for logging and introspection only.
                 adapter_opts["ddr_generation"] = ram_type
-        else:
+        elif not _storage:
             if min_vram_gb:
                 adapter_opts["min_vram_gb"] = min_vram_gb
             # "or better" → tier-based minimum class for rules.py
@@ -1681,6 +1836,12 @@ def _translate_v1_non_vehicle(
                     "GPU hunt: 'card only' detected — adding stricter system excludes"
                 )
 
+    if vertical == "laptops_computers" and _mac_mini:
+        adapter_opts["hunt_subtype"] = "device"
+        adapter_opts["product_family"] = "apple_mac_mini"
+        adapter_opts["target_product_type"] = "device"
+        adapter_opts["brand"] = "apple"
+
     name = _generate_name(
         vertical, size, resolution, gpu_model, make, model, ram_type, search_terms,
         brand=tv_brand, panel=tv_panel,
@@ -1693,6 +1854,8 @@ def _translate_v1_non_vehicle(
     if resolution: constraint_parts.append(f"resolution={resolution}")
     if gpu_model:  constraint_parts.append(f"model={gpu_model}")
     if _handheld:  constraint_parts.append(f"handheld={_handheld} (title phrase required)")
+    if _mac_mini:  constraint_parts.append("product=apple_mac_mini (device hunt)")
+    if _storage:   constraint_parts.append(f"storage={storage_opts or 'ssd'}")
     if _or_better: constraint_parts.append(f"min_gpu_class={gpu_model} (or better)")
     if _card_only: constraint_parts.append("card_only=true (stricter system excludes active)")
     if ram_type:   constraint_parts.append(f"ddr_generation={ram_type}")

@@ -466,6 +466,31 @@ def hunt_to_execution_dict(hunt: Hunt) -> dict:
     if hunt_subtype:
         rules["hunt_subtype"] = str(hunt_subtype)
 
+    product_family = hunt.adapter_options.get("product_family")
+    if product_family:
+        rules["product_family"] = str(product_family)
+    target_product_type = hunt.adapter_options.get("target_product_type")
+    if target_product_type:
+        rules["target_product_type"] = str(target_product_type)
+    brand = hunt.adapter_options.get("brand")
+    if brand:
+        rules["brand"] = str(brand)
+
+    storage_form_factor = hunt.adapter_options.get("storage_form_factor")
+    if storage_form_factor:
+        rules["storage_form_factor"] = str(storage_form_factor)
+    storage_protocol = hunt.adapter_options.get("storage_protocol")
+    if storage_protocol:
+        rules["storage_protocol"] = str(storage_protocol)
+    excluded_storage_protocols = hunt.adapter_options.get("excluded_storage_protocols")
+    if excluded_storage_protocols:
+        rules["excluded_storage_protocols"] = list(excluded_storage_protocols)
+    allowed_capacity_gb = hunt.adapter_options.get("allowed_capacity_gb")
+    if allowed_capacity_gb:
+        rules["allowed_capacity_gb"] = [int(c) for c in allowed_capacity_gb]
+    if hunt.adapter_options.get("reject_bulk_lots"):
+        rules["reject_bulk_lots"] = True
+
     # city is used as the Craigslist subdomain; multi-word values cause DNS
     # failures (e.g. "mandeville louisiana").  For non-Craigslist adapters
     # (e.g. OfferUp) city is advisory only — the adapter logs it but does

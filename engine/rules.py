@@ -33,6 +33,41 @@ _RAM_DESKTOP_KIT_HINTS = (
     " desktop ram", " memory module",
 )
 
+_MAC_MINI_COSMETIC_TERMS = (
+    "lipstick", "makeup", "cosmetics", "brush", "mascara", "eyeliner",
+    "lip", "lipglass", "eyeshadow", "blush", "foundation", "compact",
+    "palette", "bag", "purse", "crossbody", "dress", "duggal",
+)
+
+_MAC_MINI_DEVICE_EVIDENCE = (
+    "desktop", "computer", "m1", "m2", "m3", "m4", "intel", "i5", "i7",
+    "ram", "ssd", "late 2012", "late 2014", "2018", "2020", "2023", "2024",
+)
+
+_MAC_MINI_ACCESSORY_TERMS = (
+    "dock", "docking station", "hub", "stand", "enclosure", "adapter",
+    "cable", "charger", "keyboard", "mouse", "labels", "mouse pad",
+    "mousepad", "sleeve", "case", "mount",
+)
+
+_STEAM_DECK_ACCESSORY_TERMS = (
+    "case", "gripcase", "grip case", "skin", "shell", "cover",
+    "screen protector", "dock", "charger", "cable", "carrying case",
+    "thumbstick", "backplate", "kickstand", "mount",
+)
+
+_STORAGE_BULK_LOT_TERMS = (
+    "bulk", "lot of", "wholesale", " qty ", "quantity", "reserved",
+    "lot ", " lots ", "mixed lot",
+)
+
+_SSD_CAP_RE = re.compile(
+    r'\b(\d+)\s*[xX]\s*(\d+)\s*[gG][bB]\b'
+    r'|\b(\d+)\s*[gG][bB]\b'
+    r'|\b(\d+)\s*[tT][bB]\b',
+    re.IGNORECASE,
+)
+
 
 def _word_in_title(title_lower: str, word: str) -> bool:
     return bool(re.search(r"\b" + re.escape(word.lower()) + r"\b", title_lower))
@@ -102,6 +137,105 @@ def _looks_like_ram_whole_computer(title_lower: str) -> bool:
         if re.search(r"\b(?:hp|dell|lenovo|acer)\s+desktop\b", title_lower):
             return True
     return False
+
+
+def _has_mac_mini_device_evidence(title_lower: str) -> bool:
+    if "mac mini" in title_lower or "macmini" in title_lower:
+        return True
+    if "apple" in title_lower and "mini" in title_lower:
+        return any(e in title_lower for e in _MAC_MINI_DEVICE_EVIDENCE)
+    return False
+
+
+def _looks_like_mac_mini_cosmetics(title_lower: str) -> bool:
+    has_mac = bool(re.search(r"\bmac\b", title_lower))
+    has_mini = bool(re.search(r"\bmini\b", title_lower))
+    if not (has_mac and has_mini):
+        return False
+    if any(term in title_lower for term in _MAC_MINI_COSMETIC_TERMS):
+        return True
+    return "mac cosmetics" in title_lower
+
+
+def _mac_mini_has_computer_specs(title_lower: str) -> bool:
+    if re.search(r"\b\d+\s*(?:gb|tb)\b", title_lower):
+        return True
+    if "desktop computer" in title_lower:
+        return True
+    if re.search(r"\b(?:late|mid)\s+20\d{2}\b", title_lower):
+        return True
+    if re.search(r"\b[a-z]{2}\d{4}[a-z]{2}/\w", title_lower):
+        return True
+    if re.search(r"\b(?:i5|i7|intel)\b", title_lower) and re.search(
+        r"\b\d+\s*(?:gb|tb)\b", title_lower
+    ):
+        return True
+    return False
+
+
+def _looks_like_mac_mini_accessory_only(title_lower: str) -> bool:
+    if not any(term in title_lower for term in _MAC_MINI_ACCESSORY_TERMS):
+        return False
+    if _mac_mini_has_computer_specs(title_lower):
+        return False
+    mac_ref = (
+        "mac mini" in title_lower
+        or "macmini" in title_lower
+        or ("apple" in title_lower and "mini" in title_lower)
+        or re.search(r"\bm[1-4]\b", title_lower)
+    )
+    if not mac_ref:
+        return False
+    return True
+
+
+def _looks_like_steam_deck_accessory_only(title_lower: str) -> bool:
+    deck_ref = "steam deck" in title_lower or "steamdeck" in title_lower
+    if not deck_ref:
+        return False
+    if not any(term in title_lower for term in _STEAM_DECK_ACCESSORY_TERMS):
+        return False
+    if re.search(r"\b(?:64|128|256|512|1)\s*(?:gb|tb)\b", title_lower):
+        return False
+    if any(s in title_lower for s in ("lcd", "oled", "console", "handheld")):
+        if re.search(r"\b(?:64|128|256|512|1)\s*(?:gb|tb)\b", title_lower):
+            return False
+    return True
+
+
+def _extract_ssd_capacity_gb_from_title(title: str) -> Optional[int]:
+    for m in _SSD_CAP_RE.finditer(title):
+        if m.group(1) is not None:
+            return int(m.group(1)) * int(m.group(2))
+        if m.group(3) is not None:
+            return int(m.group(3))
+        if m.group(4) is not None:
+            return int(m.group(4)) * 1024
+    return None
+
+
+def _extract_storage_protocol_from_title(title_lower: str) -> Optional[str]:
+    if "nvme" in title_lower or "pcie" in title_lower or "pcie4" in title_lower:
+        return "nvme"
+    if "sata" in title_lower:
+        return "sata"
+    return None
+
+
+def _extract_storage_form_factor_from_title(title_lower: str) -> Optional[str]:
+    if re.search(r"\b2\.5\s*(?:inch|in|\")?\b", title_lower):
+        return "2.5"
+    if "2230" in title_lower:
+        return "2230"
+    if "2280" in title_lower:
+        return "2280"
+    if re.search(r"\bm\.?\s*2\b", title_lower) or re.search(r"\bm2\b", title_lower):
+        return "m2"
+    return None
+
+
+def _looks_like_storage_bulk_lot(title_lower: str) -> bool:
+    return any(term in title_lower for term in _STORAGE_BULK_LOT_TERMS)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +495,60 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
         if p > max_price:
             return f"{_vpfx}price ${p} > max_price ${max_price}"
 
+    title_lower = listing.title.lower()
+    product_family = rules.get("product_family")
+    target_product_type = rules.get("target_product_type")
+    hunt_subtype = rules.get("hunt_subtype")
+
+    if product_family == "apple_mac_mini" and target_product_type == "device":
+        if _looks_like_mac_mini_cosmetics(title_lower):
+            return (
+                f"{_vpfx}non-computer MAC/cosmetics listing for Apple Mac Mini hunt"
+            )
+        if not _has_mac_mini_device_evidence(title_lower):
+            return (
+                f"{_vpfx}title missing Apple Mac Mini device evidence"
+            )
+        if _looks_like_mac_mini_accessory_only(title_lower):
+            return (
+                f"{_vpfx}accessory-only listing for Apple Mac Mini device hunt"
+            )
+
+    if (
+        hunt_subtype == "handheld"
+        and product_family == "steam_deck"
+        and _looks_like_steam_deck_accessory_only(title_lower)
+    ):
+        return f"{_vpfx}accessory-only listing for Steam Deck console hunt"
+
+    if hunt_subtype == "storage":
+        excluded_protocols = rules.get("excluded_storage_protocols") or []
+        required_form = rules.get("storage_form_factor")
+        allowed_capacity = rules.get("allowed_capacity_gb") or []
+        reject_bulk = rules.get("reject_bulk_lots")
+
+        if reject_bulk and _looks_like_storage_bulk_lot(title_lower):
+            return f"{_vpfx}bulk/lot listing rejected"
+
+        title_protocol = _extract_storage_protocol_from_title(title_lower)
+        if title_protocol and title_protocol in excluded_protocols:
+            return (
+                f'{_vpfx}excluded storage protocol "{title_protocol}"'
+            )
+
+        title_form = _extract_storage_form_factor_from_title(title_lower)
+        if required_form and title_form:
+            req = str(required_form).lower()
+            if req == "m2" and title_form == "2.5":
+                return f'{_vpfx}wrong storage form factor "2.5"'
+            if req in ("2230", "2280") and title_form == "2.5":
+                return f'{_vpfx}wrong storage form factor "2.5"'
+
+        if allowed_capacity:
+            cap = _extract_ssd_capacity_gb_from_title(listing.title)
+            if cap is not None and cap not in allowed_capacity:
+                return f"{_vpfx}capacity not in allowed set"
+
     # --- keyword filters ---
 
     _ensure_vehicle_structured_fields(rules)
@@ -399,8 +587,6 @@ def _find_rejection_reason(listing: Listing, rules: dict) -> Optional[str]:
             if str(kw).lower() in title_lower:
                 return f'{_vpfx}excluded keyword "{kw}"'
 
-    hunt_subtype = rules.get("hunt_subtype")
-    title_lower = listing.title.lower()
     if hunt_subtype == "gpu" and _looks_like_gpu_whole_system(title_lower):
         return f"{_vpfx}whole system/laptop listing (GPU card hunt)"
     if hunt_subtype == "ram" and _looks_like_ram_whole_computer(title_lower):
