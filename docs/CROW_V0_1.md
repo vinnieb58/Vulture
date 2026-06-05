@@ -5,7 +5,7 @@ Crow is the read-only Discord command and control layer for **The Aviary** — t
 ## Why Crow lives in the Vulture repo (for now)
 
 - The existing production Discord bot already runs from `discord_bot.py` in this repo.
-- Raven deploy scripts (`scripts/update_raven.sh`) restart `vulture-bot.service` and `vulture-scheduler.service` after successful pull, install, and tests.
+- Raven deploy scripts (`scripts/update_raven.sh`) restart `vulture-bot.service` and `vulture-scheduler.service` after a successful pull, install, validation, and one hunt cycle.
 - v0.1 adds observability without splitting deployment or duplicating tokens.
 - The `crow/` package is structured so it can later be extracted into its own container or repository when Docker and control features are ready.
 
