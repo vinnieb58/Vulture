@@ -43,3 +43,48 @@ VULTURE_BOT_SYSTEMD_UNIT = os.getenv("CROW_VULTURE_BOT_UNIT", "vulture-bot").str
 VULTURE_SCHEDULER_SYSTEMD_UNIT = (
     os.getenv("CROW_VULTURE_SCHEDULER_UNIT", "vulture-scheduler").strip() or "vulture-scheduler"
 )
+
+# Raven health scripts (optional fallback; Crow prefers internal checks)
+RAVEN_HEALTHCHECK_SCRIPT = Path(
+    os.getenv("CROW_RAVEN_HEALTHCHECK_SCRIPT", str(Path.home() / "raven_healthcheck.sh"))
+)
+RAVEN_POST_REBOOT_SCRIPT = Path(
+    os.getenv(
+        "CROW_RAVEN_POST_REBOOT_SCRIPT",
+        str(Path.home() / "raven_post_reboot_check.sh"),
+    )
+)
+
+# Expected storage mounts: "Label:/path" comma-separated
+_DEFAULT_EXPECTED_MOUNTS = (
+    "Root SSD:/,"
+    "MicroSD:/mnt/microsd,"
+    "portable_beast:/mnt/portable_beast,"
+    "toshiba_ext:/mnt/toshiba_ext"
+)
+_expected_mounts_raw = os.getenv("CROW_EXPECTED_MOUNTS", _DEFAULT_EXPECTED_MOUNTS).strip()
+
+
+def _parse_expected_mounts(raw: str) -> list[tuple[str, str]]:
+    mounts: list[tuple[str, str]] = []
+    for part in raw.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        if ":" in piece:
+            label, path = piece.split(":", 1)
+            mounts.append((label.strip(), path.strip()))
+        else:
+            mounts.append((piece, f"/mnt/{piece}"))
+    return mounts or [("Root SSD", "/")]
+
+
+EXPECTED_STORAGE_MOUNTS: list[tuple[str, str]] = _parse_expected_mounts(_expected_mounts_raw)
+
+# Summarized listening ports for /check ports
+KNOWN_SERVICE_PORTS: list[tuple[int, str]] = [
+    (22, "SSH"),
+    (445, "Samba"),
+    (9443, "Portainer"),
+    (8088, "Vulture Dashboard"),
+]
