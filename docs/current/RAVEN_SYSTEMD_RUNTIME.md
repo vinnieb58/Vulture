@@ -115,3 +115,24 @@ systemctl is-enabled vulture-bot vulture-scheduler
 ```
 
 If either reports `disabled`, re-run `sudo systemctl enable …` as shown above.
+
+### Health check scripts (Priority 6)
+
+Repo-tracked scripts produce a full read-only health report. Vulture checks use **systemd**, not tmux (tmux is listed only as optional debug output).
+
+Install on Raven:
+
+```bash
+cd /home/vinnieb58/projects/vulture
+cp scripts/raven_healthcheck.sh ~/raven_healthcheck.sh
+chmod +x ~/raven_healthcheck.sh
+```
+
+Run after reboot or anytime:
+
+```bash
+~/raven_healthcheck.sh
+~/raven_healthcheck.sh --post-reboot
+```
+
+See `docs/current/RAVEN_RESTART_SURVIVAL_PLAN.md` and `docs/current/RAVEN_BOOT_WARNINGS.md` (optional Priority 7 noise reduction).
