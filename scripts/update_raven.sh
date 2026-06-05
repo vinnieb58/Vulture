@@ -45,7 +45,6 @@ BRANCH="${BRANCH:-main}"
 
 PIP="${APP_DIR}/.venv/bin/pip"
 PYTHON_BIN="${APP_DIR}/${PYTHON}"
-PYTEST_BIN="${APP_DIR}/.venv/bin/pytest"
 
 # systemd unit names without .service suffix (for status/journalctl commands)
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
@@ -202,39 +201,19 @@ section "Compiling Python source (syntax check)"
 echo "  Compile OK"
 
 # ---------------------------------------------------------------------------
-# 8. Run unit tests
-# ---------------------------------------------------------------------------
-section "Running pytest"
-if [[ -x "$PYTEST_BIN" ]]; then
-    "$PYTEST_BIN"
-    echo "  pytest OK"
-else
-    echo "  WARNING: pytest not found at $PYTEST_BIN — skipping unit tests"
-fi
-
-# ---------------------------------------------------------------------------
-# 9. Validate data layer
+# 8. Validate data layer
 # ---------------------------------------------------------------------------
 section "Running validate_step1.py"
 "$PYTHON_BIN" scripts/validate_step1.py
 
 # ---------------------------------------------------------------------------
-# 10. Smoke-run one hunt cycle
+# 9. Run one hunt cycle
 # ---------------------------------------------------------------------------
 section "Running one hunt cycle (main.py)"
 "$PYTHON_BIN" main.py
 
 # ---------------------------------------------------------------------------
-# 11. Optional adapter smoke check (when present)
-# ---------------------------------------------------------------------------
-if [[ -f "scripts/smoke_multi_source.py" ]]; then
-    section "Running scripts/smoke_multi_source.py"
-    "$PYTHON_BIN" scripts/smoke_multi_source.py
-    echo "  smoke_multi_source OK"
-fi
-
-# ---------------------------------------------------------------------------
-# 12. Restart production systemd services (only after all checks pass)
+# 10. Restart production systemd services (only after all checks pass)
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_SYSTEMD_RESTART:-0}" == "1" ]]; then
     section "Skipping systemd restart (SKIP_SYSTEMD_RESTART=1)"

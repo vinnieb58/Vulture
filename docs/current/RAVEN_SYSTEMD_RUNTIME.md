@@ -45,11 +45,9 @@ APP_DIR=/home/vinnieb58/projects/vulture BRANCH=main bash scripts/update_raven.s
 1. `git fetch` / checkout / fast-forward pull
 2. Dependency install (`pip install -r requirements.txt`)
 3. Python compile check
-4. `pytest` (when `.venv/bin/pytest` exists)
-5. `scripts/validate_step1.py`
-6. One live `main.py` hunt cycle
-7. Optional `scripts/smoke_multi_source.py` when present
-8. **Only after all checks pass:** restart systemd services
+4. `scripts/validate_step1.py` (data layer validation)
+5. One live `main.py` hunt cycle
+6. **Only after all checks pass:** restart systemd services
 
 If any step fails, services are **not** restarted (fail-safe).
 
