@@ -3,11 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="{{ auto_refresh_seconds }}">
   <title>{{ title }} v{{ version }}</title>
   <style>
     :root {
       --bg: #0f1419;
       --surface: #1a2332;
+      --surface-2: #151d29;
       --border: #2d3a4f;
       --text: #e6edf3;
       --muted: #8b949e;
@@ -15,9 +17,13 @@
       --warn-bg: #3d2c00;
       --warn-border: #9e6a03;
       --warn-text: #f0c14b;
+      --err-bg: #3d1418;
+      --err-border: #9e2a2a;
+      --err-text: #f85149;
       --ok: #3fb950;
       --paused: #d29922;
       --ended: #8b949e;
+      --missing: #d29922;
     }
 
     * { box-sizing: border-box; }
@@ -31,25 +37,30 @@
     }
 
     .wrap {
-      max-width: 1100px;
+      max-width: 1200px;
       margin: 0 auto;
-      padding: 1.5rem;
+      padding: 1rem 1.25rem 2rem;
     }
 
     header {
       border-bottom: 1px solid var(--border);
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
+      margin-bottom: 1.25rem;
+      padding-bottom: 0.85rem;
     }
 
     h1 {
       margin: 0 0 0.25rem;
-      font-size: 1.75rem;
+      font-size: clamp(1.35rem, 4vw, 1.75rem);
+    }
+
+    h2 {
+      margin: 0 0 0.75rem;
+      font-size: 1.05rem;
     }
 
     .subtitle {
       color: var(--muted);
-      font-size: 0.95rem;
+      font-size: 0.92rem;
     }
 
     .badge {
@@ -58,10 +69,16 @@
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 0.15rem 0.6rem;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: var(--muted);
-      margin-left: 0.5rem;
+      margin-left: 0.35rem;
       vertical-align: middle;
+    }
+
+    .refresh-note {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 0.35rem;
     }
 
     .warnings {
@@ -70,7 +87,7 @@
       color: var(--warn-text);
       border-radius: 8px;
       padding: 0.75rem 1rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }
 
     .warnings ul {
@@ -80,70 +97,86 @@
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.65rem;
+      margin-bottom: 1rem;
     }
 
-    .stat {
+    .grid-wide {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .stat, .card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 0.85rem 1rem;
+      padding: 0.75rem 0.9rem;
     }
 
-    .stat-label {
+    .stat-label, .card-label {
       color: var(--muted);
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
 
-    .stat-value {
-      font-size: 1.6rem;
+    .stat-value, .card-value {
+      font-size: 1.25rem;
       font-weight: 600;
       margin-top: 0.15rem;
+      word-break: break-word;
     }
 
-    .stat-value.active { color: var(--ok); }
-    .stat-value.paused { color: var(--paused); }
+    .stat-value.small, .card-value.small {
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+
+    .stat-value.active, .ok { color: var(--ok); }
+    .stat-value.paused, .warn { color: var(--paused); }
     .stat-value.ended { color: var(--ended); }
+    .bad, .missing { color: var(--err-text); }
 
     section {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 1.25rem;
+      padding: 0.9rem 1rem;
+      margin-bottom: 1rem;
     }
 
-    section h2 {
-      margin: 0 0 0.75rem;
-      font-size: 1.1rem;
+    .section-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
     }
 
     .meta {
       color: var(--muted);
-      font-size: 0.9rem;
-      margin-bottom: 1rem;
+      font-size: 0.88rem;
+      margin-bottom: 0.75rem;
     }
 
     .meta code {
       background: var(--bg);
       padding: 0.1rem 0.35rem;
       border-radius: 4px;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
+      word-break: break-all;
     }
 
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.9rem;
+      font-size: 0.86rem;
     }
 
     th, td {
       text-align: left;
-      padding: 0.5rem 0.6rem;
+      padding: 0.45rem 0.5rem;
       border-bottom: 1px solid var(--border);
       vertical-align: top;
     }
@@ -151,7 +184,7 @@
     th {
       color: var(--muted);
       font-weight: 500;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.03em;
     }
@@ -172,30 +205,62 @@
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 0.75rem;
-      max-height: 420px;
+      padding: 0.65rem;
+      max-height: 320px;
       overflow: auto;
       font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
-      font-size: 0.78rem;
-      line-height: 1.45;
+      font-size: 0.74rem;
+      line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-word;
     }
 
+    .log-box.errors {
+      border-color: var(--err-border);
+      background: var(--surface-2);
+    }
+
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 0.1rem 0.5rem;
+      font-size: 0.72rem;
+      border: 1px solid var(--border);
+      text-transform: lowercase;
+    }
+
+    .pill.ok { border-color: var(--ok); color: var(--ok); }
+    .pill.warn { border-color: var(--paused); color: var(--paused); }
+    .pill.bad { border-color: var(--err-text); color: var(--err-text); }
+    .pill.muted { color: var(--muted); }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
+
+    @media (min-width: 760px) {
+      .two-col { grid-template-columns: 1fr 1fr; }
+    }
+
     footer {
       color: var(--muted);
-      font-size: 0.85rem;
-      margin-top: 2rem;
-      padding-top: 1rem;
+      font-size: 0.82rem;
+      margin-top: 1.5rem;
+      padding-top: 0.85rem;
       border-top: 1px solid var(--border);
     }
+
+    .scroll-x { overflow-x: auto; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>{{ title }} <span class="badge">v{{ version }} read-only</span></h1>
-      <p class="subtitle">Internal observability — no auth, no write controls</p>
+      <p class="subtitle">Observe first. Control later. Automate last.</p>
+      <p class="refresh-note">Last refreshed: <strong>{{ refreshed_at }}</strong> · auto-refresh every {{ auto_refresh_seconds }}s</p>
     </header>
 
     {% if warnings %}
@@ -209,113 +274,378 @@
     </div>
     {% endif %}
 
-    <p class="meta">
-      Server time: <strong>{{ server_time }}</strong><br>
-      Database: <code>{{ db_path }}</code><br>
-      Log file: <code>{{ log_path }}</code>
-      {% if db.tables %}
-      <br>Tables found: <code>{{ db.tables | join(', ') }}</code>
-      {% endif %}
-    </p>
-
-    <div class="grid">
-      <div class="stat">
-        <div class="stat-label">Total hunts</div>
-        <div class="stat-value">{{ db.hunt_counts.total }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Active</div>
-        <div class="stat-value active">{{ db.hunt_counts.active }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Paused</div>
-        <div class="stat-value paused">{{ db.hunt_counts.paused }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Ended</div>
-        <div class="stat-value ended">{{ db.hunt_counts.ended }}</div>
-      </div>
-      {% if db.hunt_counts.other %}
-      <div class="stat">
-        <div class="stat-label">Other status</div>
-        <div class="stat-value">{{ db.hunt_counts.other }}</div>
-      </div>
-      {% endif %}
-    </div>
-
-    {% if db.adapter_sources %}
     <section>
-      <h2>Adapter status</h2>
-      <p class="meta">Derived from hunt and listing source data in the database.</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Source</th>
-            <th>Listings</th>
-            <th>Hunt references</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for adapter in db.adapter_sources %}
-          <tr>
-            <td>{{ adapter.name }}</td>
-            <td>{{ adapter.listings }}</td>
-            <td>{{ adapter.hunts }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="section-title"><h2>Summary</h2></div>
+      <p class="meta">
+        Database: <code>{{ db_path }}</code><br>
+        Log file: <code>{{ log_path }}</code>
+        {% if db.tables %}
+        <br>Tables: <code>{{ db.tables | join(', ') }}</code>
+        {% endif %}
+      </p>
+      <div class="grid">
+        <div class="stat">
+          <div class="stat-label">Total hunts</div>
+          <div class="stat-value">{{ db.hunt_counts.total }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Active</div>
+          <div class="stat-value active">{{ db.hunt_counts.active }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Paused</div>
+          <div class="stat-value paused">{{ db.hunt_counts.paused }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Ended</div>
+          <div class="stat-value ended">{{ db.hunt_counts.ended }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Containers running</div>
+          <div class="stat-value">{{ docker.running_count }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Failed systemd units</div>
+          <div class="stat-value {% if raven.failed_count %}bad{% endif %}">{{ raven.failed_count }}</div>
+        </div>
+      </div>
     </section>
-    {% endif %}
 
     <section>
-      <h2>Recent listings</h2>
+      <div class="section-title"><h2>Raven Health</h2></div>
+      <div class="grid grid-wide">
+        <div class="card">
+          <div class="card-label">Hostname</div>
+          <div class="card-value small">{{ raven.hostname }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Server time (UTC)</div>
+          <div class="card-value small">{{ server_time }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Uptime</div>
+          <div class="card-value small">{{ raven.uptime }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Boot time</div>
+          <div class="card-value small">{{ raven.boot_time or '—' }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">LAN IP</div>
+          <div class="card-value small">{{ raven.lan_ip or '—' }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Tailscale IP</div>
+          <div class="card-value small">{{ raven.tailscale_ip or '—' }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Internet</div>
+          <div class="card-value small {% if raven.internet_ok %}ok{% else %}warn{% endif %}">
+            {{ 'Reachable' if raven.internet_ok else 'Unreachable' }}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-label">Load average</div>
+          <div class="card-value small">{{ raven.load_average or '—' }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Memory</div>
+          <div class="card-value small">
+            {% if raven.memory %}
+            {{ raven.memory.used }} / {{ raven.memory.total }}
+            {% if raven.memory.percent_used is not none %} ({{ '%.0f'|format(raven.memory.percent_used) }}%){% endif %}
+            {% else %}—{% endif %}
+          </div>
+        </div>
+      </div>
+      {% if raven.failed_units %}
+      <p class="meta" style="margin-top:0.75rem;">
+        Failed units:
+        <code>{{ raven.failed_units | join(', ') }}</code>
+      </p>
+      {% endif %}
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Key Services</h2></div>
+      <div class="grid grid-wide">
+        {% for svc in services %}
+        <div class="card">
+          <div class="card-label">{{ svc.label }}</div>
+          <div class="card-value small">
+            <span class="pill {% if svc.active == 'active' %}ok{% elif svc.active in ('not found', 'not configured') %}muted{% else %}bad{% endif %}">
+              {{ svc.active }}
+            </span>
+          </div>
+          <div class="meta" style="margin:0.35rem 0 0;">
+            enabled: {{ svc.enabled }}
+            {% if svc.unit %} · {{ svc.unit }}{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Vulture Runtime</h2></div>
+      <div class="grid grid-wide">
+        {% for proc in vulture.processes %}
+        <div class="card">
+          <div class="card-label">{{ proc.label }}</div>
+          <div class="card-value small">
+            <span class="pill {% if proc.running %}ok{% else %}bad{% endif %}">
+              {{ 'running' if proc.running else 'not running' }}
+            </span>
+          </div>
+          <div class="meta" style="margin:0.35rem 0 0;">{{ proc.detail }}</div>
+        </div>
+        {% endfor %}
+        <div class="card">
+          <div class="card-label">Log last modified</div>
+          <div class="card-value small">{{ vulture.log_mtime or '—' }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Scheduler freshness</div>
+          <div class="card-value small">
+            <span class="pill {% if vulture.scheduler_freshness.status == 'fresh' %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% else %}muted{% endif %}">
+              {{ vulture.scheduler_freshness.status }}
+            </span>
+          </div>
+          <div class="meta" style="margin:0.35rem 0 0;">{{ vulture.scheduler_freshness.detail }}</div>
+        </div>
+      </div>
+      {% if vulture.tmux_sessions %}
+      <p class="meta" style="margin-top:0.75rem;">
+        tmux sessions: <code>{{ vulture.tmux_sessions | join(', ') }}</code>
+      </p>
+      {% else %}
+      <p class="meta" style="margin-top:0.75rem;">No tmux sessions detected.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Hunts</h2></div>
+      {% if db.hunts %}
+      <div class="scroll-x">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Sources</th>
+              <th>Created</th>
+              <th>Updated</th>
+              <th>Last run</th>
+              <th>Max price</th>
+              <th>Query</th>
+              <th>Vertical</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for hunt in db.hunts %}
+            <tr>
+              <td>{{ hunt.name or '—' }}</td>
+              <td>{{ hunt.status or '—' }}</td>
+              <td>{{ hunt.source_sites_display or hunt.source_sites or '—' }}</td>
+              <td>{{ hunt.created_at or '—' }}</td>
+              <td>{{ hunt.updated_at or '—' }}</td>
+              <td>{{ hunt.last_run or '—' }}</td>
+              <td>{% if hunt.max_price is not none %}${{ hunt.max_price }}{% else %}—{% endif %}</td>
+              <td>{{ hunt.query_display or '—' }}</td>
+              <td>{{ hunt.vertical or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty">No hunt rows available.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Adapter Summary</h2></div>
+      {% if db.adapter_sources %}
+      <div class="scroll-x">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Listings</th>
+              <th>Hunt refs</th>
+              <th>Latest listing</th>
+              <th>Recent errors</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for adapter in db.adapter_sources %}
+            <tr>
+              <td>{{ adapter.name }}</td>
+              <td>{{ adapter.listings }}</td>
+              <td>{{ adapter.hunts }}</td>
+              <td>{{ adapter.latest_listing or '—' }}</td>
+              <td>
+                {% if adapter.recent_errors %}
+                <span class="warn">{{ adapter.recent_errors | length }} in log tail</span>
+                {% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty">No adapter data available.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Storage / Roost</h2></div>
+      <div class="scroll-x">
+        <table>
+          <thead>
+            <tr>
+              <th>Mount</th>
+              <th>Path</th>
+              <th>Status</th>
+              <th>Filesystem</th>
+              <th>Size</th>
+              <th>Used</th>
+              <th>Avail</th>
+              <th>Use %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for mount in storage %}
+            <tr>
+              <td>{{ mount.label }}</td>
+              <td><code>{{ mount.path }}</code></td>
+              <td class="{% if mount.mounted %}ok{% else %}missing{% endif %}">
+                {{ 'mounted' if mount.mounted else 'missing' }}
+              </td>
+              <td>{{ mount.filesystem or '—' }}</td>
+              <td>{{ mount.size or '—' }}</td>
+              <td>{{ mount.used or '—' }}</td>
+              <td>{{ mount.available or '—' }}</td>
+              <td>
+                {% if mount.percent_used is not none %}{{ '%.0f'|format(mount.percent_used) }}%{% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Docker</h2></div>
+      <div class="grid">
+        <div class="stat">
+          <div class="stat-label">Daemon</div>
+          <div class="stat-value small {% if docker.daemon_active %}active{% else %}bad{% endif %}">
+            {{ docker.daemon_state }}
+          </div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Running</div>
+          <div class="stat-value">{{ docker.running_count }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Stopped</div>
+          <div class="stat-value">{{ docker.stopped_count }}</div>
+        </div>
+      </div>
+      {% if docker.containers %}
+      <div class="scroll-x" style="margin-top:0.75rem;">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Ports</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in docker.containers %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td>{{ c.status }}</td>
+              <td>{{ c.ports or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="empty" style="margin-top:0.75rem;">No running containers reported.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Recent Listings</h2></div>
       {% if db.recent_listings %}
-      <table>
-        <thead>
-          <tr>
-            <th>Seen</th>
-            <th>Source</th>
-            <th>Title</th>
-            <th>Price</th>
-            <th>Location</th>
-            <th>Link</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for listing in db.recent_listings %}
-          <tr>
-            <td>{{ listing.first_seen or '—' }}</td>
-            <td>{{ listing.source or '—' }}</td>
-            <td>{{ listing.title or '—' }}</td>
-            <td>{% if listing.price is not none %}${{ listing.price }}{% else %}—{% endif %}</td>
-            <td>{{ listing.location or '—' }}</td>
-            <td>
-              {% if listing.link %}
-              <a href="{{ listing.link }}" target="_blank" rel="noopener noreferrer">open</a>
-              {% else %}—{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="scroll-x">
+        <table>
+          <thead>
+            <tr>
+              <th>Seen</th>
+              <th>Source</th>
+              <th>Title</th>
+              <th>Price</th>
+              <th>Location</th>
+              <th>Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for listing in db.recent_listings %}
+            <tr>
+              <td>{{ listing.first_seen or '—' }}</td>
+              <td>{{ listing.source or '—' }}</td>
+              <td>{{ listing.title or '—' }}</td>
+              <td>{% if listing.price is not none %}${{ listing.price }}{% else %}—{% endif %}</td>
+              <td>{{ listing.location or '—' }}</td>
+              <td>
+                {% if listing.link %}
+                <a href="{{ listing.link }}" target="_blank" rel="noopener noreferrer">open</a>
+                {% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
       {% else %}
       <p class="empty">No recent listings available.</p>
       {% endif %}
     </section>
 
     <section>
-      <h2>Recent log lines</h2>
-      {% if logs.lines %}
-      <div class="log-box">{% for line in logs.lines %}{{ line }}
+      <div class="section-title"><h2>Logs</h2></div>
+      <div class="two-col">
+        <div>
+          <h2>Recent errors / warnings</h2>
+          {% if logs.error_lines %}
+          <div class="log-box errors">{% for line in logs.error_lines %}{{ line }}
 {% endfor %}</div>
-      {% else %}
-      <p class="empty">No log lines available.</p>
-      {% endif %}
+          {% else %}
+          <p class="empty">No error/warning lines in recent tail.</p>
+          {% endif %}
+        </div>
+        <div>
+          <h2>Recent general log lines</h2>
+          {% if logs.general_lines %}
+          <div class="log-box">{% for line in logs.general_lines %}{{ line }}
+{% endfor %}</div>
+          {% else %}
+          <p class="empty">No general log lines available.</p>
+          {% endif %}
+        </div>
+      </div>
     </section>
 
     <footer>
-      Vulture Dashboard v0.1 — read-only. Assumes local or Tailscale-only access.
+      Vulture Dashboard v0.2 — read-only operational view. No buttons, restarts, or write controls.
+      Assumes local or Tailscale-only access on Raven.
     </footer>
   </div>
 </body>
