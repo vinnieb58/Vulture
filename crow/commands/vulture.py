@@ -26,7 +26,7 @@ def register_vulture_commands(tree, *, max_message_len: int = 1900) -> None:
 
     @tree.command(
         name="check_services",
-        description="Process/tmux visibility for bot and scheduler (read-only).",
+        description="systemd + process visibility for bot and scheduler (read-only).",
     )
     async def check_services(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)

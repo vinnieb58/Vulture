@@ -252,6 +252,11 @@ python main.py
 # inspect logs
 tail -n 200 logs/vulture.log
 
-# check tmux sessions
-tmux ls
+# check production systemd services
+systemctl is-active vulture-bot
+systemctl is-active vulture-scheduler
+systemctl status vulture-bot --no-pager -l
+systemctl status vulture-scheduler --no-pager -l
+journalctl -u vulture-bot -n 100 --no-pager
+journalctl -u vulture-scheduler -n 100 --no-pager
 ```

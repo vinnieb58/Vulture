@@ -1,0 +1,16 @@
+[Unit]
+Description=Vulture Discord bot (Crow)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python discord_bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -37,3 +37,9 @@ MOUNT_SCAN_ROOTS = (Path("/mnt"), Path("/media"))
 
 # Display timezone for Crow timestamps (IANA name, e.g. America/Chicago)
 DISPLAY_TIMEZONE = os.getenv("CROW_TIMEZONE", "America/Chicago").strip() or "America/Chicago"
+
+# Raven production systemd units (override for non-default host layouts)
+VULTURE_BOT_SYSTEMD_UNIT = os.getenv("CROW_VULTURE_BOT_UNIT", "vulture-bot").strip() or "vulture-bot"
+VULTURE_SCHEDULER_SYSTEMD_UNIT = (
+    os.getenv("CROW_VULTURE_SCHEDULER_UNIT", "vulture-scheduler").strip() or "vulture-scheduler"
+)

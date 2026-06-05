@@ -30,7 +30,9 @@ Vulture 2.0 is the active, in-production version. The v1.0 designation in `READM
 
 ### Scheduler / task layer — repetition
 
-An external scheduler (cron, systemd timer, Windows Task Scheduler, or any equivalent) invokes `python main.py` on a fixed interval. The scheduler is not part of the Vulture codebase; it is an infrastructure concern.
+An external scheduler (cron, systemd service, Windows Task Scheduler, or any equivalent) invokes `python main.py` on a fixed interval. The scheduler is not part of the Vulture codebase; it is an infrastructure concern.
+
+On Raven production, **`vulture-scheduler.service`** owns the hunt cycle loop. **`vulture-bot.service`** runs `discord_bot.py`. See `docs/current/RAVEN_SYSTEMD_RUNTIME.md`.
 
 ---
 
@@ -99,6 +101,8 @@ An LLM must never be in the critical path of deciding whether a scraped listing 
 ## 9. Raven — headless runtime target
 
 Raven is the target headless deployment environment. Vulture is designed to run without a GUI or interactive terminal. `main.py` writes all output to `logs/vulture.log` in addition to stdout, so it operates correctly when invoked by a scheduler in a headless context.
+
+Production Raven uses **systemd** (`vulture-bot.service`, `vulture-scheduler.service`) — not tmux — for bot and scheduler lifecycle. tmux remains available only for optional manual debugging.
 
 Ensure the working directory is set to the project root when invoking `python main.py` under a scheduler so that relative paths (`data/`, `logs/`, `config/`) resolve correctly.
 

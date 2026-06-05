@@ -5,7 +5,7 @@ Crow is the read-only Discord command and control layer for **The Aviary** — t
 ## Why Crow lives in the Vulture repo (for now)
 
 - The existing production Discord bot already runs from `discord_bot.py` in this repo.
-- Raven deploy scripts (`scripts/update_raven.sh`) already manage `discord_bot.py` and `main.py` in tmux sessions on the same host.
+- Raven deploy scripts (`scripts/update_raven.sh`) restart `vulture-bot.service` and `vulture-scheduler.service` after successful pull, install, and tests.
 - v0.1 adds observability without splitting deployment or duplicating tokens.
 - The `crow/` package is structured so it can later be extracted into its own container or repository when Docker and control features are ready.
 
@@ -36,7 +36,7 @@ Optional Crow-specific paths (no secrets):
 | `/raven_status` | Host summary: hostname, uptime, memory, `/` disk, load average, Central-time timestamp |
 | `/check_disk` | Disk usage for `/`, `/mnt` and `/media` mounts, and configured extras; warns ≥80%, critical ≥90% |
 | `/check_memory` | Total / used / available memory and percent used |
-| `/check_services` | Whether Discord bot, scheduler (`main.py`), and `bot` / `scheduler` tmux sessions appear active |
+| `/check_services` | Whether `vulture-bot` / `vulture-scheduler` systemd units, `discord_bot.py`, and `main.py` processes appear active (plus recent journal excerpts) |
 | `/check_vulture` | DB file presence, logs directory, latest log activity, scheduler visibility |
 | `/crow_help` | Command list and v0.1 read-only notice |
 
@@ -53,7 +53,7 @@ Vulture hunt slash commands (`/hunt`, `/hunt_list`, etc.) are unchanged.
 - Tail or download logs (deferred)
 - Admin-only destructive actions
 
-Checks use safe, timed subprocess calls (`hostname`, `uptime`, `df`, `free`, `pgrep`, `tmux ls`) and stdlib `/proc` reads where possible. Service states are **running**, **not detected**, or **unknown** — never a hard failure for the whole command.
+Checks use safe, timed subprocess calls (`hostname`, `uptime`, `df`, `free`, `pgrep`, `systemctl is-active`, `journalctl`) and stdlib `/proc` reads where possible. Service states are **running**, **not detected**, or **unknown** — never a hard failure for the whole command.
 
 ## Package layout
 
