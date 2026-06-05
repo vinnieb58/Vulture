@@ -18,7 +18,7 @@ def crow_help_text() -> str:
         "• `/raven_status` — host summary (hostname, uptime, memory, disk, load)\n"
         "• `/check_disk` — disk usage for `/` and mounted storage\n"
         "• `/check_memory` — memory usage\n"
-        "• `/check_services` — bot, scheduler, tmux visibility (no restarts)\n"
+        "• `/check_services` — bot/scheduler systemd + process visibility (no restarts)\n"
         "• `/check_vulture` — DB, logs, scheduler health (no hunts / DB writes)\n"
         "• `/crow_help` — this message\n\n"
         "Vulture hunt commands (`/hunt`, `/hunt_list`, …) are unchanged.\n\n"

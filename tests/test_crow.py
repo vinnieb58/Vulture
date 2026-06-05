@@ -1,7 +1,7 @@
 """
 tests/test_crow.py
 
-Unit tests for Crow v0.1 check helpers (no Discord, Raven, or tmux required).
+Unit tests for Crow v0.1 check helpers (no Discord, Raven, or systemd required).
 """
 
 from __future__ import annotations
@@ -96,10 +96,21 @@ class TestServiceDetection:
             mock_run.return_value.stdout = ""
             assert services._pgrep_matches("discord_bot.py") == "not detected"
 
-    def test_tmux_session_running(self):
-        with patch("crow.checks.services.run_command", return_value=(True, "bot: 1 windows\nscheduler: 1 windows")):
-            assert services._tmux_session_exists("bot") == "running"
-            assert services._tmux_session_exists("missing") == "not detected"
+    def test_systemctl_active(self):
+        with patch("crow.checks.services.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "active\n"
+            state, detail = services._systemctl_is_active("vulture-bot")
+            assert state == "running"
+            assert detail == "systemctl is-active vulture-bot"
+
+    def test_systemctl_inactive(self):
+        with patch("crow.checks.services.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 3
+            mock_run.return_value.stdout = "inactive\n"
+            state, detail = services._systemctl_is_active("vulture-scheduler")
+            assert state == "not detected"
+            assert detail == "systemctl: inactive"
 
     def test_format_services_message(self):
         msg = services.format_services_message(
@@ -114,9 +125,9 @@ class TestVultureHealth:
         db = tmp_path / "data" / "vulture.db"
         logs = tmp_path / "logs"
         with patch.object(vulture, "check_scheduler_process") as mock_main:
-            with patch.object(vulture, "check_scheduler_tmux") as mock_tmux:
+            with patch.object(vulture, "check_scheduler_systemd") as mock_systemd:
                 mock_main.return_value = ServiceStatus("Vulture scheduler (main.py)", "not detected")
-                mock_tmux.return_value = ServiceStatus("Scheduler tmux session", "not detected")
+                mock_systemd.return_value = ServiceStatus("systemd vulture-scheduler", "not detected")
                 health = vulture.get_vulture_health(db_path=db, logs_dir=logs)
         assert health.db_exists is False
         assert health.logs_dir_exists is False
@@ -132,9 +143,9 @@ class TestVultureHealth:
         log_file.write_text("run\n", encoding="utf-8")
 
         with patch.object(vulture, "check_scheduler_process") as mock_main:
-            with patch.object(vulture, "check_scheduler_tmux") as mock_tmux:
+            with patch.object(vulture, "check_scheduler_systemd") as mock_systemd:
                 mock_main.return_value = ServiceStatus("Vulture scheduler (main.py)", "running")
-                mock_tmux.return_value = ServiceStatus("Scheduler tmux session", "not detected")
+                mock_systemd.return_value = ServiceStatus("systemd vulture-scheduler", "not detected")
                 health = vulture.get_vulture_health(db_path=db, logs_dir=logs)
         assert health.db_exists is True
         assert health.logs_dir_exists is True
@@ -170,6 +181,7 @@ class TestFormatting:
         text = crow_help_text()
         assert "read-only" in text.lower()
         assert "/raven_status" in text
+        assert "systemd" in text.lower()
 
     def test_format_timestamp_central(self):
         # 2026-01-15 18:00 UTC = 12:00 CST (standard time)

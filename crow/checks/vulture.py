@@ -11,9 +11,16 @@ from pathlib import Path
 from crow.checks.services import (
     ServiceStatus,
     check_scheduler_process,
-    check_scheduler_tmux,
+    check_scheduler_systemd,
+    get_journal_excerpt,
 )
-from crow.config import VULTURE_DB_PATH, VULTURE_LOGS_DIR, VULTURE_MAIN_LOG
+from crow.config import (
+    VULTURE_BOT_SYSTEMD_UNIT,
+    VULTURE_DB_PATH,
+    VULTURE_LOGS_DIR,
+    VULTURE_MAIN_LOG,
+    VULTURE_SCHEDULER_SYSTEMD_UNIT,
+)
 from crow.formatting import format_timestamp
 
 
@@ -25,7 +32,7 @@ class VultureHealth:
     main_log_path: str | None
     main_log_mtime: str | None
     scheduler_main: ServiceStatus
-    scheduler_tmux: ServiceStatus
+    scheduler_systemd: ServiceStatus
 
 
 def _file_mtime_iso(path: Path) -> str | None:
@@ -89,13 +96,13 @@ def get_vulture_health(
         main_log_path=main_log_display,
         main_log_mtime=mtime,
         scheduler_main=check_scheduler_process(),
-        scheduler_tmux=check_scheduler_tmux(),
+        scheduler_systemd=check_scheduler_systemd(),
     )
 
 
 def scheduler_summary(health: VultureHealth) -> str:
-    """Single line scheduler visibility from process + tmux."""
-    states = {health.scheduler_main.state, health.scheduler_tmux.state}
+    """Single line scheduler visibility from process + systemd."""
+    states = {health.scheduler_main.state, health.scheduler_systemd.state}
     if "running" in states:
         return "running"
     if states == {"not detected"}:
@@ -106,7 +113,7 @@ def scheduler_summary(health: VultureHealth) -> str:
 
 
 def format_vulture_health_message(health: VultureHealth) -> str:
-    from crow.formatting import join_lines
+    from crow.formatting import join_lines, truncate
 
     sched = scheduler_summary(health)
     lines = [
@@ -123,8 +130,19 @@ def format_vulture_health_message(health: VultureHealth) -> str:
         lines.append("Latest log activity: none detected")
     lines.append(f"Scheduler (combined): **{sched}**")
     lines.append(
-        f"  — main.py: {health.scheduler_main.state} | "
-        f"tmux scheduler: {health.scheduler_tmux.state}"
+        f"  — main.py process: {health.scheduler_main.state} | "
+        f"systemd {VULTURE_SCHEDULER_SYSTEMD_UNIT}: {health.scheduler_systemd.state}"
     )
+
+    bot_journal = get_journal_excerpt(VULTURE_BOT_SYSTEMD_UNIT, lines=3)
+    if bot_journal:
+        lines.append(f"Recent {VULTURE_BOT_SYSTEMD_UNIT} logs:\n```\n{bot_journal}\n```")
+
+    scheduler_journal = get_journal_excerpt(VULTURE_SCHEDULER_SYSTEMD_UNIT, lines=3)
+    if scheduler_journal:
+        lines.append(
+            f"Recent {VULTURE_SCHEDULER_SYSTEMD_UNIT} logs:\n```\n{scheduler_journal}\n```"
+        )
+
     lines.append(f"Checked: {format_timestamp()}")
-    return join_lines(lines)
+    return truncate(join_lines(lines), 1900)

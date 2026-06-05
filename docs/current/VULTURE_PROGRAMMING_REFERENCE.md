@@ -82,7 +82,8 @@ pip install -r requirements.txt
 pytest
 python main.py
 tail -n 200 logs/vulture.log
-tmux ls
+systemctl status vulture-bot --no-pager -l
+systemctl status vulture-scheduler --no-pager -l
 ```
 
 ## 9) Guardrails for changes

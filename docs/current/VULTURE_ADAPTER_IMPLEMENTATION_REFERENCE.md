@@ -551,8 +551,10 @@ bash scripts/update_raven.sh
 For non-interactive branch deployment:
 
 ```bash
-BRANCH=<branch-name> SCHEDULER_INTERVAL_SECONDS=900 bash scripts/update_raven.sh
+BRANCH=<branch-name> bash scripts/update_raven.sh
 ```
+
+See `docs/current/RAVEN_SYSTEMD_RUNTIME.md` for systemd units, verification commands, and reboot survival notes.
 
 ---
 
