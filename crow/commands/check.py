@@ -9,6 +9,7 @@ from discord import app_commands
 
 from crow.embeds import (
     build_docker_embed,
+    build_logs_embed,
     build_network_embed,
     build_ports_embed,
     build_raven_health_embed,
@@ -26,6 +27,7 @@ from crow.system.health import (
     get_uptime_info,
 )
 from crow.system.network import get_network_summary, get_tailscale_status
+from crow.system.logs import get_logs_summary
 from crow.system.ports import get_open_services_summary
 from crow.system.services import get_critical_service_statuses, service_to_status_item
 from crow.system.storage import get_storage_summary, storage_to_status_item
@@ -105,6 +107,16 @@ def register_check_commands(tree, *, max_message_len: int = 1900) -> None:
         await interaction.response.defer(ephemeral=True)
         services = get_open_services_summary()
         embed = build_ports_embed(services)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @check.command(
+        name="logs",
+        description="Recent Raven/Vulture/Crow log summary (sanitized, read-only).",
+    )
+    async def check_logs(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        summary = get_logs_summary()
+        embed = build_logs_embed(summary)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     tree.add_command(check)

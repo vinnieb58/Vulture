@@ -1,5 +1,5 @@
 """
-/crow_help — Crow v0.1 command list.
+/crow_help — Crow command list (v0.2 /check group + legacy v0.1).
 """
 
 from __future__ import annotations
@@ -10,20 +10,29 @@ from discord import app_commands
 from crow import __version__
 from crow.formatting import truncate
 
+CHECK_SUBCOMMANDS: tuple[str, ...] = (
+    "raven",
+    "services",
+    "storage",
+    "docker",
+    "tailscale",
+    "network",
+    "reboot",
+    "uptime",
+    "ports",
+    "logs",
+)
+
 
 def crow_help_text() -> str:
+    check_lines = "\n".join(
+        f"• `/check {name}` — {_check_blurb(name)}"
+        for name in CHECK_SUBCOMMANDS
+    )
     return (
         f"**Crow v{__version__}** — read-only Aviary ops console\n\n"
-        "**Raven health (`/check` group)**\n"
-        "• `/check raven` — high-level Raven health summary (embed)\n"
-        "• `/check services` — SSH, Tailscale, Samba, Docker, Vulture units\n"
-        "• `/check storage` — expected mounts and usage\n"
-        "• `/check docker` — daemon status and container names\n"
-        "• `/check tailscale` — Tailscale connection and IPv4\n"
-        "• `/check network` — internet, LAN, and Tailscale IPs\n"
-        "• `/check reboot` — post-reboot validation checklist\n"
-        "• `/check uptime` — host uptime and last boot\n"
-        "• `/check ports` — summarized listening services\n\n"
+        "**Raven / system checks (`/check` group)**\n"
+        f"{check_lines}\n\n"
         "**Legacy v0.1 commands**\n"
         "• `/raven_status` — host summary (hostname, uptime, memory, disk, load)\n"
         "• `/check_disk` — disk usage for `/` and mounted storage\n"
@@ -34,6 +43,22 @@ def crow_help_text() -> str:
         "Vulture hunt commands (`/hunt`, `/hunt_list`, …) are unchanged.\n\n"
         "_Read-only: no restarts, Docker control, reboot, or admin shell._"
     )
+
+
+def _check_blurb(name: str) -> str:
+    blurbs = {
+        "raven": "high-level Raven health summary (embed)",
+        "services": "SSH, Tailscale, Samba, Docker, Vulture units",
+        "storage": "expected mounts and usage",
+        "docker": "daemon status and container names",
+        "tailscale": "Tailscale connection and IPv4",
+        "network": "internet, LAN, and Tailscale IPs",
+        "reboot": "post-reboot validation checklist",
+        "uptime": "host uptime and last boot",
+        "ports": "summarized listening services",
+        "logs": "recent warning/error summary from known log sources (sanitized)",
+    }
+    return blurbs.get(name, name)
 
 
 def register_help_command(tree, *, max_message_len: int = 1900) -> None:
