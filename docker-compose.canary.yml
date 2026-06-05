@@ -1,0 +1,25 @@
+# Canary v0.1 — read-only Raven monitoring (no Discord alerts, no restarts).
+# On Raven, host mounts + network_mode: host let Canary inspect systemd, storage, and Tailscale.
+
+services:
+  canary:
+    build:
+      context: ./canary
+    container_name: canary
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    environment:
+      CANARY_INTERVAL_SECONDS: ${CANARY_INTERVAL_SECONDS:-300}
+      CANARY_HOST_ROOT: /host
+      CANARY_PROJECT_ROOT: /app
+      CANARY_DATA_DIR: /app/data
+      CANARY_LOGS_DIR: /app/logs
+      CANARY_TIMEZONE: ${CANARY_TIMEZONE:-America/Chicago}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - /:/host:ro
+      - /run/systemd:/run/systemd:ro
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
+      - /var/run/docker.sock:/var/run/docker.sock:ro

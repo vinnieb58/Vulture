@@ -1,0 +1,1 @@
+# Canary v0.1 runtime — stdlib only (zoneinfo is in Python 3.12).
