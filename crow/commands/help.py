@@ -14,22 +14,32 @@ from crow.formatting import truncate
 def crow_help_text() -> str:
     return (
         f"**Crow v{__version__}** — read-only Aviary ops console\n\n"
-        "**Commands**\n"
+        "**Raven health (`/check` group)**\n"
+        "• `/check raven` — high-level Raven health summary (embed)\n"
+        "• `/check services` — SSH, Tailscale, Samba, Docker, Vulture units\n"
+        "• `/check storage` — expected mounts and usage\n"
+        "• `/check docker` — daemon status and container names\n"
+        "• `/check tailscale` — Tailscale connection and IPv4\n"
+        "• `/check network` — internet, LAN, and Tailscale IPs\n"
+        "• `/check reboot` — post-reboot validation checklist\n"
+        "• `/check uptime` — host uptime and last boot\n"
+        "• `/check ports` — summarized listening services\n\n"
+        "**Legacy v0.1 commands**\n"
         "• `/raven_status` — host summary (hostname, uptime, memory, disk, load)\n"
         "• `/check_disk` — disk usage for `/` and mounted storage\n"
         "• `/check_memory` — memory usage\n"
-        "• `/check_services` — bot/scheduler systemd + process visibility (no restarts)\n"
-        "• `/check_vulture` — DB, logs, scheduler health (no hunts / DB writes)\n"
+        "• `/check_services` — bot/scheduler systemd + process visibility\n"
+        "• `/check_vulture` — DB, logs, scheduler health\n"
         "• `/crow_help` — this message\n\n"
         "Vulture hunt commands (`/hunt`, `/hunt_list`, …) are unchanged.\n\n"
-        "_v0.1 is read-only: no restarts, log tail, Docker control, or admin shell._"
+        "_Read-only: no restarts, Docker control, reboot, or admin shell._"
     )
 
 
 def register_help_command(tree, *, max_message_len: int = 1900) -> None:
     @tree.command(
         name="crow_help",
-        description="Crow v0.1 read-only command list and notes.",
+        description="Crow read-only command list and notes.",
     )
     async def crow_help(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)

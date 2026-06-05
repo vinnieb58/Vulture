@@ -180,6 +180,7 @@ class TestFormatting:
     def test_crow_help_text_mentions_read_only(self):
         text = crow_help_text()
         assert "read-only" in text.lower()
+        assert "/check raven" in text
         assert "/raven_status" in text
         assert "systemd" in text.lower()
 

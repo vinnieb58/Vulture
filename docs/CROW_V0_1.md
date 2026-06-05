@@ -79,11 +79,14 @@ crow/
 pytest tests/test_crow.py -v
 ```
 
-## Future v0.2 ideas
+## v0.2 (current)
+
+Raven health and reboot awareness via the `/check` command group. See [CROW_V0_2.md](CROW_V0_2.md).
+
+## Future ideas
 
 - `/view_logs` — bounded, redacted log excerpts
 - Controlled restart commands (bot / scheduler) with confirmation and admin gating
 - Admin-only actions and role checks
-- Docker / container awareness without socket mounting where possible
 - Canary integration
 - Nest dashboard integration
