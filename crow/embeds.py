@@ -10,6 +10,7 @@ from crow.system._status import StatusItem, StatusLevel, format_item_line, statu
 from crow.system.docker import DockerStatus
 from crow.system.health import PostRebootValidation, RavenHealthSummary, UptimeInfo
 from crow.system.network import NetworkSummary, TailscaleStatus
+from crow.system.logs import LogsSummary, format_log_source_line
 from crow.system.ports import OpenService
 from crow.system.services import ServiceCheck, format_service_line
 from crow.system.storage import StorageMount, format_storage_line
@@ -148,6 +149,47 @@ def build_uptime_embed(info: UptimeInfo) -> discord.Embed:
     embed = _base_embed("Uptime", "ok", footer="Read-only · Crow v0.2")
     embed.add_field(name="Host", value=info.host_uptime, inline=False)
     embed.add_field(name="Last Boot", value=info.last_boot or "unknown", inline=False)
+    return embed
+
+
+def build_logs_embed(summary: LogsSummary) -> discord.Embed:
+    embed = _base_embed("Logs", summary.overall, footer="Read-only · Crow v0.2")
+    embed.add_field(
+        name="Recent issues",
+        value=f"Warnings: {summary.warning_count} | Errors: {summary.error_count}",
+        inline=False,
+    )
+
+    if summary.recent_issues:
+        issue_lines = [f"• {line}" for line in summary.recent_issues]
+        embed.add_field(
+            name="Last warning/error lines",
+            value=_join_field_lines(issue_lines),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Last warning/error lines",
+            value="(none in recent tail)",
+            inline=False,
+        )
+
+    embed.add_field(
+        name="Last Vulture cycle",
+        value=summary.last_cycle_line or "not detected",
+        inline=False,
+    )
+    embed.add_field(
+        name="Last bot startup",
+        value=summary.last_bot_startup_line or "not detected",
+        inline=False,
+    )
+    embed.add_field(
+        name="Log sources",
+        value=_join_field_lines([format_log_source_line(s) for s in summary.sources]),
+        inline=False,
+    )
+    embed.add_field(name="Overall", value=f"**{summary.overall.upper()}**", inline=False)
     return embed
 
 

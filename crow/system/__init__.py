@@ -11,6 +11,7 @@ from crow.system.health import (
     get_raven_health_summary,
     get_uptime_info,
 )
+from crow.system.logs import get_logs_summary
 from crow.system.network import get_network_summary, get_tailscale_status
 from crow.system.ports import get_open_services_summary
 from crow.system.services import get_critical_service_statuses
@@ -19,6 +20,7 @@ from crow.system.storage import get_storage_summary
 __all__ = [
     "get_critical_service_statuses",
     "get_docker_status",
+    "get_logs_summary",
     "get_network_summary",
     "get_open_services_summary",
     "get_post_reboot_validation",

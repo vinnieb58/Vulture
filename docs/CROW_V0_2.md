@@ -38,8 +38,11 @@ All responses use **Discord embeds** with color coding:
 | `/check reboot` | Post-reboot validation checklist |
 | `/check uptime` | Host uptime and last boot time |
 | `/check ports` | Summarized listening services (no full socket dump) |
+| `/check logs` | Sanitized recent warning/error summary from known Vulture log files and optional journal excerpts |
 
 Legacy v0.1 commands (`/raven_status`, `/check_disk`, `/check_vulture`, etc.) remain available.
+
+Use `/crow_help` for the full command list, including the `/check` group under **Raven / system checks** and legacy v0.1 commands listed separately.
 
 ## Example responses
 
@@ -89,6 +92,26 @@ Open Services
 8088 Vulture Dashboard
 ```
 
+### `/check logs`
+
+```text
+Logs
+Recent issues: Warnings: 1 | Errors: 1
+Last warning/error lines:
+• 2026-06-01 10:05:30,000 [WARNING] adapters.ebay: rate limited
+• 2026-06-01 10:05:45,000 [ERROR] engine.hunt: hunt failed DISCORD_BOT_TOKEN=[REDACTED]
+Last Vulture cycle:
+2026-06-01 10:06:00,000 [INFO] main: Hunt cycle completed
+Last bot startup:
+2026-06-01 10:00:00,000 [INFO] __main__: Starting Vulture Discord bot
+Log sources:
+vulture.log: OK — 6 tail line(s) from vulture.log
+journal:vulture-bot: Unavailable — journal excerpt unavailable
+Overall: FAIL
+```
+
+Log excerpts are read only from configured paths (`logs/vulture.log` by default) and optional systemd journal units. Secrets, tokens, webhook URLs, and similar patterns are redacted before display.
+
 ## Configuration
 
 In addition to [v0.1 environment variables](CROW_V0_1.md), v0.2 supports:
@@ -117,8 +140,10 @@ crow/
     docker.py            # container visibility
     network.py           # internet, LAN, Tailscale
     ports.py             # summarized listening ports
+    logs.py              # sanitized log summaries
   commands/
     check.py             # /check command group handlers
+    help.py              # /crow_help command list
 ```
 
 Business logic lives in `crow/system/` so Canary, Nest, and future REST endpoints can reuse the same functions without importing Discord handlers.
@@ -126,7 +151,7 @@ Business logic lives in `crow/system/` so Canary, Nest, and future REST endpoint
 ## Tests
 
 ```bash
-pytest tests/test_crow.py tests/test_crow_system.py -v
+pytest tests/test_crow.py tests/test_crow_system.py tests/test_crow_logs.py -v
 ```
 
 ## Explicitly out of scope (v0.2)
@@ -141,5 +166,5 @@ Observe first. Control later.
 
 - Canary alert integration from `/check` status APIs
 - Nest dashboard cards consuming `crow/system` helpers
-- Bounded `/view_logs` excerpts
+- Longer bounded log excerpts or filtered views beyond `/check logs`
 - Admin-gated controlled restarts
