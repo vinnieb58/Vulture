@@ -12,6 +12,7 @@ def run_command(
     args: Sequence[str],
     *,
     timeout: float = DEFAULT_TIMEOUT,
+    env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Run a command without shell=True. Returns (success, stdout or error snippet)."""
     try:
@@ -21,6 +22,7 @@ def run_command(
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except FileNotFoundError:
         return False, f"command not found: {args[0]}"

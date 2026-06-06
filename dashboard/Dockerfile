@@ -12,12 +12,15 @@ RUN apt-get update \
         iproute2 \
         iputils-ping \
         tmux \
+        util-linux \
+        systemd \
+        docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py parsers.py subprocess_util.py host_status.py db_readers.py log_readers.py vulture_runtime.py ./
+COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py db_readers.py log_readers.py vulture_runtime.py ./
 COPY templates/ templates/
 
 ENV VULTURE_DB_PATH=/app/data/vulture.db \

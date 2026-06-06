@@ -7,6 +7,7 @@ Lightweight tests for Vulture Dashboard v0.2 (read-only FastAPI app).
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,8 +28,9 @@ from parsers import (  # noqa: E402
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
-from host_status import get_docker_snapshot, get_raven_health  # noqa: E402
+from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
 from log_readers import read_log_snapshot  # noqa: E402
+from vulture_runtime import _format_runtime_detail, _scheduler_freshness  # noqa: E402
 
 
 SAMPLE_DF = """\
@@ -109,24 +111,30 @@ class TestDashboardHTTP:
         return TestClient(dashboard_app.app)
 
     def test_index_missing_db_and_log_returns_200(self, client):
-        with patch("host_status.run_command", return_value=(False, "unavailable")):
-            response = client.get("/")
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/")
         assert response.status_code == 200
         assert "Vulture Dashboard" in response.text
         assert "read-only" in response.text
 
     def test_index_when_commands_fail_returns_200(self, client):
-        with patch("host_status.run_command", return_value=(False, "timed out")):
-            response = client.get("/")
+        with patch("host_status.run_host_command", return_value=(False, "timed out")):
+            with patch("host_status.run_systemctl", return_value=(False, "timed out")):
+                response = client.get("/")
         assert response.status_code == 200
         assert "Raven Health" in response.text
 
     def test_index_when_docker_unavailable_returns_200(self, client):
-        with patch("host_status.run_command", return_value=(False, "cannot connect")):
-            docker = get_docker_snapshot()
+        with patch("host_status.run_host_command", return_value=(False, "cannot connect")):
+            with patch("host_status.systemctl_is_active", return_value=(True, "active")):
+                with patch("host_status.systemctl_is_enabled", return_value=(True, "enabled")):
+                    with patch("host_status.systemctl_unit_exists", return_value=True):
+                        docker = get_docker_snapshot()
         assert docker.warning is not None
-        with patch("host_status.run_command", return_value=(False, "cannot connect")):
-            response = client.get("/")
+        with patch("host_status.run_host_command", return_value=(False, "cannot connect")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/")
         assert response.status_code == 200
         assert "Docker" in response.text
 
@@ -147,7 +155,45 @@ class TestDefensiveReaders:
         assert snap["lines"] == []
 
     def test_raven_health_never_raises_on_command_failures(self):
-        with patch("host_status.run_command", return_value=(False, "fail")):
-            health = get_raven_health()
+        with patch("host_status.run_host_command", return_value=(False, "fail")):
+            with patch("host_status.run_systemctl", return_value=(False, "fail")):
+                health = get_raven_health()
         assert health["hostname"]
         assert isinstance(health["warnings"], list)
+
+
+class TestHostCommands:
+    def test_service_check_uses_systemctl_states(self):
+        with patch("host_status.systemctl_unit_exists", return_value=True):
+            with patch("host_status.systemctl_is_active", return_value=(True, "active")):
+                with patch("host_status.systemctl_is_enabled", return_value=(True, "enabled")):
+                    svc = _check_service("SSH", ("ssh.service",))
+        assert svc.active == "active"
+        assert svc.enabled == "enabled"
+        assert svc.warning is None
+
+    def test_service_not_found_when_unit_missing(self):
+        with patch("host_status.systemctl_unit_exists", return_value=False):
+            svc = _check_service("vulture-bot", ("vulture-bot.service",))
+        assert svc.active == "not found"
+        assert svc.enabled == "not configured"
+
+    def test_runtime_detail_hides_broken_systemctl(self):
+        svc = ServiceStatus("vulture-bot", "vulture-bot.service", "unknown", "unknown")
+        detail = _format_runtime_detail(svc, True, "python main.py")
+        assert "command not found" not in detail
+        assert "process:" in detail
+
+    def test_scheduler_freshness_from_journal(self):
+        journal = [
+            "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Done hunt 'ddr4_desktop_ram'",
+        ]
+        with patch("vulture_runtime._journal_lines", return_value=journal):
+            with patch(
+                "vulture_runtime.datetime",
+                wraps=datetime,
+            ) as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 6, 6, 3, 0, 0, tzinfo=timezone.utc)
+                result = _scheduler_freshness([])
+        assert result["status"] in ("fresh", "stale", "seen")
+        assert "journal" in result["detail"]

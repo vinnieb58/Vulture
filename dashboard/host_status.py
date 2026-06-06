@@ -22,6 +22,13 @@ from parsers import (
     parse_systemctl_failed,
     pick_lan_ipv4,
 )
+from host_commands import (
+    run_host_command,
+    run_systemctl,
+    systemctl_is_active,
+    systemctl_is_enabled,
+    systemctl_unit_exists,
+)
 from subprocess_util import run_command
 
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
@@ -149,7 +156,7 @@ def _read_lan_ip() -> tuple[str | None, str | None]:
 
 
 def _read_tailscale_ip() -> tuple[str | None, str | None]:
-    ok, out = run_command(["tailscale", "ip", "-4"], timeout=8.0)
+    ok, out = run_host_command(["tailscale", "ip", "-4"], timeout=8.0)
     if ok and out.strip():
         return out.splitlines()[0].strip(), None
     return None, "Tailscale IP unavailable"
@@ -163,7 +170,7 @@ def _check_internet() -> tuple[bool, str | None]:
 
 
 def _read_failed_units() -> tuple[list[str], str | None]:
-    ok, out = run_command(["systemctl", "--failed", "--no-pager"], timeout=10.0)
+    ok, out = run_systemctl(["--failed", "--no-pager"], timeout=10.0)
     if not ok:
         return [], out or "systemctl unavailable"
     units = parse_systemctl_failed(out)
@@ -206,24 +213,20 @@ def _read_load() -> tuple[str | None, str | None]:
 
 def _resolve_unit(candidates: tuple[str, ...]) -> str | None:
     for unit in candidates:
-        ok, _ = run_command(["systemctl", "status", unit], timeout=5.0)
-        if ok:
-            return unit
-        ok_active, out_active = run_command(["systemctl", "is-active", unit], timeout=5.0)
-        ok_enabled, out_enabled = run_command(["systemctl", "is-enabled", unit], timeout=5.0)
-        state = (out_active or out_enabled or "").strip().lower()
-        if ok_active or ok_enabled:
-            return unit
-        if state not in ("", "not-found", "inactive", "unknown"):
-            return unit
-        if "not-found" not in state and "could not be found" not in state:
-            if out_active or out_enabled:
-                return unit
-    for unit in candidates:
-        ok, out = run_command(["systemctl", "is-enabled", unit], timeout=5.0)
-        if ok or (out and "not-found" not in out.lower()):
+        if systemctl_unit_exists(unit):
             return unit
     return None
+
+
+def _normalize_unit_state(raw: str, *, missing_label: str) -> str:
+    state = (raw or "").strip().lower()
+    if not state or state in ("unknown", "systemctl unavailable"):
+        return "unknown"
+    if "command not found" in state or "unavailable" in state:
+        return "unknown"
+    if state in ("not-found",) or "could not be found" in state:
+        return missing_label
+    return state
 
 
 def _check_service(label: str, candidates: tuple[str, ...]) -> ServiceStatus:
@@ -237,19 +240,20 @@ def _check_service(label: str, candidates: tuple[str, ...]) -> ServiceStatus:
             warning=None,
         )
 
-    ok_active, active_out = run_command(["systemctl", "is-active", unit], timeout=5.0)
-    ok_enabled, enabled_out = run_command(["systemctl", "is-enabled", unit], timeout=5.0)
-    active = active_out.strip().lower() if active_out else "unknown"
-    enabled = enabled_out.strip().lower() if enabled_out else "unknown"
-
-    if not ok_active and active in ("", "unknown"):
-        active = "unknown"
-    if not ok_enabled and "not-found" in enabled:
-        enabled = "not found"
+    ok_active, active_out = systemctl_is_active(unit)
+    ok_enabled, enabled_out = systemctl_is_enabled(unit)
+    active = _normalize_unit_state(active_out if ok_active else "unknown", missing_label="unknown")
+    enabled = _normalize_unit_state(
+        enabled_out if ok_enabled else "unknown",
+        missing_label="not configured",
+    )
 
     warning = None
-    if active in ("failed", "inactive", "dead"):
+    if not ok_active and active == "unknown":
+        warning = f"{label}: systemctl unavailable"
+    elif active in ("failed", "inactive", "dead"):
         warning = f"{label} is {active}"
+
     return ServiceStatus(
         label=label,
         unit=unit,
@@ -337,7 +341,7 @@ def get_docker_snapshot() -> DockerSnapshot:
     running_names: list[str] = []
     stopped_names: list[str] = []
 
-    ok_ps, out_ps = run_command(
+    ok_ps, out_ps = run_host_command(
         [
             "docker",
             "ps",
@@ -352,7 +356,7 @@ def get_docker_snapshot() -> DockerSnapshot:
     else:
         warning = out_ps or "docker ps unavailable"
 
-    ok_all, out_all = run_command(
+    ok_all, out_all = run_host_command(
         ["docker", "ps", "-a", "--format", "{{.Names}}"],
         timeout=15.0,
     )
