@@ -30,7 +30,11 @@ import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
 from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
 from log_readers import read_log_snapshot  # noqa: E402
-from vulture_runtime import _format_runtime_detail, _scheduler_freshness  # noqa: E402
+from vulture_runtime import (  # noqa: E402
+    _format_runtime_detail,
+    _scheduler_freshness,
+    _scheduler_healthy,
+)
 
 
 SAMPLE_DF = """\
@@ -61,6 +65,13 @@ SAMPLE_IP = """\
 lo               UNKNOWN        127.0.0.1/8 ::1/128
 eth0             UP             192.168.1.143/24
 tailscale0       UNKNOWN        100.82.1.18/32
+"""
+
+SAMPLE_IP_DOCKER = """\
+lo               UNKNOWN        127.0.0.1/8
+eth0@if123       UP             172.19.0.2/16
+eno0             UP             192.168.1.143/24
+docker0          UP             172.17.0.1/16
 """
 
 
@@ -96,6 +107,9 @@ class TestParsers:
 
     def test_pick_lan_ipv4(self):
         assert pick_lan_ipv4(SAMPLE_IP) == "192.168.1.143"
+
+    def test_pick_lan_ipv4_skips_docker_bridge(self):
+        assert pick_lan_ipv4(SAMPLE_IP_DOCKER) == "192.168.1.143"
 
 
 class TestDashboardHTTP:
@@ -186,7 +200,7 @@ class TestHostCommands:
 
     def test_scheduler_freshness_from_journal(self):
         journal = [
-            "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Done hunt 'ddr4_desktop_ram'",
+            "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Hunt cycle completed",
         ]
         with patch("vulture_runtime._journal_lines", return_value=journal):
             with patch(
@@ -197,3 +211,13 @@ class TestHostCommands:
                 result = _scheduler_freshness([])
         assert result["status"] in ("fresh", "stale", "seen")
         assert "journal" in result["detail"]
+
+    def test_scheduler_healthy_with_active_timer_and_fresh_journal(self):
+        timer = ServiceStatus("timer", "vulture-scheduler.timer", "active", "enabled")
+        freshness = {"status": "fresh", "completed": True, "detail": "ok", "warning": None}
+        assert _scheduler_healthy(timer, freshness, cycle_running=False) is True
+
+    def test_scheduler_not_healthy_when_timer_inactive(self):
+        timer = ServiceStatus("timer", "vulture-scheduler.timer", "inactive", "enabled")
+        freshness = {"status": "fresh", "completed": True, "detail": "ok", "warning": None}
+        assert _scheduler_healthy(timer, freshness, cycle_running=False) is False

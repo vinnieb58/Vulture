@@ -46,7 +46,8 @@ SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("smbd", ("smbd.service", "smbd")),
     ("docker", ("docker.service", "docker")),
     ("vulture-bot", ("vulture-bot.service", "vulture-bot")),
-    ("vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")),
+    # main.py is a one-shot worker; the timer owns the schedule.
+    ("vulture-scheduler", ("vulture-scheduler.timer", "vulture-scheduler.timer")),
 )
 
 
@@ -144,13 +145,15 @@ def _read_boot_time() -> str | None:
 
 
 def _read_lan_ip() -> tuple[str | None, str | None]:
-    ok, out = run_command(["ip", "-br", "addr"], timeout=5.0)
+    ok, out = run_host_command(["ip", "-br", "addr"], timeout=5.0)
     if ok and out.strip():
-        return pick_lan_ipv4(out), None
-    ok, out = run_command(["hostname", "-I"], timeout=5.0)
+        lan = pick_lan_ipv4(out)
+        if lan:
+            return lan, None
+    ok, out = run_host_command(["hostname", "-I"], timeout=5.0)
     if ok and out.strip():
         for addr in out.split():
-            if "." in addr and not addr.startswith("127."):
+            if "." in addr and not addr.startswith(("127.", "100.", "172.")):
                 return addr, None
     return None, "Could not determine LAN IP"
 

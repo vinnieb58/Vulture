@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # raven_healthcheck.sh — Raven host health report (read-only, no secrets).
 #
-# Production Vulture runtime is verified via systemd (vulture-bot, vulture-scheduler),
-# not tmux. tmux output below is optional debug-only and is never a failure signal.
+# Production Vulture runtime is verified via systemd (vulture-bot, vulture-scheduler.timer).
+# main.py runs as a one-shot worker (vulture-scheduler.service); inactive between runs is OK.
+# tmux output below is optional debug-only and is never a failure signal.
 #
 # Install on Raven (from repo root):
 #   cp scripts/raven_healthcheck.sh ~/raven_healthcheck.sh
@@ -95,8 +96,12 @@ print_service_state() {
         elif [[ "$enabled" == "not-found" || "$active" == "not-found" ]]; then
             record_warn "$check_label not installed"
         elif [[ "$active" == "failed" || "$active" == "inactive" ]]; then
-            if [[ "$unit" == vulture-bot || "$unit" == vulture-scheduler ]]; then
+            if [[ "$unit" == vulture-bot ]]; then
                 record_fail "$check_label not active ($active)"
+            elif [[ "$unit" == vulture-scheduler.timer ]]; then
+                record_fail "$check_label not active ($active)"
+            elif [[ "$unit" == vulture-scheduler ]]; then
+                record_ok "$check_label worker idle ($active)"
             else
                 record_warn "$check_label not active ($active)"
             fi
@@ -155,7 +160,8 @@ section_key_services() {
     print_service_state smbd "samba"
     print_service_state docker "docker"
     print_service_state vulture-bot "vulture-bot"
-    print_service_state vulture-scheduler "vulture-scheduler"
+    print_service_state vulture-scheduler.timer "vulture-scheduler.timer"
+    print_service_state vulture-scheduler "vulture-scheduler.worker"
 }
 
 section_network() {
@@ -241,6 +247,8 @@ section_vulture_systemd() {
     echo "  Production checks use systemd, not tmux."
     run_cmd "systemctl status vulture-bot --no-pager -l" \
         systemctl status vulture-bot --no-pager -l
+    run_cmd "systemctl status vulture-scheduler.timer --no-pager -l" \
+        systemctl status vulture-scheduler.timer --no-pager -l
     run_cmd "systemctl status vulture-scheduler --no-pager -l" \
         systemctl status vulture-scheduler --no-pager -l
 
@@ -265,15 +273,17 @@ section_process_fallback() {
             if [[ "$pattern" == "discord_bot.py" ]]; then
                 record_ok "discord_bot.py process detected"
             elif [[ "$pattern" == "main.py" ]]; then
-                record_ok "main.py process detected"
+                record_ok "main.py process detected (cycle running)"
             fi
         else
             echo "  (no matches)"
-            if [[ "$pattern" == "discord_bot.py" || "$pattern" == "main.py" ]]; then
-                if ! service_is_active vulture-bot && [[ "$pattern" == "discord_bot.py" ]]; then
+            if [[ "$pattern" == "discord_bot.py" ]]; then
+                if ! service_is_active vulture-bot; then
                     record_warn "discord_bot.py process not detected"
-                elif ! service_is_active vulture-scheduler && [[ "$pattern" == "main.py" ]]; then
-                    record_warn "main.py process not detected"
+                fi
+            elif [[ "$pattern" == "main.py" ]]; then
+                if ! service_is_active vulture-scheduler.timer; then
+                    record_warn "main.py process not detected (timer inactive)"
                 fi
             fi
         fi

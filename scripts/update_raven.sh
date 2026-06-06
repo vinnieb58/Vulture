@@ -5,8 +5,9 @@
 # Run from the repo root, or override APP_DIR to point elsewhere.
 #
 # Runtime model (production):
-#   vulture-bot.service       — long-running Discord control (discord_bot.py)
-#   vulture-scheduler.service — repeats main.py hunt cycles on a configurable interval
+#   vulture-bot.service        — long-running Discord control (discord_bot.py)
+#   vulture-scheduler.service  — one-shot main.py hunt cycle worker (Type=oneshot)
+#   vulture-scheduler.timer    — triggers the worker every 15 minutes
 #
 # systemd owns bot/scheduler lifecycle on Raven. tmux is deprecated for normal
 # production startup; use it only for optional manual debugging.
@@ -23,7 +24,8 @@
 #   BRANCH                     — git branch to deploy; skips branch picker when set
 #   PYTHON                     — Python executable inside venv (default: .venv/bin/python)
 #   VULTURE_BOT_SERVICE        — systemd unit for the bot (default: vulture-bot.service)
-#   VULTURE_SCHEDULER_SERVICE  — systemd unit for the scheduler (default: vulture-scheduler.service)
+#   VULTURE_SCHEDULER_SERVICE  — one-shot worker unit (default: vulture-scheduler.service)
+#   VULTURE_SCHEDULER_TIMER    — timer unit (default: vulture-scheduler.timer)
 #   SKIP_SYSTEMD_RESTART       — set to 1 to skip service restarts (tests / dry run)
 
 set -euo pipefail
@@ -35,6 +37,7 @@ APP_DIR="${APP_DIR:-$HOME/projects/vulture}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 VULTURE_BOT_SERVICE="${VULTURE_BOT_SERVICE:-vulture-bot.service}"
 VULTURE_SCHEDULER_SERVICE="${VULTURE_SCHEDULER_SERVICE:-vulture-scheduler.service}"
+VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
 
 # Track whether the caller supplied BRANCH so we know whether to show prompts.
 BRANCH_PROVIDED=0
@@ -49,6 +52,7 @@ PYTHON_BIN="${APP_DIR}/${PYTHON}"
 # systemd unit names without .service suffix (for status/journalctl commands)
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
+SCHEDULER_TIMER_UNIT="${VULTURE_SCHEDULER_TIMER%.timer}"
 
 # ---------------------------------------------------------------------------
 # Section helper
@@ -70,6 +74,30 @@ print_service_diagnostics() {
     journalctl -u "$unit" -n 100 --no-pager 2>&1 || true
 }
 
+install_systemd_units() {
+    section "Installing systemd units"
+    local unit_dir="${APP_DIR}/deploy/systemd"
+    local missing=0
+    for unit in vulture-bot.service vulture-scheduler.service vulture-scheduler.timer; do
+        if [[ ! -f "${unit_dir}/${unit}" ]]; then
+            echo "  ERROR: missing ${unit_dir}/${unit}"
+            missing=1
+        fi
+    done
+    if [[ $missing -ne 0 ]]; then
+        exit 1
+    fi
+
+    sudo cp "${unit_dir}/vulture-bot.service" /etc/systemd/system/
+    sudo cp "${unit_dir}/vulture-scheduler.service" /etc/systemd/system/
+    sudo cp "${unit_dir}/vulture-scheduler.timer" /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable vulture-bot.service
+    sudo systemctl enable vulture-scheduler.timer
+    echo "  Installed: vulture-bot.service, vulture-scheduler.service, vulture-scheduler.timer"
+    echo "  Enabled:   vulture-bot.service, vulture-scheduler.timer"
+}
+
 restart_systemd_services() {
     section "Restarting systemd services"
 
@@ -80,27 +108,33 @@ restart_systemd_services() {
     fi
     echo "  Restarted: $VULTURE_BOT_SERVICE"
 
-    if ! sudo systemctl restart "$VULTURE_SCHEDULER_SERVICE"; then
-        echo "  ERROR: failed to restart $VULTURE_SCHEDULER_SERVICE"
-        print_service_diagnostics "$SCHEDULER_UNIT"
+    if ! sudo systemctl restart "$VULTURE_SCHEDULER_TIMER"; then
+        echo "  ERROR: failed to restart $VULTURE_SCHEDULER_TIMER"
+        print_service_diagnostics "$SCHEDULER_TIMER_UNIT"
         exit 1
     fi
-    echo "  Restarted: $VULTURE_SCHEDULER_SERVICE"
+    echo "  Restarted: $VULTURE_SCHEDULER_TIMER"
 }
 
 show_runtime_status() {
     section "Production runtime status (systemd)"
     echo "  Expected units:"
-    echo "    $VULTURE_BOT_SERVICE       — discord_bot.py"
-    echo "    $VULTURE_SCHEDULER_SERVICE — main.py hunt cycle loop"
+    echo "    $VULTURE_BOT_SERVICE        — discord_bot.py (long-running)"
+    echo "    $VULTURE_SCHEDULER_TIMER    — schedules main.py every 15 minutes"
+    echo "    $VULTURE_SCHEDULER_SERVICE  — one-shot main.py worker (idle between runs)"
     echo ""
     echo "  systemctl is-active $BOT_UNIT:"
     systemctl is-active "$BOT_UNIT" 2>&1 || true
     echo ""
-    echo "  systemctl is-active $SCHEDULER_UNIT:"
+    echo "  systemctl is-active $SCHEDULER_TIMER_UNIT:"
+    systemctl is-active "$SCHEDULER_TIMER_UNIT" 2>&1 || true
+    echo ""
+    echo "  systemctl is-active $SCHEDULER_UNIT (worker — inactive between runs is OK):"
     systemctl is-active "$SCHEDULER_UNIT" 2>&1 || true
     echo ""
     systemctl status "$BOT_UNIT" --no-pager -l 2>&1 || true
+    echo ""
+    systemctl status "$SCHEDULER_TIMER_UNIT" --no-pager -l 2>&1 || true
     echo ""
     systemctl status "$SCHEDULER_UNIT" --no-pager -l 2>&1 || true
 }
@@ -216,8 +250,9 @@ section "Running one hunt cycle (main.py)"
 # 10. Restart production systemd services (only after all checks pass)
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_SYSTEMD_RESTART:-0}" == "1" ]]; then
-    section "Skipping systemd restart (SKIP_SYSTEMD_RESTART=1)"
+    section "Skipping systemd install/restart (SKIP_SYSTEMD_RESTART=1)"
 else
+    install_systemd_units
     restart_systemd_services
     show_runtime_status
 fi
@@ -229,6 +264,7 @@ echo "========================================"
 echo ""
 echo "  Verify on Raven:"
 echo "    systemctl status $BOT_UNIT --no-pager -l"
+echo "    systemctl status $SCHEDULER_TIMER_UNIT --no-pager -l"
 echo "    systemctl status $SCHEDULER_UNIT --no-pager -l"
 echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
 echo "    journalctl -u $SCHEDULER_UNIT -n 100 --no-pager"

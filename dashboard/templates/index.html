@@ -394,7 +394,7 @@
           <div class="card-label">{{ proc.label }}</div>
           <div class="card-value small">
             <span class="pill {% if proc.running %}ok{% else %}bad{% endif %}">
-              {{ 'running' if proc.running else 'not running' }}
+              {% if proc.status_text %}{{ proc.status_text }}{% elif proc.running %}running{% else %}not running{% endif %}
             </span>
           </div>
           <div class="meta" style="margin:0.35rem 0 0;">{{ proc.detail }}</div>

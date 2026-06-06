@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Vulture hunt cycle every 15 minutes
+Requires=vulture-scheduler.service
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

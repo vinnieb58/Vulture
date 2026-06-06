@@ -153,12 +153,47 @@ def parse_ip_br_addr(text: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _is_docker_or_virtual_iface(iface: str) -> bool:
+    lower = iface.lower()
+    return (
+        lower.startswith(("docker", "br-", "veth", "tailscale"))
+        or lower in {"lo"}
+    )
+
+
+def _is_private_non_lan_ipv4(addr: str) -> bool:
+    """Exclude loopback, Tailscale CGNAT, and Docker bridge ranges."""
+    if addr.startswith("127."):
+        return True
+    if addr.startswith("100."):
+        return True
+    if addr.startswith("10."):
+        return True
+    if addr.startswith("172."):
+        try:
+            second = int(addr.split(".")[1])
+            return 16 <= second <= 31
+        except (ValueError, IndexError):
+            return True
+    return False
+
+
 def pick_lan_ipv4(text: str) -> str | None:
-    for _iface, addr in parse_ip_br_addr(text):
-        if not addr.startswith("100."):
+    """Pick the host LAN IPv4, skipping Docker/Tailscale/virtual interfaces."""
+    candidates: list[tuple[str, str]] = []
+    for iface, addr in parse_ip_br_addr(text):
+        if _is_docker_or_virtual_iface(iface):
+            continue
+        if _is_private_non_lan_ipv4(addr):
+            continue
+        candidates.append((iface, addr))
+
+    preferred_prefixes = ("eno", "eth", "enp", "ens", "wlan", "wlp")
+    for iface, addr in candidates:
+        if iface.startswith(preferred_prefixes):
             return addr
-    for _iface, addr in parse_ip_br_addr(text):
-        return addr
+    if candidates:
+        return candidates[0][1]
     return None
 
 

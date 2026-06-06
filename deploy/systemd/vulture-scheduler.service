@@ -1,17 +1,14 @@
 [Unit]
-Description=Vulture hunt scheduler (main.py cycle loop)
+Description=Vulture hunt scheduler (one-shot main.py cycle)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 User=vinnieb58
 WorkingDirectory=/home/vinnieb58/projects/vulture
 EnvironmentFile=/home/vinnieb58/projects/vulture/.env
-Environment=SCHEDULER_INTERVAL_SECONDS=900
-ExecStart=/bin/bash -c 'while true; do /home/vinnieb58/projects/vulture/.venv/bin/python main.py; sleep ${SCHEDULER_INTERVAL_SECONDS:-900}; done'
-Restart=on-failure
-RestartSec=10
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python main.py
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=timers.target

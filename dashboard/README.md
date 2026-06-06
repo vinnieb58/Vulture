@@ -9,9 +9,10 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 - **Raven Health** — hostname, server time, uptime, boot time, LAN/Tailscale IP,
   internet reachability, failed systemd units, CPU load, memory usage
 - **Key Services** — ssh/ssh.socket, tailscaled, smbd, docker, vulture-bot,
-  vulture-scheduler (`is-active` / `is-enabled`)
-- **Vulture Runtime** — bot/scheduler process or systemd status, tmux sessions,
-  log mtime, scheduler freshness heuristic
+  vulture-scheduler.timer (`is-active` / `is-enabled`; worker is oneshot)
+- **Vulture Runtime** — bot systemd/process status; scheduler health via
+  `vulture-scheduler.timer` + recent journal success (not worker active state);
+  tmux sessions, log mtime, scheduler freshness
 - **Hunts** — schema-tolerant hunt table (name, status, sources, timestamps,
   max price, query, vertical when columns exist)
 - **Adapter Summary** — per-source listing counts, latest listing, recent log errors
@@ -68,7 +69,10 @@ The container uses scoped read-only host mounts for observability:
   mounts; failures show warnings instead of breaking the page.
 - **USB storage mounts** may show as missing after reboot if Raven did not
   detect or mount external drives (known Raven issue).
-- **Scheduler freshness** is a log-tail heuristic, not a heartbeat API.
+- **Scheduler freshness** uses journal/log heuristics; the worker service is
+  intentionally inactive between 15-minute oneshot runs.
+- **LAN IP** is read from the host network namespace; Docker bridge addresses
+  are filtered out.
 - **No authentication** — intended for local LAN / Tailscale access only.
 - **Adapter errors** are matched heuristically from recent log lines.
 - **LAN/Tailscale IP** accuracy depends on host network namespace visibility

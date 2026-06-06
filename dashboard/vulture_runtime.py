@@ -23,10 +23,15 @@ class ProcessMatch:
     running: bool
     detail: str
     warning: str | None = None
+    status_text: str | None = None
 
 
 def _service_active(svc: ServiceStatus) -> bool:
     return svc.active == "active"
+
+
+def _service_enabled(svc: ServiceStatus) -> bool:
+    return svc.enabled in ("enabled", "static")
 
 
 def _systemd_detail(svc: ServiceStatus) -> str | None:
@@ -47,16 +52,35 @@ def _format_runtime_detail(svc: ServiceStatus, proc: bool, proc_detail: str) -> 
     return " · ".join(parts) if parts else "not detected"
 
 
+def _format_scheduler_detail(
+    timer_svc: ServiceStatus,
+    service_svc: ServiceStatus,
+    proc: bool,
+    proc_detail: str,
+    freshness: dict[str, Any],
+) -> str:
+    parts: list[str] = []
+    timer = _systemd_detail(timer_svc)
+    if timer:
+        parts.append(f"timer {timer}")
+    if service_svc.unit:
+        parts.append(f"worker: {service_svc.active} (oneshot)")
+    if proc:
+        parts.append(f"cycle running: {proc_detail[:80]}")
+    if freshness.get("detail"):
+        parts.append(str(freshness["detail"]))
+    return " · ".join(parts) if parts else "not detected"
+
+
 def _pgrep_running(pattern: str) -> tuple[bool, str]:
     ok, out = run_host_command(["pgrep", "-af", pattern], timeout=8.0)
     if not ok or not out.strip():
         return False, "not running"
     lines = [line.strip() for line in out.splitlines() if line.strip()]
-    # Prefer production systemd/python paths over tmux wrappers.
     preferred = [
         ln
         for ln in lines
-        if "/projects/vulture/" in ln or "systemd" in ln or ".venv/bin/python" in ln
+        if "/projects/vulture/" in ln and "while true" not in ln and "tmux" not in ln
     ]
     pick = preferred[0] if preferred else lines[0]
     return True, pick[:160]
@@ -75,7 +99,7 @@ def _process_running(pattern: str) -> tuple[bool, str]:
 
     matches: list[str] = []
     for line in out.splitlines():
-        if pattern in line and "grep" not in line:
+        if pattern in line and "grep" not in line and "while true" not in line:
             matches.append(line.strip())
     if matches:
         return True, matches[0][:160]
@@ -138,32 +162,30 @@ def _parse_log_timestamp(line: str) -> datetime | None:
 
 
 def _freshness_from_lines(lines: list[str], *, source: str) -> dict[str, Any] | None:
-    keywords = (
-        "starting hunt",
+    success_keywords = ("hunt cycle completed",)
+    activity_keywords = (
+        "starting vulture hunt cycle",
+        "starting hunt:",
         "done hunt",
         "hunt cycle",
-        "scheduler",
-        "starting vulture hunt cycle",
     )
     for line in reversed(lines):
         lower = line.lower()
-        if not any(k in lower for k in keywords):
+        if not any(k in lower for k in (*success_keywords, *activity_keywords)):
             continue
         ts = _parse_log_timestamp(line)
         if ts is None:
             continue
         age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
-        if age_min <= SCHEDULER_FRESH_MINUTES:
-            return {
-                "status": "fresh",
-                "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
-                "warning": None,
-            }
-        return {
-            "status": "stale",
-            "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
-            "warning": f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min",
-        }
+        completed = any(k in lower for k in success_keywords)
+        status = "fresh" if age_min <= SCHEDULER_FRESH_MINUTES else "stale"
+        detail = (
+            f"Last {'successful ' if completed else ''}cycle ~{int(age_min)} min ago ({source})"
+        )
+        warning = None
+        if status == "stale":
+            warning = f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min"
+        return {"status": status, "detail": detail, "warning": warning, "completed": completed}
     return None
 
 
@@ -183,19 +205,36 @@ def _scheduler_freshness(log_lines: list[str]) -> dict[str, Any]:
             "status": "seen",
             "detail": "Scheduler journal entries present",
             "warning": None,
+            "completed": False,
         }
 
     return {
         "status": "unknown",
         "detail": "No recent scheduler lines in journal or log tail",
         "warning": None,
+        "completed": False,
     }
+
+
+def _scheduler_healthy(
+    timer_svc: ServiceStatus,
+    freshness: dict[str, Any],
+    cycle_running: bool,
+) -> bool:
+    timer_ok = _service_active(timer_svc) and _service_enabled(timer_svc)
+    journal_ok = freshness.get("status") == "fresh" and freshness.get("completed", False)
+    return timer_ok and (journal_ok or cycle_running)
 
 
 def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
     bot_svc = _check_service("vulture-bot", ("vulture-bot.service", "vulture-bot"))
-    sched_svc = _check_service(
-        "vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")
+    timer_svc = _check_service(
+        "vulture-scheduler.timer",
+        ("vulture-scheduler.timer",),
+    )
+    worker_svc = _check_service(
+        "vulture-scheduler",
+        ("vulture-scheduler.service", "vulture-scheduler"),
     )
 
     bot_proc, bot_detail = _process_running("discord_bot.py")
@@ -212,9 +251,11 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         warnings.append(log_warn)
     if freshness.get("warning"):
         warnings.append(str(freshness["warning"]))
+    if not _service_active(timer_svc):
+        warnings.append("vulture-scheduler.timer is not active")
 
     bot_running = _service_active(bot_svc) or bot_proc
-    sched_running = _service_active(sched_svc) or sched_proc
+    sched_healthy = _scheduler_healthy(timer_svc, freshness, sched_proc)
 
     processes = [
         ProcessMatch(
@@ -225,16 +266,22 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         ),
         ProcessMatch(
             label="Scheduler",
-            running=sched_running,
-            detail=_format_runtime_detail(sched_svc, sched_proc, sched_detail),
-            warning=None if sched_running else "Scheduler not detected",
+            running=sched_healthy,
+            status_text="healthy" if sched_healthy else "unhealthy",
+            detail=_format_scheduler_detail(
+                timer_svc, worker_svc, sched_proc, sched_detail, freshness
+            ),
+            warning=None
+            if sched_healthy
+            else "Scheduler timer or recent journal activity not healthy",
         ),
     ]
 
     return {
         "systemd": {
             "bot": bot_svc,
-            "scheduler": sched_svc,
+            "scheduler_timer": timer_svc,
+            "scheduler_worker": worker_svc,
         },
         "processes": processes,
         "tmux_sessions": sessions,
