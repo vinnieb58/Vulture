@@ -41,6 +41,13 @@ This dashboard does **not** start, stop, restart, or modify hunts, services,
 containers, or schedules. It only runs read-only queries and observability
 commands with timeouts. Missing data surfaces as warnings, not crashes.
 
+## Host command execution
+
+The slim container does not run systemd itself. Service checks use the host's
+`systemctl` via `chroot /host/root` or `nsenter` (with `pid: host`), connecting
+through the mounted D-Bus socket (`DASHBOARD_SYSTEMD_BUS_SOCKET`). Docker and
+Tailscale commands use the same host execution path.
+
 ## Host mounts (docker-compose)
 
 The container uses scoped read-only host mounts for observability:
