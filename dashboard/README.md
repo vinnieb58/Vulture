@@ -15,7 +15,9 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 - **Hunts** — schema-tolerant hunt table (name, status, sources, timestamps,
   max price, query, vertical when columns exist)
 - **Adapter Summary** — per-source listing counts, latest listing, recent log errors
-- **Storage / Roost** — root and expected USB mounts under `/mnt/storage/*`
+- **Storage / Roost** — root and expected storage mounts with real mountpoint
+  detection (`findmnt`, `/proc/mountinfo`), systemd automount/mount unit state,
+  UUID validation, and legacy path handling
 - **Docker** — daemon status, container counts, running container table
 - **Logs** — split recent errors/warnings vs general lines
 - **Warnings** — defensive alerts (missing DB/log, failed commands, missing mounts)
@@ -85,9 +87,11 @@ Inside the container, the Storage / Roost section checks expected subpaths:
 - `/mnt/storage/raven_nvme`
 - `/mnt/storage/roost_spinning_0`
 
-Each mount reports **OK**, **MISSING**, **NOT_MOUNTED**, or **ERROR**. Unplugged
-optional drives appear as **warnings** on the dashboard — they do not crash the
-container or fail the HTTP health endpoint.
+Each mount reports detailed statuses such as **OK**, **OK_AUTOMOUNTED**,
+**AUTOMOUNT_WAITING**, **NOT_MOUNTED**, **NOT_MOUNTED_PARENT_ROOT**,
+**LEGACY_PATH**, **PATH_MISSING**, or **ERROR**. Unplugged optional drives
+appear as **warnings** on the dashboard — they do not crash the container or
+fail the HTTP health endpoint.
 
 ### Quick recovery
 
@@ -101,6 +105,9 @@ curl -I http://localhost:8088
 
 - **systemctl / Docker / tailscale** require the corresponding host tools and
   mounts; failures show warnings instead of breaking the page.
+- **Optional / automounted storage** shows yellow `AUTOMOUNT_WAITING` when the
+  path exists but the backing device is not mounted (unplugged or not yet triggered).
+- **Legacy `portable_beast`** is reported separately from active `pelican_backup`.
 - **USB storage mounts** may show as missing or not mounted after reboot if Raven
   did not detect or mount external drives (known Raven issue). This is surfaced as
   a warning, not a container failure.
@@ -120,12 +127,11 @@ curl -I http://localhost:8088
 | `DASHBOARD_AUTO_REFRESH_SECONDS` | `60` | Meta refresh interval |
 | `DASHBOARD_HOST_ROOT` | `/host/root` | Host root bind for `df` |
 | `DASHBOARD_HOST_PROC` | `/host/proc` | Host proc bind |
-| `DASHBOARD_STORAGE_MOUNTS` | see compose file | `Label:path` comma list |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
 
 ## Local validation
 
 ```bash
 python3 -m compileall -q dashboard
-python3 -m pytest tests/test_dashboard.py -q
+python3 -m pytest tests/test_dashboard.py tests/test_dashboard_storage.py -q
 ```

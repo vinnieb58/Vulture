@@ -31,6 +31,39 @@ class MemoryInfo:
     percent_used: float | None
 
 
+def parse_mountinfo(text: str) -> dict[str, tuple[str, str]]:
+    """Parse /proc/*/mountinfo into mount_point -> (source, fstype)."""
+    mounts: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 5 or len(right_fields) < 2:
+            continue
+        mount_point = left_fields[4].replace("\\040", " ")
+        fstype = right_fields[0]
+        source = right_fields[1]
+        mounts[mount_point.rstrip("/") or "/"] = (source, fstype)
+    return mounts
+
+
+def parse_findmnt_line(text: str) -> tuple[str | None, str | None, str | None]:
+    """Parse a single findmnt -o SOURCE,FSTYPE,UUID line."""
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    if not line:
+        return None, None, None
+    parts = line.split()
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return parts[0], parts[1], None
+    if len(parts) == 1:
+        return parts[0], None, None
+    return None, None, None
+
+
 def parse_df_human(text: str) -> list[DiskEntry]:
     """Parse `df -h` output into disk entries."""
     entries: list[DiskEntry] = []

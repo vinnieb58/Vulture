@@ -27,5 +27,4 @@ services:
       DASHBOARD_HOST_ROOT: /host/root
       DASHBOARD_HOST_PROC: /host/proc
       DASHBOARD_SYSTEMD_BUS_SOCKET: /run/dbus/system_bus_socket
-      DASHBOARD_STORAGE_MOUNTS: "Root filesystem:/host/root,MicroSD:/mnt/storage/microsd,portable_beast:/mnt/storage/portable_beast,toshiba_ext:/mnt/storage/toshiba_ext,pelican_backup:/mnt/storage/pelican_backup,raven_nvme:/mnt/storage/raven_nvme,roost_spinning_0:/mnt/storage/roost_spinning_0"
     restart: unless-stopped

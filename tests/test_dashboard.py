@@ -21,8 +21,10 @@ from parsers import (  # noqa: E402
     parse_container_names,
     parse_df_human,
     parse_docker_ps_format,
+    parse_findmnt_line,
     parse_free_human,
     parse_loadavg,
+    parse_mountinfo,
     parse_systemctl_failed,
     pick_lan_ipv4,
 )
@@ -103,6 +105,22 @@ class TestParsers:
     def test_pick_lan_ipv4(self):
         assert pick_lan_ipv4(SAMPLE_IP) == "192.168.1.143"
 
+    def test_parse_mountinfo(self):
+        text = (
+            "24 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+            "36 24 179:1 / /mnt/storage/microsd rw,relatime shared:2 - ext4 /dev/mmcblk0p1 rw\n"
+        )
+        mounts = parse_mountinfo(text)
+        assert mounts["/"] == ("/dev/sda2", "ext4")
+        assert mounts["/mnt/storage/microsd"] == ("/dev/mmcblk0p1", "ext4")
+
+    def test_parse_findmnt_line(self):
+        assert parse_findmnt_line("/dev/mmcblk0p1 ext4 ff481ad2-e9bd-4868-8c8c-6729a461e4b4") == (
+            "/dev/mmcblk0p1",
+            "ext4",
+            "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+        )
+
 
 class TestDashboardHTTP:
     @pytest.fixture
@@ -169,77 +187,11 @@ class TestDefensiveReaders:
 
 
 class TestStorageResilience:
-    def test_missing_optional_drive_paths_do_not_raise(self, tmp_path, monkeypatch):
-        host_root = tmp_path / "host_root"
-        host_root.mkdir()
-        missing_drive = tmp_path / "toshiba_ext"
-        host_proc = tmp_path / "proc"
-        host_proc.mkdir()
-        (host_proc / "mounts").write_text(
-            f"/dev/mmcblk0p2 {host_root} ext4 rw 0 0\n",
-            encoding="utf-8",
-        )
-        df_out = (
-            "Filesystem      Size  Used Avail Use% Mounted on\n"
-            f"/dev/mmcblk0p2   58G   18G   38G  32% {host_root}\n"
-        )
-        monkeypatch.setenv(
-            "DASHBOARD_STORAGE_MOUNTS",
-            f"Root filesystem:{host_root},toshiba_ext:{missing_drive}",
-        )
-        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
-
-        with patch("host_status.run_command", return_value=(True, df_out)):
-            mounts = get_storage_status()
-
-        by_label = {m.label: m for m in mounts}
-        assert by_label["Root filesystem"].status == "OK"
-        assert by_label["toshiba_ext"].status == "MISSING"
-        assert by_label["toshiba_ext"].warning is not None
-        assert "Optional" in by_label["toshiba_ext"].warning
-
-    def test_unmounted_optional_path_is_warning_not_error(self, tmp_path, monkeypatch):
-        host_proc = tmp_path / "proc"
-        host_proc.mkdir()
-        (host_proc / "mounts").write_text(
-            "/dev/mmcblk0p2 /host/root ext4 rw 0 0\n",
-            encoding="utf-8",
-        )
-        storage_root = tmp_path / "mnt" / "storage"
-        beast = storage_root / "portable_beast"
-        beast.mkdir(parents=True)
-
-        monkeypatch.setenv(
-            "DASHBOARD_STORAGE_MOUNTS",
-            "Root filesystem:/host/root,portable_beast:" + str(beast),
-        )
-        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
-
-        with patch("host_status.run_command", return_value=(True, "")):
-            mounts = get_storage_status()
-
-        beast_mount = next(m for m in mounts if m.label == "portable_beast")
-        assert beast_mount.exists is True
-        assert beast_mount.mounted is False
-        assert beast_mount.status == "NOT_MOUNTED"
-        assert beast_mount.warning is not None
-
-    def test_get_storage_status_never_raises_when_df_fails(self, tmp_path, monkeypatch):
-        host_root = tmp_path / "root"
-        host_root.mkdir()
-        host_proc = tmp_path / "proc"
-        host_proc.mkdir()
-        (host_proc / "mounts").write_text(
-            f"/dev/root {host_root} ext4 rw 0 0\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("DASHBOARD_STORAGE_MOUNTS", f"Root filesystem:{host_root}")
-        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
-        with patch("host_status.run_command", return_value=(False, "df failed")):
+    def test_get_storage_status_never_raises_on_probe_failure(self):
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
             mounts = get_storage_status()
         assert mounts
-        assert mounts[0].status == "ERROR"
-        assert all(m.status in ("OK", "MISSING", "NOT_MOUNTED", "ERROR") for m in mounts)
+        assert all(m.status == "ERROR" for m in mounts)
 
 
 class TestDockerComposeStorageMounts:

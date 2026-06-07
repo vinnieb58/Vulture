@@ -11,10 +11,8 @@ from typing import Any
 
 from parsers import (
     ContainerRow,
-    DiskEntry,
     MemoryInfo,
     parse_container_names,
-    parse_df_human,
     parse_docker_ps_format,
     parse_free_human,
     parse_loadavg,
@@ -29,25 +27,11 @@ from host_commands import (
     systemctl_is_enabled,
     systemctl_unit_exists,
 )
+from storage_probe import StorageStatus, get_storage_status, status_display_class
 from subprocess_util import run_command
 
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
 HOST_PROC = Path(os.environ.get("DASHBOARD_HOST_PROC", "/host/proc"))
-
-OPTIONAL_STORAGE_MOUNTS: tuple[tuple[str, str], ...] = (
-    ("portable_beast", "/mnt/storage/portable_beast"),
-    ("toshiba_ext", "/mnt/storage/toshiba_ext"),
-    ("pelican_backup", "/mnt/storage/pelican_backup"),
-    ("raven_nvme", "/mnt/storage/raven_nvme"),
-    ("roost_spinning_0", "/mnt/storage/roost_spinning_0"),
-)
-
-REQUIRED_STORAGE_LABELS: frozenset[str] = frozenset({"Root filesystem", "MicroSD"})
-
-DEFAULT_STORAGE_MOUNTS: tuple[tuple[str, str], ...] = (
-    ("Root filesystem", str(HOST_ROOT)),
-    ("MicroSD", "/mnt/storage/microsd"),
-) + OPTIONAL_STORAGE_MOUNTS
 
 SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("SSH", ("ssh.service", "ssh.socket", "sshd.service")),
@@ -58,6 +42,19 @@ SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")),
 )
 
+__all__ = [
+    "DockerSnapshot",
+    "HOST_PROC",
+    "HOST_ROOT",
+    "ServiceStatus",
+    "StorageStatus",
+    "get_docker_snapshot",
+    "get_raven_health",
+    "get_service_statuses",
+    "get_storage_status",
+    "status_display_class",
+]
+
 
 @dataclass
 class ServiceStatus:
@@ -65,21 +62,6 @@ class ServiceStatus:
     unit: str | None
     active: str
     enabled: str
-    warning: str | None = None
-
-
-@dataclass
-class StorageStatus:
-    label: str
-    path: str
-    exists: bool
-    mounted: bool
-    status: str  # OK | MISSING | NOT_MOUNTED | ERROR
-    filesystem: str | None = None
-    size: str | None = None
-    used: str | None = None
-    available: str | None = None
-    percent_used: float | None = None
     warning: str | None = None
 
 
@@ -272,132 +254,6 @@ def _check_service(label: str, candidates: tuple[str, ...]) -> ServiceStatus:
         enabled=enabled,
         warning=warning,
     )
-
-
-def _storage_mounts() -> list[tuple[str, str]]:
-    raw = os.environ.get("DASHBOARD_STORAGE_MOUNTS", "").strip()
-    if not raw:
-        return list(DEFAULT_STORAGE_MOUNTS)
-    mounts: list[tuple[str, str]] = []
-    for part in raw.split(","):
-        piece = part.strip()
-        if not piece:
-            continue
-        if ":" in piece:
-            label, path = piece.split(":", 1)
-            mounts.append((label.strip(), path.strip()))
-        else:
-            mounts.append((piece, piece))
-    return mounts or list(DEFAULT_STORAGE_MOUNTS)
-
-
-def _proc_mount_entry(path: str) -> tuple[str, str] | None:
-    """Return (source/device, fstype) for a mount point from host /proc/mounts."""
-    mounts_file = HOST_PROC / "mounts"
-    if not mounts_file.is_file():
-        return None
-    normalized = path.rstrip("/") or "/"
-    try:
-        for line in mounts_file.read_text(encoding="utf-8").splitlines():
-            parts = line.split()
-            if len(parts) >= 3 and parts[1].rstrip("/") == normalized:
-                return parts[0], parts[2]
-    except OSError:
-        return None
-    return None
-
-
-def _path_is_mounted(path: str) -> bool:
-    return _proc_mount_entry(path) is not None
-
-
-def _storage_warning(
-    *,
-    label: str,
-    status: str,
-    required: bool,
-    percent_used: float | None,
-) -> str | None:
-    if status == "MISSING":
-        if required:
-            return "Required mount path missing on host"
-        return "Optional drive not available (unplugged or mountpoint missing)"
-    if status == "NOT_MOUNTED":
-        if required:
-            return "Required drive path exists but is not mounted"
-        return "Optional drive not mounted (may be unplugged)"
-    if status == "ERROR":
-        return "Could not read disk usage for mount"
-    if percent_used is not None and percent_used >= 90:
-        return f"Disk usage high ({percent_used:.0f}%)"
-    return None
-
-
-def get_storage_status() -> list[StorageStatus]:
-    """Report storage health; missing optional drives are warnings, never failures."""
-    mounts = _storage_mounts()
-    existing_paths = [path for _, path in mounts if Path(path).exists()]
-    entries_by_mount: dict[str, DiskEntry] = {}
-    if existing_paths:
-        ok, out = run_command(["df", "-h", *existing_paths], timeout=10.0)
-        if ok:
-            entries_by_mount = {e.mount: e for e in parse_df_human(out)}
-
-    result: list[StorageStatus] = []
-    for label, path in mounts:
-        mount_path = Path(path)
-        exists = mount_path.exists()
-        proc_entry = _proc_mount_entry(path) if exists else None
-        mounted = proc_entry is not None
-        required = label in REQUIRED_STORAGE_LABELS
-
-        entry: DiskEntry | None = entries_by_mount.get(path)
-        if entry is None and mounted:
-            for candidate in entries_by_mount.values():
-                if candidate.mount == path:
-                    entry = candidate
-                    break
-
-        if not exists:
-            status = "MISSING"
-        elif not mounted:
-            status = "NOT_MOUNTED"
-        elif entry is not None:
-            status = "OK"
-        elif mounted:
-            status = "ERROR"
-        else:
-            status = "ERROR"
-
-        source, fstype = proc_entry if proc_entry else (None, None)
-        filesystem = entry.filesystem if entry else source
-        if filesystem is None and fstype:
-            filesystem = fstype
-
-        percent_used = entry.percent_used if entry else None
-        warning = _storage_warning(
-            label=label,
-            status=status,
-            required=required,
-            percent_used=percent_used,
-        )
-
-        result.append(
-            StorageStatus(
-                label=label,
-                path=path,
-                exists=exists,
-                mounted=mounted,
-                status=status,
-                filesystem=filesystem,
-                size=entry.size if entry else None,
-                used=entry.used if entry else None,
-                available=entry.available if entry else None,
-                percent_used=percent_used,
-                warning=warning,
-            )
-        )
-    return result
 
 
 def get_docker_snapshot() -> DockerSnapshot:
