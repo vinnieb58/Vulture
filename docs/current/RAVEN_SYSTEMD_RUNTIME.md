@@ -54,7 +54,7 @@ Quick deploy but intentionally run one scheduler cycle after update:
 3. Python compile check (syntax only)
 4. Install/update systemd units from `deploy/systemd/`
 5. Restart `vulture-bot.service` and `vulture-scheduler.timer` (when present)
-6. Rebuild/restart dashboard Docker (`docker-compose.dashboard.yml`) when present
+6. Rebuild/restart Docker compose stacks via `scripts/rebuild_docker.sh`
 7. Print final status (git, bot, timer, scheduler worker, dashboard)
 
 It does **not** run `validate_step1.py`, `main.py`, adapter validation, or destructive cleanup.
@@ -62,12 +62,41 @@ It does **not** run `validate_step1.py`, `main.py`, adapter validation, or destr
 Optional flags:
 
 ```bash
-./scripts/update_raven_quick.sh --no-docker     # skip dashboard rebuild/restart
+./scripts/update_raven_quick.sh --no-docker     # skip Docker stack rebuild/restart
 ./scripts/update_raven_quick.sh --no-services # skip systemd install/restarts
 ./scripts/update_raven_quick.sh --help
 ```
 
 `vulture-scheduler.service` is a one-shot worker when using the timer model. It stays inactive between timer triggers; that is normal. The quick script only starts it when you pass `--run-once`.
+
+### Docker-only rebuild
+
+Use this when you only need to rebuild/restart compose stacks (no git pull, no systemd, no hunt):
+
+```bash
+./scripts/rebuild_docker.sh
+```
+
+Rebuild one stack:
+
+```bash
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
+```
+
+Restart without rebuilding images:
+
+```bash
+./scripts/rebuild_docker.sh --no-build
+```
+
+By default, `rebuild_docker.sh` rebuilds every `docker-compose*.yml` file in the repo root. Add new stacks by dropping in another compose file; optional HTTP health probes are configured in the script's `STACK_HEALTH_URLS` map.
+
+Pair with full deploy when dashboard (or other container) code changed but you already ran the heavy validation path:
+
+```bash
+bash scripts/update_raven.sh
+./scripts/rebuild_docker.sh
+```
 
 ### Full deploy (validation + immediate hunt cycle)
 

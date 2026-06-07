@@ -26,6 +26,18 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 From the Vulture repo root on Raven:
 
 ```bash
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
+```
+
+Rebuild all compose stacks in the repo (currently just the dashboard):
+
+```bash
+./scripts/rebuild_docker.sh
+```
+
+Lower-level equivalent:
+
+```bash
 docker compose -f docker-compose.dashboard.yml up -d --build
 ```
 

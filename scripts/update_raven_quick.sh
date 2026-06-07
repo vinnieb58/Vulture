@@ -2,7 +2,10 @@
 # update_raven_quick.sh
 #
 # Fast Raven deploy: pull code, sync deps, refresh systemd units, restart bot/timer,
-# and rebuild the dashboard container — without running a full hunt cycle.
+# and rebuild Docker compose stacks — without running a full hunt cycle.
+#
+# For Docker-only rebuilds (no git/systemd), use:
+#   scripts/rebuild_docker.sh
 #
 # For full validation (validate_step1.py + one immediate main.py cycle), use:
 #   scripts/update_raven.sh
@@ -12,7 +15,7 @@
 #   ./scripts/update_raven_quick.sh
 #
 #   ./scripts/update_raven_quick.sh --run-once    # quick deploy + one scheduler cycle
-#   ./scripts/update_raven_quick.sh --no-docker   # skip dashboard rebuild/restart
+#   ./scripts/update_raven_quick.sh --no-docker   # skip Docker stack rebuild/restart
 #   ./scripts/update_raven_quick.sh --no-services # skip systemd restarts
 #   ./scripts/update_raven_quick.sh --help
 #
@@ -37,7 +40,8 @@ RUN_ONCE=0
 
 PIP="${APP_DIR}/.venv/bin/pip"
 PYTHON_BIN="${APP_DIR}/${PYTHON}"
-COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
+REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
+DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
 
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
@@ -50,7 +54,7 @@ Usage: update_raven_quick.sh [OPTIONS]
 Fast Raven deploy without an immediate full hunt cycle.
 
 Options:
-  --no-docker    Skip dashboard Docker rebuild/restart
+  --no-docker    Skip Docker stack rebuild/restart
   --no-services  Skip systemd unit install and service restarts
   --run-once     After deploy, run one scheduler cycle via:
                  systemctl start vulture-scheduler.service
@@ -187,21 +191,20 @@ run_scheduler_once() {
     echo "  Started: ${VULTURE_SCHEDULER_SERVICE}"
 }
 
-restart_dashboard_docker() {
-    section "Rebuilding/restarting dashboard Docker"
-
-    if [[ ! -f "$COMPOSE_FILE" ]]; then
-        echo "  Skipped: ${COMPOSE_FILE} not found"
-        return 0
-    fi
+rebuild_docker_stacks() {
+    section "Rebuilding Docker stacks"
 
     if ! command -v docker &>/dev/null; then
-        echo "  WARNING: docker not found; skipping dashboard restart"
+        echo "  WARNING: docker not found; skipping stack rebuild"
         return 0
     fi
 
-    docker compose -f "$COMPOSE_FILE" up -d --build
-    echo "  Dashboard compose up complete"
+    if [[ ! -x "$REBUILD_DOCKER_SCRIPT" ]]; then
+        echo "  ERROR: rebuild helper not found or not executable: ${REBUILD_DOCKER_SCRIPT}"
+        exit 1
+    fi
+
+    "$REBUILD_DOCKER_SCRIPT"
 }
 
 show_final_status() {
@@ -220,11 +223,13 @@ show_final_status() {
     systemctl list-timers --all 2>/dev/null | grep -E 'vulture|NEXT|UNIT' || echo "  (no vulture timers listed)"
 
     echo ""
-    echo "  dashboard container:"
-    if command -v docker &>/dev/null && [[ -f "$COMPOSE_FILE" ]]; then
-        docker compose -f "$COMPOSE_FILE" ps 2>&1 || echo "  (docker compose ps failed)"
+    echo "  docker stacks:"
+    if command -v docker &>/dev/null && [[ -f "$DASHBOARD_COMPOSE_FILE" ]]; then
+        docker compose -f "$DASHBOARD_COMPOSE_FILE" ps 2>&1 || echo "  (docker compose ps failed)"
+    elif command -v docker &>/dev/null; then
+        docker ps 2>&1 || echo "  (docker ps failed)"
     else
-        echo "  Skipped (docker or compose file unavailable)"
+        echo "  Skipped (docker unavailable)"
     fi
 
     echo ""
@@ -329,9 +334,9 @@ main() {
     fi
 
     if [[ $SKIP_DOCKER -eq 0 ]]; then
-        restart_dashboard_docker
+        rebuild_docker_stacks
     else
-        section "Skipping dashboard Docker (--no-docker)"
+        section "Skipping Docker rebuild (--no-docker)"
     fi
 
     show_final_status
