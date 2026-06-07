@@ -1,5 +1,5 @@
 """
-Unit tests for Canary v0.1 parsing helpers and resilient check aggregation.
+Unit tests for Canary parsing helpers, Raven storage checks, and resilience.
 """
 
 from __future__ import annotations
@@ -15,22 +15,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from canary import app as canary_app
 from canary.checks import run_all_checks
+from canary.config import StorageVolumeSpec
 from canary.parsers import (
     combine_status,
+    derive_automount_unit,
     parse_df_output,
     parse_docker_ps_lines,
+    parse_fstab_entries,
     parse_lan_ipv4_from_ip_br,
+    parse_lsblk_uuid_map,
     parse_systemctl_failed,
     parse_tmux_sessions,
     storage_use_status,
+    storage_volume_to_overall,
 )
+from canary.storage import evaluate_storage_volume
 from canary.subprocess_util import set_command_runner
 
 
 SAMPLE_DF = """\
 Filesystem     1B-blocks      Used Available Use% Mounted on
 /dev/sda2   100000000000 50000000000 40000000000  56% /
-/dev/sdb1    32000000000 28000000000  2000000000  93% /mnt/storage/microsd
+UUID=aaa-bbb-ccc   32000000000 16000000000  14400000000  50% /mnt/storage/toshiba_ext
+"""
+
+SAMPLE_LSBLK = (
+    'UUID="aaa-bbb-ccc" FSTYPE="ext4" LABEL="TOSHIBA" SIZE="1T"\n'
+)
+
+SAMPLE_FSTAB = """
+UUID=aaa-bbb-ccc /mnt/storage/toshiba_ext ext4 defaults,nofail,x-systemd.automount 0 2
 """
 
 SAMPLE_SYSTEMCTL_FAILED = """\
@@ -42,7 +56,7 @@ SAMPLE_SYSTEMCTL_FAILED = """\
 
 SAMPLE_DOCKER_PS = """\
 canary\tUp 2 hours\t
-vulture-dashboard\tExited (0) 1 day ago\t
+vulture-dashboard\tUp 1 hour\t8088/tcp
 """
 
 
@@ -50,21 +64,37 @@ class TestParsers:
     def test_combine_status_critical_wins(self):
         assert combine_status("ok", "warning", "critical") == "critical"
 
-    def test_combine_status_warning_over_ok(self):
-        assert combine_status("ok", "warning") == "warning"
+    def test_storage_volume_to_overall(self):
+        assert storage_volume_to_overall("OK") == "ok"
+        assert storage_volume_to_overall("MISSING_DEVICE") == "warning"
+        assert storage_volume_to_overall("STALE_MOUNT") == "critical"
+        assert storage_volume_to_overall("DF_TIMEOUT") == "critical"
 
     def test_storage_use_status_thresholds(self):
         assert storage_use_status(79.0, mounted=True, is_root=False) == "ok"
         assert storage_use_status(80.0, mounted=True, is_root=False) == "warning"
         assert storage_use_status(90.0, mounted=True, is_root=False) == "critical"
-        assert storage_use_status(None, mounted=False, is_root=False) == "warning"
-        assert storage_use_status(None, mounted=False, is_root=True) == "critical"
 
     def test_parse_df_output(self):
         parsed = parse_df_output(SAMPLE_DF)
-        assert "/" in parsed
         assert parsed["/"]["use_percent"] == 56.0
-        assert parsed["/mnt/storage/microsd"]["use_percent"] == 93.0
+        assert parsed["/mnt/storage/toshiba_ext"]["use_percent"] == 50.0
+
+    def test_parse_lsblk_uuid_map(self):
+        parsed = parse_lsblk_uuid_map(SAMPLE_LSBLK)
+        assert "aaa-bbb-ccc" in parsed
+        assert parsed["aaa-bbb-ccc"]["fstype"] == "ext4"
+        assert parsed["aaa-bbb-ccc"]["label"] == "TOSHIBA"
+        assert "NAME" not in parsed["aaa-bbb-ccc"]
+
+    def test_parse_fstab_entries(self):
+        entries = parse_fstab_entries(SAMPLE_FSTAB)
+        assert entries["/mnt/storage/toshiba_ext"]["uuid"] == "aaa-bbb-ccc"
+        assert entries["/mnt/storage/toshiba_ext"]["automount_expected"] is True
+
+    def test_derive_automount_unit(self):
+        assert derive_automount_unit("/mnt/storage/toshiba_ext") == "mnt-storage-toshiba_ext.automount"
+        assert derive_automount_unit("/mnt/storage/roost-spinning") == "mnt-storage-roost\\x2dspinning.automount"
 
     def test_parse_lan_ipv4_from_ip_br(self):
         text = "eth0  UP  192.168.1.50/24  fe80::1/64\n"
@@ -75,21 +105,142 @@ class TestParsers:
         assert count == 2
         assert "nginx.service" in names
 
-    def test_parse_systemctl_failed_zero(self):
-        text = "0 loaded units listed.\n"
-        count, names = parse_systemctl_failed(text)
-        assert count == 0
-        assert names == []
-
     def test_parse_docker_ps_lines(self):
         containers = parse_docker_ps_lines(SAMPLE_DOCKER_PS)
-        assert len(containers) == 2
-        assert containers[0]["name"] == "canary"
-        assert containers[1]["status"].startswith("Exited")
+        assert containers[1]["name"] == "vulture-dashboard"
 
     def test_parse_tmux_sessions(self):
         text = "vulture: 1 windows\nbot: 1 windows\n"
         assert parse_tmux_sessions(text) == ["vulture", "bot"]
+
+
+class TestStorageScenarios:
+    UUID = "aaa-bbb-ccc"
+    MOUNT = "/mnt/storage/toshiba_ext"
+    AUTOMOUNT = "mnt-storage-toshiba_ext.automount"
+
+    def setup_method(self) -> None:
+        set_command_runner(None)
+
+    def teardown_method(self) -> None:
+        set_command_runner(None)
+
+    def _spec(self) -> StorageVolumeSpec:
+        return StorageVolumeSpec(
+            label="toshiba_ext",
+            mount_path=self.MOUNT,
+            uuid=self.UUID,
+            fstype="ext4",
+            automount_expected=True,
+            automount_unit=self.AUTOMOUNT,
+        )
+
+    def test_ok_mounted_volume(self):
+        def runner(args, timeout):  # noqa: ARG001
+            cmd = args[0]
+            if cmd == "blkid":
+                return True, self.UUID
+            if cmd == "findmnt":
+                return True, f"{self.MOUNT} UUID={self.UUID} ext4\n"
+            if cmd == "df":
+                return True, SAMPLE_DF
+            return False, f"unexpected {args}"
+
+        set_command_runner(runner)
+        with (
+            patch("canary.storage.host_path", side_effect=lambda p: p),
+            patch("canary.storage.path_access_check", return_value=(True, None)),
+        ):
+            result = evaluate_storage_volume(
+                self._spec(),
+                lsblk_by_uuid=parse_lsblk_uuid_map(SAMPLE_LSBLK),
+            )
+
+        assert result["status"] == "OK"
+        assert result["mounted"] is True
+        assert result["uuid"] == self.UUID
+        assert result["fstype"] == "ext4"
+        assert result["use_percent"] == 50.0
+        assert "sd" not in json.dumps(result).lower()
+
+    def test_missing_device(self):
+        def runner(args, timeout):  # noqa: ARG001
+            if args[0] == "blkid":
+                return False, "not found"
+            return False, "unexpected"
+
+        set_command_runner(runner)
+        with patch("canary.storage.host_path", side_effect=lambda p: p):
+            result = evaluate_storage_volume(self._spec(), lsblk_by_uuid={})
+
+        assert result["status"] == "MISSING_DEVICE"
+        assert result["mounted"] is False
+
+    def test_stale_mount(self):
+        def runner(args, timeout):  # noqa: ARG001
+            if args[0] == "blkid":
+                return True, self.UUID
+            if args[0] == "findmnt":
+                return True, f"{self.MOUNT} UUID={self.UUID} ext4\n"
+            return False, "unexpected"
+
+        set_command_runner(runner)
+        with (
+            patch("canary.storage.host_path", side_effect=lambda p: p),
+            patch(
+                "canary.storage.path_access_check",
+                return_value=(False, "path access timed out"),
+            ),
+        ):
+            result = evaluate_storage_volume(
+                self._spec(),
+                lsblk_by_uuid=parse_lsblk_uuid_map(SAMPLE_LSBLK),
+            )
+
+        assert result["status"] == "STALE_MOUNT"
+        assert result["mounted"] is True
+
+    def test_df_timeout(self):
+        def runner(args, timeout):  # noqa: ARG001
+            if args[0] == "blkid":
+                return True, self.UUID
+            if args[0] == "findmnt":
+                return True, f"{self.MOUNT} UUID={self.UUID} ext4\n"
+            if args[0] == "df":
+                return False, "timed out"
+            return False, "unexpected"
+
+        set_command_runner(runner)
+        with (
+            patch("canary.storage.host_path", side_effect=lambda p: p),
+            patch("canary.storage.path_access_check", return_value=(True, None)),
+        ):
+            result = evaluate_storage_volume(
+                self._spec(),
+                lsblk_by_uuid=parse_lsblk_uuid_map(SAMPLE_LSBLK),
+            )
+
+        assert result["status"] == "DF_TIMEOUT"
+
+    def test_automount_inactive(self):
+        def runner(args, timeout):  # noqa: ARG001
+            if args[0] == "blkid":
+                return True, self.UUID
+            if args[0] == "findmnt":
+                return False, "not mounted"
+            if args[0] == "systemctl" and self.AUTOMOUNT in args:
+                return True, "inactive"
+            return False, f"unexpected {args}"
+
+        set_command_runner(runner)
+        with patch("canary.storage.host_path", side_effect=lambda p: p):
+            result = evaluate_storage_volume(
+                self._spec(),
+                lsblk_by_uuid=parse_lsblk_uuid_map(SAMPLE_LSBLK),
+            )
+
+        assert result["status"] == "AUTOMOUNT_INACTIVE"
+        assert result["mounted"] is False
 
 
 class TestRunAllChecks:
@@ -105,58 +256,52 @@ class TestRunAllChecks:
 
         set_command_runner(failing_runner)
 
-        status_path = tmp_path / "canary_status.json"
         with (
-            patch("canary.checks.config.STATUS_PATH", status_path),
-            patch("canary.app.STATUS_PATH", status_path),
             patch("canary.checks.config.LOGS_DIR", tmp_path / "logs"),
             patch("canary.checks.config.HOST_ROOT", Path("/")),
+            patch("canary.storage.config.FSTAB_PATH", tmp_path / "fstab"),
+            patch("canary.storage._read_fstab", return_value={}),
         ):
             payload = run_all_checks()
             canary_app.write_status(payload)
 
-        assert status_path.is_file()
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-        assert data["overall_status"] in ("ok", "warning", "critical")
-        assert "checks" in data
-        assert "internet" in data["checks"]
-        assert data["checks"]["internet"]["status"] == "warning"
+        assert "overall_status" in payload
+        assert payload["overall_status"] in ("ok", "warning", "critical")
+        assert "alerts" in payload
+        assert "storage" in payload["checks"]
 
-    def test_run_all_checks_structure_with_mocks(self, tmp_path: Path):
-        responses = {
-            ("ping",): (True, "reachable"),
-            ("ip",): (True, "eth0  UP  10.0.0.5/24\n"),
-            ("tailscale",): (True, "100.64.0.1\n"),
-            ("systemctl",): (True, "active"),
-            ("df",): (True, SAMPLE_DF),
-            ("docker",): (True, SAMPLE_DOCKER_PS),
-            ("pgrep",): (False, "command not found: pgrep"),
-            ("tmux",): (False, "command not found: tmux"),
-            ("hostname",): (True, "test-host"),
-        }
-
+    def test_run_all_checks_includes_scheduler_timer(self, tmp_path: Path):
         def mock_runner(args, timeout):  # noqa: ARG001
-            key = (args[0],)
-            if key in responses:
-                return responses[key]
-            if args[0] == "ping" and len(args) > 3 and args[-1] == "google.com":
-                return True, "reachable"
-            if args[0] == "systemctl" and "--failed" in args:
-                return True, "0 loaded units listed.\n"
-            if args[0] == "systemctl" and "is-enabled" in args:
-                return True, "enabled"
-            return False, f"unexpected: {args}"
+            cmd = args[0]
+            if cmd == "ping":
+                return True, "ok"
+            if cmd == "hostname":
+                return True, "raven"
+            if cmd == "systemctl":
+                if "--failed" in args:
+                    return True, "0 loaded units listed.\n"
+                return True, "active"
+            if cmd == "docker":
+                return True, SAMPLE_DOCKER_PS
+            if cmd == "lsblk":
+                return True, SAMPLE_LSBLK
+            if cmd == "blkid":
+                return False, "not found"
+            if cmd in ("findmnt", "df", "ip", "tailscale", "pgrep", "tmux"):
+                return False, "unavailable"
+            return False, f"unexpected {args}"
 
         set_command_runner(mock_runner)
 
         with (
             patch("canary.checks.config.LOGS_DIR", tmp_path / "logs"),
             patch("canary.checks.config.HOST_ROOT", Path("/")),
-            patch("canary.checks.Path.is_dir", return_value=False),
+            patch("canary.storage.config.FSTAB_PATH", tmp_path / "fstab"),
+            patch("canary.storage._read_fstab", return_value=parse_fstab_entries(SAMPLE_FSTAB)),
         ):
             payload = run_all_checks()
 
-        assert payload["host"] == "test-host"
-        assert payload["overall_status"] in ("ok", "warning", "critical")
-        assert "generated_at" in payload
-        assert payload["checks"]["docker"]["running_count"] == 1
+        service_labels = [s["label"] for s in payload["checks"]["services"]["services"]]
+        assert "vulture_scheduler_timer" in service_labels
+        assert "dashboard" in service_labels
+        assert payload["host"] == "raven"

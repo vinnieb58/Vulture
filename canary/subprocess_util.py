@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable, Sequence
+
 from canary.config import DEFAULT_SUBPROCESS_TIMEOUT
 
 CommandRunner = Callable[[Sequence[str], float], tuple[bool, str]]
@@ -17,6 +18,13 @@ def set_command_runner(runner: CommandRunner | None) -> None:
     """Replace subprocess execution (used by unit tests)."""
     global _runner
     _runner = runner
+
+
+def is_timeout(message: str | None) -> bool:
+    if not message:
+        return False
+    lowered = message.lower()
+    return "timed out" in lowered or lowered == "timeout"
 
 
 def default_run_command(

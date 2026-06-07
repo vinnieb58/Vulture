@@ -1,5 +1,5 @@
 """
-Read-only Raven health checks for Canary v0.1.
+Read-only Raven health checks for Canary.
 """
 
 from __future__ import annotations
@@ -13,40 +13,33 @@ from zoneinfo import ZoneInfo
 from canary import config
 from canary.parsers import (
     combine_status,
-    parse_df_output,
     parse_docker_ps_lines,
     parse_lan_ipv4_from_ip_br,
     parse_systemctl_failed,
     parse_tmux_sessions,
-    storage_use_status,
 )
-from canary.subprocess_util import run_command
-
-
-def host_path(path: str) -> str:
-    """Map a host path when CANARY_HOST_ROOT is used (Docker on Raven)."""
-    if config.HOST_ROOT == Path("/"):
-        return path
-    if path == "/":
-        return str(config.HOST_ROOT)
-    return str(config.HOST_ROOT / path.lstrip("/"))
+from canary.storage import check_raven_storage, host_path
+from canary.subprocess_util import is_timeout, run_command
 
 
 def check_internet() -> dict[str, Any]:
     result: dict[str, Any] = {"status": "ok", "ping_1_1_1_1": {}, "dns_google": {}}
 
-    ok, out = run_command(["ping", "-c", "1", "-W", "3", "1.1.1.1"], timeout=8.0)
+    ok, out = run_command(["ping", "-c", "1", "-W", "3", "1.1.1.1"], timeout=config.TIMEOUT_PING)
     result["ping_1_1_1_1"] = {
         "ok": ok,
-        "detail": out if not ok else "reachable",
+        "detail": "timed out" if is_timeout(out) else (out if not ok else "reachable"),
     }
     if not ok:
-        result["status"] = "warning"
+        result["status"] = "critical" if is_timeout(out) else "warning"
 
-    ok_dns, out_dns = run_command(["ping", "-c", "1", "-W", "5", "google.com"], timeout=10.0)
+    ok_dns, out_dns = run_command(
+        ["ping", "-c", "1", "-W", "5", "google.com"],
+        timeout=config.TIMEOUT_PING + 2,
+    )
     result["dns_google"] = {
         "ok": ok_dns,
-        "detail": out_dns if not ok_dns else "reachable",
+        "detail": "timed out" if is_timeout(out_dns) else (out_dns if not ok_dns else "reachable"),
         "optional": True,
     }
     if not ok_dns and result["status"] == "ok":
@@ -63,7 +56,7 @@ def check_network() -> dict[str, Any]:
         "detail": {},
     }
 
-    ok, out = run_command(["ip", "-br", "addr"])
+    ok, out = run_command(["ip", "-br", "addr"], timeout=config.DEFAULT_SUBPROCESS_TIMEOUT)
     if ok:
         result["lan_ipv4"] = parse_lan_ipv4_from_ip_br(out)
         result["detail"]["ip_br_addr"] = out.splitlines()[:8]
@@ -71,7 +64,7 @@ def check_network() -> dict[str, Any]:
         result["detail"]["ip_br_addr_error"] = out
         result["status"] = "warning"
 
-    ok_ts, out_ts = run_command(["tailscale", "ip", "-4"], timeout=8.0)
+    ok_ts, out_ts = run_command(["tailscale", "ip", "-4"], timeout=config.TIMEOUT_PING)
     if ok_ts and out_ts.strip():
         result["tailscale_ipv4"] = out_ts.splitlines()[0].strip()
     else:
@@ -89,7 +82,7 @@ def _normalize_systemctl_value(raw: str, *, ok: bool) -> str:
     lowered = text
     if "not found" in lowered or "could not be found" in lowered:
         return "not-found"
-    if "systemd" in lowered or "bus" in lowered or "timed out" in lowered:
+    if is_timeout(raw) or "systemd" in lowered or "bus" in lowered:
         return "unavailable"
     if text:
         return text.splitlines()[0][:80]
@@ -97,8 +90,14 @@ def _normalize_systemctl_value(raw: str, *, ok: bool) -> str:
 
 
 def _systemctl_unit_state(unit: str) -> dict[str, str]:
-    active_ok, active_out = run_command(["systemctl", "is-active", unit])
-    enabled_ok, enabled_out = run_command(["systemctl", "is-enabled", unit])
+    active_ok, active_out = run_command(
+        ["systemctl", "is-active", unit],
+        timeout=config.TIMEOUT_SYSTEMCTL,
+    )
+    enabled_ok, enabled_out = run_command(
+        ["systemctl", "is-enabled", unit],
+        timeout=config.TIMEOUT_SYSTEMCTL,
+    )
 
     active = _normalize_systemctl_value(active_out, ok=active_ok)
     enabled = _normalize_systemctl_value(enabled_out, ok=enabled_ok)
@@ -112,16 +111,21 @@ def _systemctl_unit_state(unit: str) -> dict[str, str]:
     }
 
 
-def _resolve_ssh_unit() -> list[str]:
-    candidates = ["ssh.service", "ssh.socket", "sshd.service"]
-    for unit in candidates:
-        state = _systemctl_unit_state(unit)
+def _resolve_ssh_unit() -> str:
+    for candidate in ("ssh.service", "ssh.socket", "sshd.service"):
+        state = _systemctl_unit_state(candidate)
         if state["active"] == "active" or state["enabled"] in ("enabled", "static"):
-            return [unit]
-    return ["ssh.service", "ssh.socket"]
+            return candidate
+    return "ssh.service"
 
 
-def _service_entry(label: str, unit: str, *, optional: bool = False) -> dict[str, Any]:
+def _service_entry(
+    label: str,
+    unit: str,
+    *,
+    kind: str = "systemd",
+    optional: bool = False,
+) -> dict[str, Any]:
     state = _systemctl_unit_state(unit)
     if state["active"] == "not-found" or state["enabled"] == "not-found":
         status = "not_configured" if optional else "warning"
@@ -129,11 +133,14 @@ def _service_entry(label: str, unit: str, *, optional: bool = False) -> dict[str
         status = "ok"
     elif state["active"] in ("failed", "inactive", "dead"):
         status = "warning" if optional else "critical"
+    elif state["active"] == "unavailable":
+        status = "warning"
     else:
         status = "warning"
 
     return {
         "label": label,
+        "kind": kind,
         "unit": unit,
         "active": state["active"],
         "enabled": state["enabled"],
@@ -141,27 +148,49 @@ def _service_entry(label: str, unit: str, *, optional: bool = False) -> dict[str
     }
 
 
+def _dashboard_container_entry(containers: list[dict[str, str]]) -> dict[str, Any]:
+    name = config.DASHBOARD_CONTAINER
+    match = next((c for c in containers if c["name"] == name), None)
+    if match is None:
+        return {
+            "label": "dashboard",
+            "kind": "docker_container",
+            "unit": name,
+            "active": "not-found",
+            "enabled": "n/a",
+            "status": "not_configured",
+            "container_status": None,
+        }
+    running = match["status"].lower().startswith("up")
+    return {
+        "label": "dashboard",
+        "kind": "docker_container",
+        "unit": name,
+        "active": "active" if running else "inactive",
+        "enabled": "n/a",
+        "status": "ok" if running else "warning",
+        "container_status": match["status"],
+        "ports": match.get("ports", ""),
+    }
+
+
 def check_services() -> dict[str, Any]:
-    ssh_units = _resolve_ssh_unit()
-    ssh_primary = ssh_units[0]
-    ssh_socket = "ssh.socket" if "ssh.socket" in ssh_units else None
-    if ssh_primary == "ssh.socket":
-        ssh_socket = "ssh.socket"
-
+    ssh_unit = _resolve_ssh_unit()
     entries = [
-        _service_entry("ssh", ssh_primary),
+        _service_entry("ssh", ssh_unit),
+        _service_entry("tailscaled", "tailscaled"),
+        _service_entry("smbd", "smbd"),
+        _service_entry("docker", "docker"),
+        _service_entry("vulture_bot", config.VULTURE_BOT_UNIT, optional=True),
+        _service_entry("vulture_scheduler_timer", config.VULTURE_SCHEDULER_TIMER, optional=True),
     ]
-    if ssh_socket and ssh_socket != ssh_primary:
-        entries.append(_service_entry("ssh_socket", ssh_socket, optional=True))
 
-    for label, unit, optional in (
-        ("tailscaled", "tailscaled", False),
-        ("smbd", "smbd", False),
-        ("docker", "docker", False),
-        ("vulture_bot", config.VULTURE_BOT_UNIT, True),
-        ("vulture_scheduler", config.VULTURE_SCHEDULER_UNIT, True),
-    ):
-        entries.append(_service_entry(label, unit, optional=optional))
+    ok, out = run_command(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"],
+        timeout=config.TIMEOUT_DOCKER,
+    )
+    containers = parse_docker_ps_lines(out) if ok else []
+    entries.append(_dashboard_container_entry(containers))
 
     statuses = [e["status"] for e in entries]
     overall = "ok"
@@ -170,53 +199,35 @@ def check_services() -> dict[str, Any]:
     elif any(s in ("warning", "not_configured") for s in statuses):
         overall = "warning"
 
-    return {"status": overall, "services": entries}
+    alerts = _service_alerts(entries)
+    return {"status": overall, "services": entries, "alerts": alerts}
+
+
+def _service_alerts(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    for entry in entries:
+        status = entry.get("status", "ok")
+        if status == "ok":
+            continue
+        severity = "critical" if status == "critical" else "warning"
+        label = entry.get("label", "service")
+        unit = entry.get("unit", "")
+        active = entry.get("active", "unknown")
+        alerts.append(
+            {
+                "severity": severity,
+                "category": "services",
+                "code": status.upper(),
+                "volume": label,
+                "mount_path": unit,
+                "message": f"{label} ({unit}): {active}",
+            }
+        )
+    return alerts
 
 
 def check_storage() -> dict[str, Any]:
-    paths = [host_path(path) for _, path in config.EXPECTED_STORAGE_MOUNTS]
-    ok, out = run_command(["df", "-P", "-B1", *paths], timeout=15.0)
-    df_data = parse_df_output(out) if ok else {}
-
-    mounts: list[dict[str, Any]] = []
-    statuses: list[str] = []
-
-    for label, logical_path in config.EXPECTED_STORAGE_MOUNTS:
-        resolved = host_path(logical_path)
-        entry = df_data.get(resolved) or df_data.get(logical_path)
-        mounted = entry is not None or Path(resolved).is_dir()
-        is_root = logical_path == "/"
-        pct = entry.get("use_percent") if entry else None
-        status = storage_use_status(pct, mounted=mounted, is_root=is_root)
-        statuses.append(status)
-
-        mount_info: dict[str, Any] = {
-            "label": label,
-            "path": logical_path,
-            "mounted": mounted,
-            "status": status,
-        }
-        if entry:
-            mount_info.update(
-                {
-                    "size": entry["size"],
-                    "used": entry["used"],
-                    "available": entry["available"],
-                    "use_percent": entry["use_percent"],
-                }
-            )
-        else:
-            mount_info.update(
-                {
-                    "size": None,
-                    "used": None,
-                    "available": None,
-                    "use_percent": None,
-                }
-            )
-        mounts.append(mount_info)
-
-    return {"status": combine_status(*statuses), "mounts": mounts}
+    return check_raven_storage()
 
 
 def check_docker() -> dict[str, Any]:
@@ -228,18 +239,41 @@ def check_docker() -> dict[str, Any]:
         "running_count": 0,
         "stopped_count": 0,
         "containers": [],
+        "alerts": [],
     }
 
     if not docker_svc["active_bool"]:
         result["status"] = "critical"
+        result["alerts"].append(
+            {
+                "severity": "critical",
+                "category": "docker",
+                "code": "DAEMON_INACTIVE",
+                "volume": "docker",
+                "mount_path": "docker.service",
+                "message": f"Docker daemon {docker_svc['active']}",
+            }
+        )
 
     ok, out = run_command(
         ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"],
-        timeout=15.0,
+        timeout=config.TIMEOUT_DOCKER,
     )
     if not ok:
         result["detail"] = out
-        if result["status"] == "ok":
+        if is_timeout(out):
+            result["status"] = "critical"
+            result["alerts"].append(
+                {
+                    "severity": "critical",
+                    "category": "docker",
+                    "code": "TIMEOUT",
+                    "volume": "docker",
+                    "mount_path": "docker ps",
+                    "message": "docker ps timed out",
+                }
+            )
+        elif result["status"] == "ok":
             result["status"] = "warning"
         return result
 
@@ -253,13 +287,18 @@ def check_docker() -> dict[str, Any]:
 
 
 def _pgrep_running(pattern: str) -> dict[str, Any]:
-    ok, out = run_command(["pgrep", "-af", pattern], timeout=8.0)
+    ok, out = run_command(["pgrep", "-af", pattern], timeout=config.DEFAULT_SUBPROCESS_TIMEOUT)
     if ok and out.strip():
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
         return {"running": True, "matches": lines[:5], "status": "ok"}
     if not ok and "not found" in out:
         return {"running": False, "matches": [], "status": "warning", "detail": out}
-    return {"running": False, "matches": [], "status": "warning" if not ok else "ok", "detail": out or None}
+    return {
+        "running": False,
+        "matches": [],
+        "status": "warning" if not ok else "ok",
+        "detail": out or None,
+    }
 
 
 def _latest_log_mtime(logs_dir: Path) -> dict[str, Any]:
@@ -311,6 +350,7 @@ def check_vulture_runtime() -> dict[str, Any]:
         tmux["detail"] = out or "tmux unavailable"
 
     log_info = _latest_log_mtime(logs_dir)
+    scheduler_running = scheduler_main.get("running") or scheduler_alt.get("running")
 
     statuses = [
         bot.get("status", "warning"),
@@ -318,7 +358,6 @@ def check_vulture_runtime() -> dict[str, Any]:
         tmux.get("status", "warning"),
         log_info.get("status", "warning"),
     ]
-    scheduler_running = scheduler_main.get("running") or scheduler_alt.get("running")
 
     return {
         "status": combine_status(*statuses),
@@ -332,27 +371,44 @@ def check_vulture_runtime() -> dict[str, Any]:
 
 
 def check_systemd_failed() -> dict[str, Any]:
-    ok, out = run_command(["systemctl", "--failed", "--no-pager"], timeout=15.0)
+    ok, out = run_command(
+        ["systemctl", "--failed", "--no-pager"],
+        timeout=config.TIMEOUT_SYSTEMCTL,
+    )
     if not ok:
         return {
             "status": "warning",
             "count": 0,
             "units": [],
             "detail": out,
+            "alerts": [],
         }
 
     count, names = parse_systemctl_failed(out)
     status = "ok" if count == 0 else "critical"
+    alerts: list[dict[str, str]] = []
+    if count:
+        alerts.append(
+            {
+                "severity": "critical",
+                "category": "systemd_failed",
+                "code": "FAILED_UNITS",
+                "volume": "systemd",
+                "mount_path": "",
+                "message": f"{count} failed systemd unit(s): {', '.join(names[:5])}",
+            }
+        )
     return {
         "status": status,
         "count": count,
         "units": names,
         "raw_excerpt": out.splitlines()[:20],
+        "alerts": alerts,
     }
 
 
 def get_hostname() -> str:
-    ok, out = run_command(["hostname"])
+    ok, out = run_command(["hostname"], timeout=config.DEFAULT_SUBPROCESS_TIMEOUT)
     if ok and out.strip():
         return out.splitlines()[0].strip()
     try:
@@ -362,6 +418,15 @@ def get_hostname() -> str:
     except OSError:
         pass
     return os.uname().nodename
+
+
+def _collect_alerts(checks: dict[str, Any]) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    for section in ("storage", "services", "docker", "systemd_failed"):
+        section_alerts = checks.get(section, {}).get("alerts", [])
+        if isinstance(section_alerts, list):
+            alerts.extend(section_alerts)
+    return alerts
 
 
 def run_all_checks() -> dict[str, Any]:
@@ -374,7 +439,7 @@ def run_all_checks() -> dict[str, Any]:
             return fn()
         except Exception as exc:  # noqa: BLE001 — keep Canary alive
             warnings.append(f"{name}: check error ({exc})")
-            return {"status": "warning", "error": str(exc)}
+            return {"status": "warning", "error": str(exc), "alerts": []}
 
     checks = {
         "internet": _safe("internet", check_internet),
@@ -388,6 +453,8 @@ def run_all_checks() -> dict[str, Any]:
 
     section_statuses = [checks[key].get("status", "warning") for key in checks]
     overall = combine_status(*section_statuses)
+
+    alerts = _collect_alerts(checks)
 
     for key, data in checks.items():
         status = data.get("status", "ok")
@@ -404,6 +471,7 @@ def run_all_checks() -> dict[str, Any]:
         "host": get_hostname(),
         "overall_status": overall,
         "checks": checks,
+        "alerts": alerts,
         "warnings": warnings,
         "critical": critical,
     }
