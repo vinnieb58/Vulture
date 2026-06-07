@@ -39,7 +39,7 @@ SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("smbd", ("smbd.service", "smbd")),
     ("docker", ("docker.service", "docker")),
     ("vulture-bot", ("vulture-bot.service", "vulture-bot")),
-    ("vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")),
+    ("vulture-scheduler", ("vulture-scheduler.timer", "vulture-scheduler.timer")),
 )
 
 __all__ = [

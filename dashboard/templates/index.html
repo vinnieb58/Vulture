@@ -406,13 +406,20 @@
           <div class="card-value small">{{ vulture.log_mtime or '—' }}</div>
         </div>
         <div class="card">
-          <div class="card-label">Scheduler freshness</div>
+          <div class="card-label">Scheduler health</div>
           <div class="card-value small">
-            <span class="pill {% if vulture.scheduler_freshness.status == 'fresh' %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% else %}muted{% endif %}">
+            <span class="pill {% if vulture.scheduler_freshness.status in ('fresh', 'running', 'seen') %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% elif vulture.scheduler_freshness.status == 'unhealthy' %}bad{% else %}muted{% endif %}">
               {{ vulture.scheduler_freshness.status }}
             </span>
           </div>
           <div class="meta" style="margin:0.35rem 0 0;">{{ vulture.scheduler_freshness.detail }}</div>
+          {% if vulture.scheduler_freshness.next_run or vulture.scheduler_freshness.last_success %}
+          <div class="meta" style="margin:0.35rem 0 0;">
+            {% if vulture.scheduler_freshness.next_run %}next: {{ vulture.scheduler_freshness.next_run }}{% endif %}
+            {% if vulture.scheduler_freshness.next_run and vulture.scheduler_freshness.last_success %} · {% endif %}
+            {% if vulture.scheduler_freshness.last_success %}last success: {{ vulture.scheduler_freshness.last_success }}{% endif %}
+          </div>
+          {% endif %}
         </div>
       </div>
       {% if vulture.tmux_sessions %}
