@@ -21,8 +21,10 @@ from parsers import (  # noqa: E402
     parse_container_names,
     parse_df_human,
     parse_docker_ps_format,
+    parse_findmnt_line,
     parse_free_human,
     parse_loadavg,
+    parse_mountinfo,
     parse_systemctl_failed,
     pick_lan_ipv4,
 )
@@ -96,6 +98,22 @@ class TestParsers:
 
     def test_pick_lan_ipv4(self):
         assert pick_lan_ipv4(SAMPLE_IP) == "192.168.1.143"
+
+    def test_parse_mountinfo(self):
+        text = (
+            "24 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+            "36 24 179:1 / /mnt/storage/microsd rw,relatime shared:2 - ext4 /dev/mmcblk0p1 rw\n"
+        )
+        mounts = parse_mountinfo(text)
+        assert mounts["/"] == ("/dev/sda2", "ext4")
+        assert mounts["/mnt/storage/microsd"] == ("/dev/mmcblk0p1", "ext4")
+
+    def test_parse_findmnt_line(self):
+        assert parse_findmnt_line("/dev/mmcblk0p1 ext4 ff481ad2-e9bd-4868-8c8c-6729a461e4b4") == (
+            "/dev/mmcblk0p1",
+            "ext4",
+            "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+        )
 
 
 class TestDashboardHTTP:

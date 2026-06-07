@@ -17,14 +17,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /run/systemd:/run/systemd:ro
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
-      - /mnt/storage/microsd:/mnt/storage/microsd:ro
-      - /mnt/storage/portable_beast:/mnt/storage/portable_beast:ro
-      - /mnt/storage/toshiba_ext:/mnt/storage/toshiba_ext:ro
+      - /mnt/storage:/mnt/storage:ro
     environment:
       VULTURE_DB_PATH: /app/data/vulture.db
       VULTURE_LOG_PATH: /app/logs/vulture.log
       DASHBOARD_HOST_ROOT: /host/root
       DASHBOARD_HOST_PROC: /host/proc
       DASHBOARD_SYSTEMD_BUS_SOCKET: /run/dbus/system_bus_socket
-      DASHBOARD_STORAGE_MOUNTS: "Root filesystem:/host/root,MicroSD:/mnt/storage/microsd,portable_beast:/mnt/storage/portable_beast,toshiba_ext:/mnt/storage/toshiba_ext"
     restart: unless-stopped

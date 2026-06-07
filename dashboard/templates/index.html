@@ -136,6 +136,7 @@
     .stat-value.paused, .warn { color: var(--paused); }
     .stat-value.ended { color: var(--ended); }
     .bad, .missing { color: var(--err-text); }
+    .muted-cell { color: var(--muted); font-size: 0.85rem; max-width: 22rem; }
 
     section {
       background: var(--surface);
@@ -508,28 +509,34 @@
               <th>Mount</th>
               <th>Path</th>
               <th>Status</th>
-              <th>Filesystem</th>
+              <th>Source</th>
               <th>Size</th>
               <th>Used</th>
               <th>Avail</th>
               <th>Use %</th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody>
             {% for mount in storage %}
             <tr>
-              <td>{{ mount.label }}</td>
-              <td><code>{{ mount.path }}</code></td>
-              <td class="{% if mount.mounted %}ok{% else %}missing{% endif %}">
-                {{ 'mounted' if mount.mounted else 'missing' }}
+              <td>
+                {{ mount.label }}
+                {% if mount.legacy %}<span class="badge">legacy</span>{% endif %}
+                {% if not mount.required %}<span class="badge">optional</span>{% endif %}
               </td>
-              <td>{{ mount.filesystem or '—' }}</td>
+              <td><code>{{ mount.path }}</code></td>
+              <td class="{{ mount.display_class }}">
+                {{ mount.status }}
+              </td>
+              <td>{{ mount.actual_source or '—' }}</td>
               <td>{{ mount.size or '—' }}</td>
               <td>{{ mount.used or '—' }}</td>
               <td>{{ mount.available or '—' }}</td>
               <td>
                 {% if mount.percent_used is not none %}{{ '%.0f'|format(mount.percent_used) }}%{% else %}—{% endif %}
               </td>
+              <td class="muted-cell">{{ mount.message or '—' }}</td>
             </tr>
             {% endfor %}
           </tbody>
