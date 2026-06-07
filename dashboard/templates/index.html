@@ -520,8 +520,8 @@
             <tr>
               <td>{{ mount.label }}</td>
               <td><code>{{ mount.path }}</code></td>
-              <td class="{% if mount.mounted %}ok{% else %}missing{% endif %}">
-                {{ 'mounted' if mount.mounted else 'missing' }}
+              <td class="{% if mount.status == 'OK' %}ok{% elif mount.status in ('MISSING', 'NOT_MOUNTED') %}warn{% else %}bad{% endif %}">
+                {{ mount.status }}
               </td>
               <td>{{ mount.filesystem or '—' }}</td>
               <td>{{ mount.size or '—' }}</td>
@@ -531,6 +531,11 @@
                 {% if mount.percent_used is not none %}{{ '%.0f'|format(mount.percent_used) }}%{% else %}—{% endif %}
               </td>
             </tr>
+            {% if mount.warning %}
+            <tr>
+              <td colspan="8" class="warn" style="font-size:0.82rem;">⚠ {{ mount.label }}: {{ mount.warning }}</td>
+            </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
