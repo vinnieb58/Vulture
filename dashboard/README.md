@@ -28,14 +28,32 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 From the Vulture repo root on Raven:
 
 ```bash
-# Ensure stable mountpoint directories exist (drives may be unplugged)
-sudo mkdir -p /mnt/storage/{microsd,toshiba_ext,portable_beast,pelican_backup,raven_nvme,roost_spinning_0}
-
-docker compose -f docker-compose.dashboard.yml up -d --build
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
 ```
 
-`scripts/update_raven.sh` creates these directories and restarts the dashboard
+Rebuild all compose stacks in the repo (currently just the dashboard):
+
+```bash
+./scripts/rebuild_docker.sh
+```
+
+`scripts/rebuild_docker.sh` and `scripts/update_raven_quick.sh` ensure stable
+storage mountpoint directories exist before starting the dashboard container.
+
+Manual prep if needed (drives may be unplugged):
+
+```bash
+sudo mkdir -p /mnt/storage/{microsd,toshiba_ext,portable_beast,pelican_backup,raven_nvme,roost_spinning_0}
+```
+
+`scripts/update_raven.sh` also creates these directories and restarts the dashboard
 automatically (skip with `SKIP_DASHBOARD_RESTART=1`).
+
+Lower-level equivalent:
+
+```bash
+docker compose -f docker-compose.dashboard.yml up -d --build
+```
 
 ## Open
 
@@ -96,7 +114,7 @@ fail the HTTP health endpoint.
 ### Quick recovery
 
 ```bash
-docker compose -f docker-compose.dashboard.yml up -d --build
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
 docker ps
 curl -I http://localhost:8088
 ```

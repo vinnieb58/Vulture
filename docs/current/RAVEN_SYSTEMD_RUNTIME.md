@@ -36,10 +36,82 @@ From the Raven repo root:
 
 ```bash
 cd /home/vinnieb58/projects/vulture
+```
+
+### Quick deploy (default for operational fixes)
+
+Use this for dashboard, systemd, docs, or service changes when you do **not** need an immediate full hunt cycle:
+
+```bash
+./scripts/update_raven_quick.sh
+```
+
+Quick deploy but intentionally run one scheduler cycle after update:
+
+```bash
+./scripts/update_raven_quick.sh --run-once
+```
+
+`scripts/update_raven_quick.sh` performs, in order:
+
+1. `git fetch` / fast-forward pull on the **current** branch
+2. Dependency install (`pip install -r requirements.txt`) when present
+3. Python compile check (syntax only)
+4. Install/update systemd units from `deploy/systemd/`
+5. Restart `vulture-bot.service` and `vulture-scheduler.timer` (when present)
+6. Rebuild/restart Docker compose stacks via `scripts/rebuild_docker.sh`
+7. Print final status (git, bot, timer, scheduler worker, dashboard)
+
+It does **not** run `validate_step1.py`, `main.py`, adapter validation, or destructive cleanup.
+
+Optional flags:
+
+```bash
+./scripts/update_raven_quick.sh --no-docker     # skip Docker stack rebuild/restart
+./scripts/update_raven_quick.sh --no-services # skip systemd install/restarts
+./scripts/update_raven_quick.sh --help
+```
+
+`vulture-scheduler.service` is a one-shot worker when using the timer model. It stays inactive between timer triggers; that is normal. The quick script only starts it when you pass `--run-once`.
+
+### Docker-only rebuild
+
+Use this when you only need to rebuild/restart compose stacks (no git pull, no systemd, no hunt):
+
+```bash
+./scripts/rebuild_docker.sh
+```
+
+Rebuild one stack:
+
+```bash
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
+```
+
+Restart without rebuilding images:
+
+```bash
+./scripts/rebuild_docker.sh --no-build
+```
+
+By default, `rebuild_docker.sh` rebuilds every `docker-compose*.yml` file in the repo root. Add new stacks by dropping in another compose file; optional HTTP health probes are configured in the script's `STACK_HEALTH_URLS` map.
+
+Pair with full deploy when dashboard (or other container) code changed but you already ran the heavy validation path:
+
+```bash
+bash scripts/update_raven.sh
+./scripts/rebuild_docker.sh
+```
+
+### Full deploy (validation + immediate hunt cycle)
+
+Use this when you want full validation and one live hunt cycle before services restart:
+
+```bash
 bash scripts/update_raven.sh
 ```
 
-Non-interactive deploy:
+Non-interactive full deploy:
 
 ```bash
 APP_DIR=/home/vinnieb58/projects/vulture BRANCH=main bash scripts/update_raven.sh
