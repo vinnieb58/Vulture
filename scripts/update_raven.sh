@@ -25,6 +25,7 @@
 #   VULTURE_BOT_SERVICE        — systemd unit for the bot (default: vulture-bot.service)
 #   VULTURE_SCHEDULER_SERVICE  — systemd unit for the scheduler (default: vulture-scheduler.service)
 #   SKIP_SYSTEMD_RESTART       — set to 1 to skip service restarts (tests / dry run)
+#   SKIP_DASHBOARD_RESTART     — set to 1 to skip dashboard Docker compose up (tests / dry run)
 
 set -euo pipefail
 
@@ -86,6 +87,32 @@ restart_systemd_services() {
         exit 1
     fi
     echo "  Restarted: $VULTURE_SCHEDULER_SERVICE"
+}
+
+ensure_storage_mountpoints() {
+    section "Ensuring stable storage mountpoint directories"
+    sudo mkdir -p \
+        /mnt/storage \
+        /mnt/storage/microsd \
+        /mnt/storage/toshiba_ext \
+        /mnt/storage/portable_beast \
+        /mnt/storage/pelican_backup \
+        /mnt/storage/raven_nvme \
+        /mnt/storage/roost_spinning_0
+    echo "  Mountpoint directories present (drives may be unplugged)"
+}
+
+restart_dashboard() {
+    section "Vulture Dashboard (Docker)"
+    ensure_storage_mountpoints
+    if ! docker compose -f docker-compose.dashboard.yml up -d --build; then
+        echo "  ERROR: failed to start vulture-dashboard"
+        docker compose -f docker-compose.dashboard.yml ps 2>&1 || true
+        docker compose -f docker-compose.dashboard.yml logs --tail 50 2>&1 || true
+        exit 1
+    fi
+    echo "  Dashboard started: http://raven:8088"
+    docker compose -f docker-compose.dashboard.yml ps 2>&1 || true
 }
 
 show_runtime_status() {
@@ -222,6 +249,12 @@ else
     show_runtime_status
 fi
 
+if [[ "${SKIP_DASHBOARD_RESTART:-0}" == "1" ]]; then
+    section "Skipping dashboard restart (SKIP_DASHBOARD_RESTART=1)"
+else
+    restart_dashboard
+fi
+
 echo ""
 echo "========================================"
 echo "  Raven update complete"
@@ -232,6 +265,11 @@ echo "    systemctl status $BOT_UNIT --no-pager -l"
 echo "    systemctl status $SCHEDULER_UNIT --no-pager -l"
 echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
 echo "    journalctl -u $SCHEDULER_UNIT -n 100 --no-pager"
+echo "    docker ps"
+echo "    curl -I http://localhost:8088"
+echo ""
+echo "  Dashboard recovery (if needed):"
+echo "    docker compose -f docker-compose.dashboard.yml up -d --build"
 echo ""
 echo "  tmux is deprecated for normal production runtime."
 echo "  Use it only for optional manual debugging if needed."

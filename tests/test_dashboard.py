@@ -28,7 +28,13 @@ from parsers import (  # noqa: E402
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
-from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
+from host_status import (  # noqa: E402
+    ServiceStatus,
+    _check_service,
+    get_docker_snapshot,
+    get_raven_health,
+    get_storage_status,
+)
 from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import _format_runtime_detail, _scheduler_freshness  # noqa: E402
 
@@ -160,6 +166,98 @@ class TestDefensiveReaders:
                 health = get_raven_health()
         assert health["hostname"]
         assert isinstance(health["warnings"], list)
+
+
+class TestStorageResilience:
+    def test_missing_optional_drive_paths_do_not_raise(self, tmp_path, monkeypatch):
+        host_root = tmp_path / "host_root"
+        host_root.mkdir()
+        missing_drive = tmp_path / "toshiba_ext"
+        host_proc = tmp_path / "proc"
+        host_proc.mkdir()
+        (host_proc / "mounts").write_text(
+            f"/dev/mmcblk0p2 {host_root} ext4 rw 0 0\n",
+            encoding="utf-8",
+        )
+        df_out = (
+            "Filesystem      Size  Used Avail Use% Mounted on\n"
+            f"/dev/mmcblk0p2   58G   18G   38G  32% {host_root}\n"
+        )
+        monkeypatch.setenv(
+            "DASHBOARD_STORAGE_MOUNTS",
+            f"Root filesystem:{host_root},toshiba_ext:{missing_drive}",
+        )
+        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
+
+        with patch("host_status.run_command", return_value=(True, df_out)):
+            mounts = get_storage_status()
+
+        by_label = {m.label: m for m in mounts}
+        assert by_label["Root filesystem"].status == "OK"
+        assert by_label["toshiba_ext"].status == "MISSING"
+        assert by_label["toshiba_ext"].warning is not None
+        assert "Optional" in by_label["toshiba_ext"].warning
+
+    def test_unmounted_optional_path_is_warning_not_error(self, tmp_path, monkeypatch):
+        host_proc = tmp_path / "proc"
+        host_proc.mkdir()
+        (host_proc / "mounts").write_text(
+            "/dev/mmcblk0p2 /host/root ext4 rw 0 0\n",
+            encoding="utf-8",
+        )
+        storage_root = tmp_path / "mnt" / "storage"
+        beast = storage_root / "portable_beast"
+        beast.mkdir(parents=True)
+
+        monkeypatch.setenv(
+            "DASHBOARD_STORAGE_MOUNTS",
+            "Root filesystem:/host/root,portable_beast:" + str(beast),
+        )
+        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
+
+        with patch("host_status.run_command", return_value=(True, "")):
+            mounts = get_storage_status()
+
+        beast_mount = next(m for m in mounts if m.label == "portable_beast")
+        assert beast_mount.exists is True
+        assert beast_mount.mounted is False
+        assert beast_mount.status == "NOT_MOUNTED"
+        assert beast_mount.warning is not None
+
+    def test_get_storage_status_never_raises_when_df_fails(self, tmp_path, monkeypatch):
+        host_root = tmp_path / "root"
+        host_root.mkdir()
+        host_proc = tmp_path / "proc"
+        host_proc.mkdir()
+        (host_proc / "mounts").write_text(
+            f"/dev/root {host_root} ext4 rw 0 0\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DASHBOARD_STORAGE_MOUNTS", f"Root filesystem:{host_root}")
+        monkeypatch.setattr("host_status.HOST_PROC", host_proc)
+        with patch("host_status.run_command", return_value=(False, "df failed")):
+            mounts = get_storage_status()
+        assert mounts
+        assert mounts[0].status == "ERROR"
+        assert all(m.status in ("OK", "MISSING", "NOT_MOUNTED", "ERROR") for m in mounts)
+
+
+class TestDockerComposeStorageMounts:
+    COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.dashboard.yml"
+
+    def test_no_fragile_optional_drive_bind_mounts(self):
+        text = self.COMPOSE_PATH.read_text(encoding="utf-8")
+        fragile = (
+            "/mnt/storage/microsd:/mnt/storage/microsd",
+            "/mnt/storage/portable_beast:/mnt/storage/portable_beast",
+            "/mnt/storage/toshiba_ext:/mnt/storage/toshiba_ext",
+            "/mnt/storage/pelican_backup:/mnt/storage/pelican_backup",
+            "/mnt/storage/raven_nvme:/mnt/storage/raven_nvme",
+            "/mnt/storage/roost_spinning_0:/mnt/storage/roost_spinning_0",
+        )
+        for bind in fragile:
+            assert bind not in text, f"fragile bind mount must be removed: {bind}"
+        assert "/mnt/storage:/mnt/storage:ro" in text
 
 
 class TestHostCommands:
