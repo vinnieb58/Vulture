@@ -17,7 +17,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from db_readers import DB_PATH, read_db_snapshot
-from host_status import get_docker_snapshot, get_raven_health, get_service_statuses, get_storage_status
+from host_status import (
+    get_docker_snapshot,
+    get_raven_health,
+    get_service_statuses,
+    get_storage_status,
+    status_display_class,
+)
 from log_readers import LOG_PATH, read_log_snapshot
 from vulture_runtime import get_vulture_runtime
 
@@ -48,6 +54,12 @@ async def index(request: Request) -> HTMLResponse:
     raven = get_raven_health()
     services = get_service_statuses()
     storage = get_storage_status()
+    for mount in storage:
+        mount.display_class = status_display_class(
+            mount.status,
+            required=mount.required,
+            legacy=mount.legacy,
+        )
     docker = get_docker_snapshot()
     vulture = get_vulture_runtime(log_lines=logs.get("lines", []))
 

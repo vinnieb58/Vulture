@@ -21,14 +21,22 @@ from parsers import (  # noqa: E402
     parse_container_names,
     parse_df_human,
     parse_docker_ps_format,
+    parse_findmnt_line,
     parse_free_human,
     parse_loadavg,
+    parse_mountinfo,
     parse_systemctl_failed,
     pick_lan_ipv4,
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
-from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
+from host_status import (  # noqa: E402
+    ServiceStatus,
+    _check_service,
+    get_docker_snapshot,
+    get_raven_health,
+    get_storage_status,
+)
 from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
@@ -102,6 +110,22 @@ class TestParsers:
     def test_pick_lan_ipv4(self):
         assert pick_lan_ipv4(SAMPLE_IP) == "192.168.1.143"
 
+    def test_parse_mountinfo(self):
+        text = (
+            "24 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+            "36 24 179:1 / /mnt/storage/microsd rw,relatime shared:2 - ext4 /dev/mmcblk0p1 rw\n"
+        )
+        mounts = parse_mountinfo(text)
+        assert mounts["/"] == ("/dev/sda2", "ext4")
+        assert mounts["/mnt/storage/microsd"] == ("/dev/mmcblk0p1", "ext4")
+
+    def test_parse_findmnt_line(self):
+        assert parse_findmnt_line("/dev/mmcblk0p1 ext4 ff481ad2-e9bd-4868-8c8c-6729a461e4b4") == (
+            "/dev/mmcblk0p1",
+            "ext4",
+            "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+        )
+
 
 class TestDashboardHTTP:
     @pytest.fixture
@@ -165,6 +189,32 @@ class TestDefensiveReaders:
                 health = get_raven_health()
         assert health["hostname"]
         assert isinstance(health["warnings"], list)
+
+
+class TestStorageResilience:
+    def test_get_storage_status_never_raises_on_probe_failure(self):
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
+            mounts = get_storage_status()
+        assert mounts
+        assert all(m.status == "ERROR" for m in mounts)
+
+
+class TestDockerComposeStorageMounts:
+    COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.dashboard.yml"
+
+    def test_no_fragile_optional_drive_bind_mounts(self):
+        text = self.COMPOSE_PATH.read_text(encoding="utf-8")
+        fragile = (
+            "/mnt/storage/microsd:/mnt/storage/microsd",
+            "/mnt/storage/portable_beast:/mnt/storage/portable_beast",
+            "/mnt/storage/toshiba_ext:/mnt/storage/toshiba_ext",
+            "/mnt/storage/pelican_backup:/mnt/storage/pelican_backup",
+            "/mnt/storage/raven_nvme:/mnt/storage/raven_nvme",
+            "/mnt/storage/roost_spinning_0:/mnt/storage/roost_spinning_0",
+        )
+        for bind in fragile:
+            assert bind not in text, f"fragile bind mount must be removed: {bind}"
+        assert "/mnt/storage:/mnt/storage:ro" in text
 
 
 class TestHostCommands:
