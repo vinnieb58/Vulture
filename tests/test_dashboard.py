@@ -30,7 +30,13 @@ from parsers import (  # noqa: E402
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
-from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
+from host_status import (  # noqa: E402
+    ServiceStatus,
+    _check_service,
+    get_docker_snapshot,
+    get_raven_health,
+    get_storage_status,
+)
 from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import _format_runtime_detail, _scheduler_freshness  # noqa: E402
 
@@ -178,6 +184,32 @@ class TestDefensiveReaders:
                 health = get_raven_health()
         assert health["hostname"]
         assert isinstance(health["warnings"], list)
+
+
+class TestStorageResilience:
+    def test_get_storage_status_never_raises_on_probe_failure(self):
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
+            mounts = get_storage_status()
+        assert mounts
+        assert all(m.status == "ERROR" for m in mounts)
+
+
+class TestDockerComposeStorageMounts:
+    COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.dashboard.yml"
+
+    def test_no_fragile_optional_drive_bind_mounts(self):
+        text = self.COMPOSE_PATH.read_text(encoding="utf-8")
+        fragile = (
+            "/mnt/storage/microsd:/mnt/storage/microsd",
+            "/mnt/storage/portable_beast:/mnt/storage/portable_beast",
+            "/mnt/storage/toshiba_ext:/mnt/storage/toshiba_ext",
+            "/mnt/storage/pelican_backup:/mnt/storage/pelican_backup",
+            "/mnt/storage/raven_nvme:/mnt/storage/raven_nvme",
+            "/mnt/storage/roost_spinning_0:/mnt/storage/roost_spinning_0",
+        )
+        for bind in fragile:
+            assert bind not in text, f"fragile bind mount must be removed: {bind}"
+        assert "/mnt/storage:/mnt/storage:ro" in text
 
 
 class TestHostCommands:

@@ -202,6 +202,36 @@ section_disk_storage() {
     fi
 }
 
+# Expected Roost / external storage paths. Missing optional drives are warnings only.
+EXPECTED_STORAGE_PATHS=(
+    "/mnt/storage/microsd"
+    "/mnt/storage/toshiba_ext"
+    "/mnt/storage/portable_beast"
+    "/mnt/storage/pelican_backup"
+    "/mnt/storage/raven_nvme"
+    "/mnt/storage/roost_spinning_0"
+)
+
+section_expected_storage_mounts() {
+    section "Expected storage mountpoints (optional drives may be unplugged)"
+    local path mounted
+    for path in "${EXPECTED_STORAGE_PATHS[@]}"; do
+        if [[ ! -e "$path" ]]; then
+            echo "  $path — MISSING (path does not exist)"
+            record_warn "$path missing"
+            continue
+        fi
+        if mountpoint -q "$path" 2>/dev/null; then
+            mounted="$(findmnt -n -o SOURCE,FSTYPE "$path" 2>/dev/null || echo mounted)"
+            echo "  $path — OK ($mounted)"
+            record_ok "$path mounted"
+        else
+            echo "  $path — NOT_MOUNTED (path exists, drive may be unplugged)"
+            record_warn "$path not mounted"
+        fi
+    done
+}
+
 section_lsblk() {
     section "Block devices (lsblk -f)"
     run_cmd "lsblk -f" lsblk -f
@@ -366,6 +396,7 @@ if [[ "$MODE" == "post-reboot" ]]; then
     section_internet_ping
     section_tailscale
     section_disk_storage
+    section_expected_storage_mounts
     section_lsblk
     section_fstab
     section_usb
@@ -385,6 +416,7 @@ else
     section_internet_ping
     section_tailscale
     section_disk_storage
+    section_expected_storage_mounts
     section_lsblk
     section_fstab
     section_usb

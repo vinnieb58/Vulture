@@ -28,17 +28,6 @@ from host_commands import (
     systemctl_unit_exists,
 )
 from storage_probe import StorageStatus, get_storage_status, status_display_class
-
-__all__ = [
-    "DockerSnapshot",
-    "ServiceStatus",
-    "StorageStatus",
-    "get_docker_snapshot",
-    "get_raven_health",
-    "get_service_statuses",
-    "get_storage_status",
-    "status_display_class",
-]
 from subprocess_util import run_command
 
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
@@ -52,6 +41,19 @@ SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("vulture-bot", ("vulture-bot.service", "vulture-bot")),
     ("vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")),
 )
+
+__all__ = [
+    "DockerSnapshot",
+    "HOST_PROC",
+    "HOST_ROOT",
+    "ServiceStatus",
+    "StorageStatus",
+    "get_docker_snapshot",
+    "get_raven_health",
+    "get_service_statuses",
+    "get_storage_status",
+    "status_display_class",
+]
 
 
 @dataclass

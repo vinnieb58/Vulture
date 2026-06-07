@@ -538,6 +538,11 @@
               </td>
               <td class="muted-cell">{{ mount.message or '—' }}</td>
             </tr>
+            {% if mount.warning %}
+            <tr>
+              <td colspan="9" class="warn" style="font-size:0.82rem;">⚠ {{ mount.label }}: {{ mount.warning }}</td>
+            </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>

@@ -28,8 +28,14 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 From the Vulture repo root on Raven:
 
 ```bash
+# Ensure stable mountpoint directories exist (drives may be unplugged)
+sudo mkdir -p /mnt/storage/{microsd,toshiba_ext,portable_beast,pelican_backup,raven_nvme,roost_spinning_0}
+
 docker compose -f docker-compose.dashboard.yml up -d --build
 ```
+
+`scripts/update_raven.sh` creates these directories and restarts the dashboard
+automatically (skip with `SKIP_DASHBOARD_RESTART=1`).
 
 ## Open
 
@@ -60,9 +66,40 @@ The container uses scoped read-only host mounts for observability:
 - `/etc/hostname` — hostname
 - `/var/run/docker.sock` — read-only Docker status
 - `/run/systemd` and D-Bus socket — host `systemctl` status
-- `/mnt/storage` — host storage tree (read-only; safe when optional drives are unplugged)
+- `/mnt/storage` — parent bind for Roost / external storage (read-only).
+  Individual optional drive paths are **not** bind-mounted directly, so unplugged
+  USB/HDD drives cannot prevent the container from starting.
 
 `pid: host` allows process/tmux visibility on the host.
+
+## Resilience to missing optional drives
+
+The dashboard container starts even when optional external drives are unplugged.
+Docker bind-mounts only the stable `/mnt/storage` parent directory — not fragile
+per-drive paths that break with `no such device` when a drive is removed.
+
+Inside the container, the Storage / Roost section checks expected subpaths:
+
+- `/mnt/storage/microsd`
+- `/mnt/storage/toshiba_ext`
+- `/mnt/storage/portable_beast`
+- `/mnt/storage/pelican_backup`
+- `/mnt/storage/raven_nvme`
+- `/mnt/storage/roost_spinning_0`
+
+Each mount reports detailed statuses such as **OK**, **OK_AUTOMOUNTED**,
+**AUTOMOUNT_WAITING**, **NOT_MOUNTED**, **NOT_MOUNTED_PARENT_ROOT**,
+**LEGACY_PATH**, **PATH_MISSING**, or **ERROR**. Unplugged optional drives
+appear as **warnings** on the dashboard — they do not crash the container or
+fail the HTTP health endpoint.
+
+### Quick recovery
+
+```bash
+docker compose -f docker-compose.dashboard.yml up -d --build
+docker ps
+curl -I http://localhost:8088
+```
 
 ## Known limitations
 
@@ -71,6 +108,9 @@ The container uses scoped read-only host mounts for observability:
 - **Optional / automounted storage** shows yellow `AUTOMOUNT_WAITING` when the
   path exists but the backing device is not mounted (unplugged or not yet triggered).
 - **Legacy `portable_beast`** is reported separately from active `pelican_backup`.
+- **USB storage mounts** may show as missing or not mounted after reboot if Raven
+  did not detect or mount external drives (known Raven issue). This is surfaced as
+  a warning, not a container failure.
 - **Scheduler freshness** is a log-tail heuristic, not a heartbeat API.
 - **No authentication** — intended for local LAN / Tailscale access only.
 - **Adapter errors** are matched heuristically from recent log lines.
