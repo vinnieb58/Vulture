@@ -1,21 +1,26 @@
 # Raven production runtime (systemd)
 
-Raven runs Vulture bot and scheduler as **systemd user services**, not tmux sessions.
+Raven runs Vulture bot and scheduler as **systemd services**, not tmux sessions.
 
 ## Services
 
 | Unit | Process | Purpose |
 |------|---------|---------|
 | `vulture-bot.service` | `discord_bot.py` | Discord control plane (Crow + Vulture hunt commands) |
-| `vulture-scheduler.service` | `main.py` (loop) | Repeats one hunt cycle on a fixed interval |
+| `vulture-scheduler.service` | `main.py` (oneshot) | Runs one hunt cycle and exits |
+| `vulture-scheduler.timer` | — | Schedules hunt cycles every 15 minutes |
 
-Both services:
+### Scheduler architecture (oneshot + timer)
+
+- **`vulture-scheduler.service`** is `Type=oneshot`. It runs one `main.py` hunt cycle and exits with status 0 on success.
+- **`vulture-scheduler.timer`** is the actual scheduler heartbeat. It triggers the oneshot service shortly after boot, then every 15 minutes after the previous run finishes (`OnUnitInactiveSec=15min`).
+- Between timer runs, **`vulture-scheduler.service` is expected to be `inactive`/`dead`**. That is normal — it does not mean the scheduler failed.
+
+Both long-running and oneshot units:
 
 - Run as user **`vinnieb58`**
 - Use working directory **`/home/vinnieb58/projects/vulture`**
 - Load environment from **`/home/vinnieb58/projects/vulture/.env`**
-- **`Restart=on-failure`**
-- Start automatically after reboot when **enabled**
 
 Reference unit files live in `deploy/systemd/`.
 
@@ -119,7 +124,9 @@ APP_DIR=/home/vinnieb58/projects/vulture BRANCH=main bash scripts/update_raven.s
 3. Python compile check
 4. `scripts/validate_step1.py` (data layer validation)
 5. One live `main.py` hunt cycle
-6. **Only after all checks pass:** restart systemd services
+6. **Only after all checks pass:** install systemd units, `daemon-reload`, enable services, restart
+
+The update script copies all unit files from `deploy/systemd/` into `/etc/systemd/system/`, enables `vulture-bot.service` and `vulture-scheduler.timer`, and restarts both. It does **not** enable `vulture-scheduler.service` as a long-running daemon.
 
 If any step fails, services are **not** restarted (fail-safe).
 
@@ -131,30 +138,43 @@ SKIP_SYSTEMD_RESTART=1 bash scripts/update_raven.sh
 
 ## systemd install (one-time host setup)
 
-Copy unit files and enable services (requires sudo on Raven):
+Normally `scripts/update_raven.sh` installs units on every deploy. For manual one-time setup:
 
 ```bash
 sudo cp deploy/systemd/vulture-bot.service /etc/systemd/system/
 sudo cp deploy/systemd/vulture-scheduler.service /etc/systemd/system/
+sudo cp deploy/systemd/vulture-scheduler.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable vulture-bot.service vulture-scheduler.service
-sudo systemctl start vulture-bot.service vulture-scheduler.service
+sudo systemctl enable vulture-bot.service vulture-scheduler.timer
+sudo systemctl start vulture-bot.service vulture-scheduler.timer
 ```
 
-Adjust `User`, paths, or `SCHEDULER_INTERVAL_SECONDS` in the unit files before copying if the host layout differs.
+Do **not** enable `vulture-scheduler.service` directly — the timer triggers it.
+
+Adjust `User`, paths, or timer intervals in the unit files before copying if the host layout differs.
 
 ## Verify on Raven
 
 ```bash
+systemctl status vulture-scheduler.timer --no-pager -l
+systemctl status vulture-scheduler.service --no-pager -l
+systemctl list-timers --all | grep vulture
+journalctl -u vulture-scheduler.service -n 80 --no-pager
+
 systemctl is-active vulture-bot
-systemctl is-active vulture-scheduler
+systemctl is-active vulture-scheduler.timer
+systemctl is-enabled vulture-scheduler.timer
 
 systemctl status vulture-bot --no-pager -l
-systemctl status vulture-scheduler --no-pager -l
-
 journalctl -u vulture-bot -n 100 --no-pager
-journalctl -u vulture-scheduler -n 100 --no-pager
 ```
+
+Expected healthy signals:
+
+- `vulture-scheduler.timer` is **active** and **enabled**
+- `systemctl list-timers --all` shows `vulture-scheduler.timer` with a next run time
+- `vulture-scheduler.service` may be **inactive/dead** between runs after `status=0/SUCCESS`
+- Journal shows recent `Hunt cycle completed` lines
 
 Process fallback checks (useful when systemd state is ambiguous):
 
@@ -174,14 +194,14 @@ Crow v0.1 remains read-only (no restarts from Discord).
 
 ## Dashboard Docker (unchanged)
 
-The read-only dashboard container (`docker-compose.dashboard.yml`) is separate from bot/scheduler runtime. This systemd migration does not change dashboard Docker behavior.
+The read-only dashboard container (`docker-compose.dashboard.yml`) is separate from bot/scheduler runtime. The dashboard treats **`vulture-scheduler.timer`** as the scheduler heartbeat. An inactive oneshot service between runs is healthy when the timer is active and recent hunt-cycle logs exist.
 
 ## Reboot survival
 
 Bot and scheduler survive reboot only when their units are **enabled**:
 
 ```bash
-systemctl is-enabled vulture-bot vulture-scheduler
+systemctl is-enabled vulture-bot vulture-scheduler.timer
 ```
 
 If either reports `disabled`, re-run `sudo systemctl enable …` as shown above.

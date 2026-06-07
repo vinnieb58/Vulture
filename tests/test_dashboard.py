@@ -21,16 +21,29 @@ from parsers import (  # noqa: E402
     parse_container_names,
     parse_df_human,
     parse_docker_ps_format,
+    parse_findmnt_line,
     parse_free_human,
     parse_loadavg,
+    parse_mountinfo,
     parse_systemctl_failed,
     pick_lan_ipv4,
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
-from host_status import ServiceStatus, _check_service, get_docker_snapshot, get_raven_health  # noqa: E402
+from host_status import (  # noqa: E402
+    ServiceStatus,
+    _check_service,
+    get_docker_snapshot,
+    get_raven_health,
+    get_storage_status,
+)
 from log_readers import read_log_snapshot  # noqa: E402
-from vulture_runtime import _format_runtime_detail, _scheduler_freshness  # noqa: E402
+from vulture_runtime import (  # noqa: E402
+    _evaluate_scheduler_health,
+    _format_runtime_detail,
+    _scheduler_freshness,
+)
+from host_status import ServiceStatus  # noqa: E402
 
 
 SAMPLE_DF = """\
@@ -97,6 +110,22 @@ class TestParsers:
     def test_pick_lan_ipv4(self):
         assert pick_lan_ipv4(SAMPLE_IP) == "192.168.1.143"
 
+    def test_parse_mountinfo(self):
+        text = (
+            "24 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+            "36 24 179:1 / /mnt/storage/microsd rw,relatime shared:2 - ext4 /dev/mmcblk0p1 rw\n"
+        )
+        mounts = parse_mountinfo(text)
+        assert mounts["/"] == ("/dev/sda2", "ext4")
+        assert mounts["/mnt/storage/microsd"] == ("/dev/mmcblk0p1", "ext4")
+
+    def test_parse_findmnt_line(self):
+        assert parse_findmnt_line("/dev/mmcblk0p1 ext4 ff481ad2-e9bd-4868-8c8c-6729a461e4b4") == (
+            "/dev/mmcblk0p1",
+            "ext4",
+            "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+        )
+
 
 class TestDashboardHTTP:
     @pytest.fixture
@@ -162,6 +191,32 @@ class TestDefensiveReaders:
         assert isinstance(health["warnings"], list)
 
 
+class TestStorageResilience:
+    def test_get_storage_status_never_raises_on_probe_failure(self):
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
+            mounts = get_storage_status()
+        assert mounts
+        assert all(m.status == "ERROR" for m in mounts)
+
+
+class TestDockerComposeStorageMounts:
+    COMPOSE_PATH = Path(__file__).resolve().parent.parent / "docker-compose.dashboard.yml"
+
+    def test_no_fragile_optional_drive_bind_mounts(self):
+        text = self.COMPOSE_PATH.read_text(encoding="utf-8")
+        fragile = (
+            "/mnt/storage/microsd:/mnt/storage/microsd",
+            "/mnt/storage/portable_beast:/mnt/storage/portable_beast",
+            "/mnt/storage/toshiba_ext:/mnt/storage/toshiba_ext",
+            "/mnt/storage/pelican_backup:/mnt/storage/pelican_backup",
+            "/mnt/storage/raven_nvme:/mnt/storage/raven_nvme",
+            "/mnt/storage/roost_spinning_0:/mnt/storage/roost_spinning_0",
+        )
+        for bind in fragile:
+            assert bind not in text, f"fragile bind mount must be removed: {bind}"
+        assert "/mnt/storage:/mnt/storage:ro" in text
+
+
 class TestHostCommands:
     def test_service_check_uses_systemctl_states(self):
         with patch("host_status.systemctl_unit_exists", return_value=True):
@@ -188,12 +243,86 @@ class TestHostCommands:
         journal = [
             "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Done hunt 'ddr4_desktop_ram'",
         ]
-        with patch("vulture_runtime._journal_lines", return_value=journal):
-            with patch(
-                "vulture_runtime.datetime",
-                wraps=datetime,
-            ) as mock_dt:
-                mock_dt.now.return_value = datetime(2026, 6, 6, 3, 0, 0, tzinfo=timezone.utc)
-                result = _scheduler_freshness([])
+        timer_svc = ServiceStatus("vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled")
+        service_svc = ServiceStatus("vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled")
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime._list_timer_next_run", return_value="Mon 2026-06-07 12:00:00 UTC"):
+                    with patch("vulture_runtime._journal_lines", return_value=journal):
+                        with patch(
+                            "vulture_runtime.datetime",
+                            wraps=datetime,
+                        ) as mock_dt:
+                            mock_dt.now.return_value = datetime(2026, 6, 6, 3, 0, 0, tzinfo=timezone.utc)
+                            result = _scheduler_freshness([])
         assert result["status"] in ("fresh", "stale", "seen")
         assert "journal" in result["detail"]
+
+
+class TestSchedulerHealth:
+    def _evaluate(
+        self,
+        *,
+        timer_active: str = "active",
+        timer_unit: str | None = "vulture-scheduler.timer",
+        service_active: str = "inactive",
+        journal: list[str] | None = None,
+        next_run: str | None = "Mon 2026-06-07 12:00:00 UTC",
+        now: datetime | None = None,
+    ):
+        timer_svc = ServiceStatus(
+            "vulture-scheduler timer",
+            timer_unit,
+            timer_active,
+            "enabled" if timer_unit else "not configured",
+        )
+        service_warning = "Scheduler service failed" if service_active == "failed" else None
+        service_svc = ServiceStatus(
+            "vulture-scheduler service",
+            "vulture-scheduler.service",
+            service_active,
+            "disabled",
+            warning=service_warning,
+        )
+        now = now or datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime._list_timer_next_run", return_value=next_run):
+                    with patch("vulture_runtime._journal_lines", return_value=journal or []):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            mock_dt.now.return_value = now
+                            return _evaluate_scheduler_health([])
+
+    def test_timer_active_service_inactive_success_healthy(self):
+        journal = [
+            "2026-06-07T11:50:00+0000 python[1]: 2026-06-07 11:50:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal)
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+        assert result["timer_active"] == "active"
+        assert result["service_active"] == "inactive"
+
+    def test_timer_missing_service_inactive_unhealthy(self):
+        result = self._evaluate(timer_active="not found", timer_unit=None)
+        assert result["status"] == "unhealthy"
+        assert result["warning"] == "Scheduler timer missing/inactive"
+
+    def test_timer_active_no_recent_logs_stale(self):
+        journal = [
+            "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal)
+        assert result["status"] == "stale"
+        assert "No scheduler activity within" in (result["warning"] or "")
+
+    def test_service_failed_unhealthy(self):
+        result = self._evaluate(service_active="failed")
+        assert result["status"] == "unhealthy"
+        assert result["service"].warning == "Scheduler service failed"
+
+    def test_service_active_running(self):
+        result = self._evaluate(service_active="active")
+        assert result["status"] == "running"
+        assert result["warning"] is None
+        assert "hunt cycle in progress" in result["detail"]

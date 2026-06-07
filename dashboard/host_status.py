@@ -11,10 +11,8 @@ from typing import Any
 
 from parsers import (
     ContainerRow,
-    DiskEntry,
     MemoryInfo,
     parse_container_names,
-    parse_df_human,
     parse_docker_ps_format,
     parse_free_human,
     parse_loadavg,
@@ -29,16 +27,11 @@ from host_commands import (
     systemctl_is_enabled,
     systemctl_unit_exists,
 )
+from storage_probe import StorageStatus, get_storage_status, status_display_class
 from subprocess_util import run_command
 
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
 HOST_PROC = Path(os.environ.get("DASHBOARD_HOST_PROC", "/host/proc"))
-DEFAULT_STORAGE_MOUNTS = (
-    ("Root filesystem", str(HOST_ROOT)),
-    ("MicroSD", "/mnt/storage/microsd"),
-    ("portable_beast", "/mnt/storage/portable_beast"),
-    ("toshiba_ext", "/mnt/storage/toshiba_ext"),
-)
 
 SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("SSH", ("ssh.service", "ssh.socket", "sshd.service")),
@@ -46,8 +39,21 @@ SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("smbd", ("smbd.service", "smbd")),
     ("docker", ("docker.service", "docker")),
     ("vulture-bot", ("vulture-bot.service", "vulture-bot")),
-    ("vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")),
+    ("vulture-scheduler", ("vulture-scheduler.timer", "vulture-scheduler.timer")),
 )
+
+__all__ = [
+    "DockerSnapshot",
+    "HOST_PROC",
+    "HOST_ROOT",
+    "ServiceStatus",
+    "StorageStatus",
+    "get_docker_snapshot",
+    "get_raven_health",
+    "get_service_statuses",
+    "get_storage_status",
+    "status_display_class",
+]
 
 
 @dataclass
@@ -56,19 +62,6 @@ class ServiceStatus:
     unit: str | None
     active: str
     enabled: str
-    warning: str | None = None
-
-
-@dataclass
-class StorageStatus:
-    label: str
-    path: str
-    mounted: bool
-    filesystem: str | None = None
-    size: str | None = None
-    used: str | None = None
-    available: str | None = None
-    percent_used: float | None = None
     warning: str | None = None
 
 
@@ -261,77 +254,6 @@ def _check_service(label: str, candidates: tuple[str, ...]) -> ServiceStatus:
         enabled=enabled,
         warning=warning,
     )
-
-
-def _storage_mounts() -> list[tuple[str, str]]:
-    raw = os.environ.get("DASHBOARD_STORAGE_MOUNTS", "").strip()
-    if not raw:
-        return list(DEFAULT_STORAGE_MOUNTS)
-    mounts: list[tuple[str, str]] = []
-    for part in raw.split(","):
-        piece = part.strip()
-        if not piece:
-            continue
-        if ":" in piece:
-            label, path = piece.split(":", 1)
-            mounts.append((label.strip(), path.strip()))
-        else:
-            mounts.append((piece, piece))
-    return mounts or list(DEFAULT_STORAGE_MOUNTS)
-
-
-def _path_is_mounted(path: str) -> bool:
-    mount_path = Path(path)
-    if not mount_path.exists():
-        return False
-    mounts_file = HOST_PROC / "mounts"
-    if mounts_file.is_file():
-        try:
-            normalized = path.rstrip("/") or "/"
-            for line in mounts_file.read_text(encoding="utf-8").splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and parts[1].rstrip("/") == normalized:
-                    return True
-        except OSError:
-            pass
-    return mount_path.is_dir()
-
-
-def get_storage_status() -> list[StorageStatus]:
-    mounts = _storage_mounts()
-    paths = [path for _, path in mounts]
-    ok, out = run_command(["df", "-h", *paths], timeout=10.0)
-    entries_by_mount = {e.mount: e for e in parse_df_human(out)} if ok else {}
-
-    result: list[StorageStatus] = []
-    for label, path in mounts:
-        entry: DiskEntry | None = entries_by_mount.get(path)
-        if entry is None:
-            for candidate in entries_by_mount.values():
-                if candidate.mount == path:
-                    entry = candidate
-                    break
-        mounted = _path_is_mounted(path)
-        warning = None
-        if label != "Root filesystem" and not mounted:
-            warning = "Mount missing — USB drives may not be detected after reboot"
-        elif entry and entry.percent_used is not None and entry.percent_used >= 90:
-            warning = f"Disk usage high ({entry.percent_used:.0f}%)"
-
-        result.append(
-            StorageStatus(
-                label=label,
-                path=path,
-                mounted=mounted,
-                filesystem=entry.filesystem if entry else None,
-                size=entry.size if entry else None,
-                used=entry.used if entry else None,
-                available=entry.available if entry else None,
-                percent_used=entry.percent_used if entry else None,
-                warning=warning,
-            )
-        )
-    return result
 
 
 def get_docker_snapshot() -> DockerSnapshot:

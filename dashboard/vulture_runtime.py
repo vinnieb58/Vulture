@@ -9,12 +9,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from host_commands import run_host_command
-from host_status import ServiceStatus, _check_service
+from host_commands import run_host_command, run_systemctl, systemctl_is_active, systemctl_is_enabled
+from host_status import ServiceStatus, _check_service, _normalize_unit_state, _resolve_unit
 from subprocess_util import run_command
 
 LOG_PATH = Path(os.environ.get("VULTURE_LOG_PATH", "/app/logs/vulture.log"))
 SCHEDULER_FRESH_MINUTES = int(os.environ.get("DASHBOARD_SCHEDULER_FRESH_MINUTES", "30"))
+SCHEDULER_TIMER_UNIT = os.environ.get("VULTURE_SCHEDULER_TIMER", "vulture-scheduler.timer")
+SCHEDULER_SERVICE_UNIT = os.environ.get("VULTURE_SCHEDULER_SERVICE", "vulture-scheduler.service")
+
+SUCCESS_KEYWORDS = (
+    "hunt cycle completed",
+    "done hunt",
+)
+ACTIVITY_KEYWORDS = (
+    "starting hunt",
+    "done hunt",
+    "hunt cycle",
+    "scheduler",
+    "starting vulture hunt cycle",
+)
 
 
 @dataclass
@@ -137,14 +151,13 @@ def _parse_log_timestamp(line: str) -> datetime | None:
     return None
 
 
-def _freshness_from_lines(lines: list[str], *, source: str) -> dict[str, Any] | None:
-    keywords = (
-        "starting hunt",
-        "done hunt",
-        "hunt cycle",
-        "scheduler",
-        "starting vulture hunt cycle",
-    )
+def _freshness_from_lines(
+    lines: list[str],
+    *,
+    source: str,
+    success_only: bool = False,
+) -> dict[str, Any] | None:
+    keywords = SUCCESS_KEYWORDS if success_only else ACTIVITY_KEYWORDS
     for line in reversed(lines):
         lower = line.lower()
         if not any(k in lower for k in keywords):
@@ -158,63 +171,218 @@ def _freshness_from_lines(lines: list[str], *, source: str) -> dict[str, Any] | 
                 "status": "fresh",
                 "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
                 "warning": None,
+                "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "last_success_age_min": int(age_min),
             }
         return {
             "status": "stale",
             "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
             "warning": f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min",
+            "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "last_success_age_min": int(age_min),
         }
     return None
 
 
-def _scheduler_freshness(log_lines: list[str]) -> dict[str, Any]:
-    """Prefer vulture-scheduler journal; fall back to vulture.log tail."""
-    journal = _journal_lines("vulture-scheduler")
+def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    for line in output.splitlines():
+        if unit not in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
+            return parts[0]
+    return None
+
+
+def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
+    ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
+    if not ok or not out.strip():
+        return None
+    return _parse_timer_next_run(out, unit)
+
+
+def _check_scheduler_service() -> ServiceStatus:
+    """Oneshot scheduler service: inactive/dead between runs is expected."""
+    unit = _resolve_unit((SCHEDULER_SERVICE_UNIT, SCHEDULER_SERVICE_UNIT.replace(".service", "")))
+    if unit is None:
+        return ServiceStatus(
+            label="vulture-scheduler service",
+            unit=None,
+            active="not found",
+            enabled="not configured",
+            warning=None,
+        )
+
+    ok_active, active_out = systemctl_is_active(unit)
+    ok_enabled, enabled_out = systemctl_is_enabled(unit)
+    active = _normalize_unit_state(active_out if ok_active else "unknown", missing_label="unknown")
+    enabled = _normalize_unit_state(
+        enabled_out if ok_enabled else "unknown",
+        missing_label="not configured",
+    )
+
+    warning = None
+    if not ok_active and active == "unknown":
+        warning = "vulture-scheduler service: systemctl unavailable"
+    elif active == "failed":
+        warning = "Scheduler service failed"
+
+    return ServiceStatus(
+        label="vulture-scheduler service",
+        unit=unit,
+        active=active,
+        enabled=enabled,
+        warning=warning,
+    )
+
+
+def _timer_is_healthy(timer_svc: ServiceStatus) -> bool:
+    return timer_svc.unit is not None and timer_svc.active == "active"
+
+
+def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
+    """
+    Scheduler health for oneshot service + timer architecture.
+
+    - Timer active = heartbeat OK
+    - Service inactive/dead after success = idle between runs
+    - Service active = hunt cycle in progress
+    - Timer missing/inactive = unhealthy
+    """
+    timer_svc = _check_service(
+        "vulture-scheduler timer",
+        (SCHEDULER_TIMER_UNIT, SCHEDULER_TIMER_UNIT.replace(".timer", "")),
+    )
+    service_svc = _check_scheduler_service()
+    next_run = _list_timer_next_run()
+
+    journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
     from_journal = _freshness_from_lines(journal, source="journal")
-    if from_journal:
-        return from_journal
-
     from_log = _freshness_from_lines(log_lines, source="vulture.log")
-    if from_log:
-        return from_log
+    activity = from_journal or from_log
 
-    if journal:
-        return {
-            "status": "seen",
-            "detail": "Scheduler journal entries present",
-            "warning": None,
-        }
+    last_success = None
+    last_success_age_min = None
+    success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
+    success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
+    success = success_journal or success_log
+    if success:
+        last_success = success.get("last_success")
+        last_success_age_min = success.get("last_success_age_min")
+
+    timer_healthy = _timer_is_healthy(timer_svc)
+    service_running = service_svc.active == "active"
+    service_failed = service_svc.active == "failed"
+
+    warning: str | None = None
+    status = "unknown"
+    detail_parts: list[str] = []
+
+    if timer_svc.unit is None or timer_svc.active in ("not found",):
+        warning = "Scheduler timer missing/inactive"
+        status = "unhealthy"
+        detail_parts.append("timer not found")
+    elif not timer_healthy:
+        warning = "Scheduler timer missing/inactive"
+        status = "unhealthy"
+        detail_parts.append(f"timer {timer_svc.active}")
+    elif service_failed:
+        warning = "Scheduler service failed"
+        status = "unhealthy"
+        detail_parts.append(f"service {service_svc.active}")
+    elif service_running:
+        status = "running"
+        detail_parts.append("hunt cycle in progress")
+    elif activity and activity.get("status") == "stale":
+        warning = str(activity["warning"])
+        status = "stale"
+        detail_parts.append(activity["detail"])
+    elif activity and activity.get("status") == "fresh":
+        status = "fresh"
+        detail_parts.append(activity["detail"])
+    elif journal:
+        status = "seen"
+        detail_parts.append("scheduler journal entries present")
+    else:
+        detail_parts.append("no recent scheduler lines in journal or log tail")
+
+    if next_run:
+        detail_parts.append(f"next run {next_run}")
+    if last_success:
+        detail_parts.append(f"last success {last_success}")
 
     return {
-        "status": "unknown",
-        "detail": "No recent scheduler lines in journal or log tail",
-        "warning": None,
+        "status": status,
+        "detail": " · ".join(detail_parts),
+        "warning": warning,
+        "timer": timer_svc,
+        "service": service_svc,
+        "timer_active": timer_svc.active,
+        "service_active": service_svc.active,
+        "next_run": next_run,
+        "last_success": last_success,
+        "last_success_age_min": last_success_age_min,
     }
+
+
+def _scheduler_freshness(log_lines: list[str]) -> dict[str, Any]:
+    """Backward-compatible freshness view backed by timer-aware health."""
+    return _evaluate_scheduler_health(log_lines)
 
 
 def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
     bot_svc = _check_service("vulture-bot", ("vulture-bot.service", "vulture-bot"))
-    sched_svc = _check_service(
-        "vulture-scheduler", ("vulture-scheduler.service", "vulture-scheduler")
-    )
+    scheduler = _evaluate_scheduler_health(log_lines or [])
 
     bot_proc, bot_detail = _process_running("discord_bot.py")
     sched_proc, sched_detail = _process_running("main.py")
 
     sessions, tmux_warn = _tmux_sessions()
     log_mtime, log_warn = _log_mtime()
-    freshness = _scheduler_freshness(log_lines or [])
+    freshness = {
+        "status": scheduler["status"],
+        "detail": scheduler["detail"],
+        "warning": scheduler["warning"],
+        "next_run": scheduler.get("next_run"),
+        "last_success": scheduler.get("last_success"),
+        "timer_active": scheduler.get("timer_active"),
+        "service_active": scheduler.get("service_active"),
+    }
 
     warnings: list[str] = []
     if tmux_warn:
         warnings.append(tmux_warn)
     if log_warn:
         warnings.append(log_warn)
-    if freshness.get("warning"):
-        warnings.append(str(freshness["warning"]))
+    if scheduler.get("warning"):
+        warnings.append(str(scheduler["warning"]))
+    if scheduler["service"].warning:
+        warnings.append(scheduler["service"].warning)
 
     bot_running = _service_active(bot_svc) or bot_proc
-    sched_running = _service_active(sched_svc) or sched_proc
+    sched_running = scheduler["service"].active == "active" or sched_proc
+    sched_ok = _timer_is_healthy(scheduler["timer"]) and scheduler["service"].active != "failed"
+
+    scheduler_detail_parts = []
+    timer_detail = _systemd_detail(scheduler["timer"])
+    service_detail = _systemd_detail(scheduler["service"])
+    if timer_detail:
+        scheduler_detail_parts.append(timer_detail)
+    if service_detail:
+        scheduler_detail_parts.append(service_detail)
+    if sched_proc:
+        scheduler_detail_parts.append(f"process: {sched_detail[:120]}")
+    if scheduler.get("next_run"):
+        scheduler_detail_parts.append(f"next: {scheduler['next_run']}")
+    scheduler_detail = " · ".join(scheduler_detail_parts) if scheduler_detail_parts else "not detected"
+
+    scheduler_warning = None
+    if not sched_ok:
+        scheduler_warning = scheduler.get("warning") or "Scheduler timer missing/inactive"
+    elif sched_running:
+        scheduler_warning = None
+    elif scheduler.get("warning"):
+        scheduler_warning = str(scheduler["warning"])
 
     processes = [
         ProcessMatch(
@@ -225,20 +393,24 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         ),
         ProcessMatch(
             label="Scheduler",
-            running=sched_running,
-            detail=_format_runtime_detail(sched_svc, sched_proc, sched_detail),
-            warning=None if sched_running else "Scheduler not detected",
+            running=sched_running or sched_ok,
+            detail=scheduler_detail,
+            warning=scheduler_warning,
         ),
     ]
 
     return {
         "systemd": {
             "bot": bot_svc,
-            "scheduler": sched_svc,
+            "scheduler_timer": scheduler["timer"],
+            "scheduler_service": scheduler["service"],
+            # Backward-compatible alias for templates/tests expecting scheduler key.
+            "scheduler": scheduler["timer"],
         },
         "processes": processes,
         "tmux_sessions": sessions,
         "log_mtime": log_mtime,
         "scheduler_freshness": freshness,
+        "scheduler_health": scheduler,
         "warnings": warnings,
     }

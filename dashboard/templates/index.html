@@ -136,6 +136,7 @@
     .stat-value.paused, .warn { color: var(--paused); }
     .stat-value.ended { color: var(--ended); }
     .bad, .missing { color: var(--err-text); }
+    .muted-cell { color: var(--muted); font-size: 0.85rem; max-width: 22rem; }
 
     section {
       background: var(--surface);
@@ -405,13 +406,20 @@
           <div class="card-value small">{{ vulture.log_mtime or '—' }}</div>
         </div>
         <div class="card">
-          <div class="card-label">Scheduler freshness</div>
+          <div class="card-label">Scheduler health</div>
           <div class="card-value small">
-            <span class="pill {% if vulture.scheduler_freshness.status == 'fresh' %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% else %}muted{% endif %}">
+            <span class="pill {% if vulture.scheduler_freshness.status in ('fresh', 'running', 'seen') %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% elif vulture.scheduler_freshness.status == 'unhealthy' %}bad{% else %}muted{% endif %}">
               {{ vulture.scheduler_freshness.status }}
             </span>
           </div>
           <div class="meta" style="margin:0.35rem 0 0;">{{ vulture.scheduler_freshness.detail }}</div>
+          {% if vulture.scheduler_freshness.next_run or vulture.scheduler_freshness.last_success %}
+          <div class="meta" style="margin:0.35rem 0 0;">
+            {% if vulture.scheduler_freshness.next_run %}next: {{ vulture.scheduler_freshness.next_run }}{% endif %}
+            {% if vulture.scheduler_freshness.next_run and vulture.scheduler_freshness.last_success %} · {% endif %}
+            {% if vulture.scheduler_freshness.last_success %}last success: {{ vulture.scheduler_freshness.last_success }}{% endif %}
+          </div>
+          {% endif %}
         </div>
       </div>
       {% if vulture.tmux_sessions %}
@@ -508,29 +516,40 @@
               <th>Mount</th>
               <th>Path</th>
               <th>Status</th>
-              <th>Filesystem</th>
+              <th>Source</th>
               <th>Size</th>
               <th>Used</th>
               <th>Avail</th>
               <th>Use %</th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody>
             {% for mount in storage %}
             <tr>
-              <td>{{ mount.label }}</td>
-              <td><code>{{ mount.path }}</code></td>
-              <td class="{% if mount.mounted %}ok{% else %}missing{% endif %}">
-                {{ 'mounted' if mount.mounted else 'missing' }}
+              <td>
+                {{ mount.label }}
+                {% if mount.legacy %}<span class="badge">legacy</span>{% endif %}
+                {% if not mount.required %}<span class="badge">optional</span>{% endif %}
               </td>
-              <td>{{ mount.filesystem or '—' }}</td>
+              <td><code>{{ mount.path }}</code></td>
+              <td class="{{ mount.display_class }}">
+                {{ mount.status }}
+              </td>
+              <td>{{ mount.actual_source or '—' }}</td>
               <td>{{ mount.size or '—' }}</td>
               <td>{{ mount.used or '—' }}</td>
               <td>{{ mount.available or '—' }}</td>
               <td>
                 {% if mount.percent_used is not none %}{{ '%.0f'|format(mount.percent_used) }}%{% else %}—{% endif %}
               </td>
+              <td class="muted-cell">{{ mount.message or '—' }}</td>
             </tr>
+            {% if mount.warning %}
+            <tr>
+              <td colspan="9" class="warn" style="font-size:0.82rem;">⚠ {{ mount.label }}: {{ mount.warning }}</td>
+            </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>

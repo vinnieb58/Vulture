@@ -95,6 +95,24 @@ compose_basename() {
     basename "$1"
 }
 
+needs_storage_mountpoints() {
+    local compose_file="$1"
+    [[ "$(compose_basename "$compose_file")" == "docker-compose.dashboard.yml" ]]
+}
+
+ensure_storage_mountpoints() {
+    section "Ensuring stable storage mountpoint directories"
+    sudo mkdir -p \
+        /mnt/storage \
+        /mnt/storage/microsd \
+        /mnt/storage/toshiba_ext \
+        /mnt/storage/portable_beast \
+        /mnt/storage/pelican_backup \
+        /mnt/storage/raven_nvme \
+        /mnt/storage/roost_spinning_0
+    echo "  Mountpoint directories present (drives may be unplugged)"
+}
+
 rebuild_stack() {
     local compose_file="$1"
 
@@ -103,6 +121,10 @@ rebuild_stack() {
     if [[ ! -f "$compose_file" ]]; then
         echo "  ERROR: compose file not found: ${compose_file}"
         exit 1
+    fi
+
+    if needs_storage_mountpoints "$compose_file"; then
+        ensure_storage_mountpoints
     fi
 
     if [[ $NO_BUILD -eq 1 ]]; then
