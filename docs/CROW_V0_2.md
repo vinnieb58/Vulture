@@ -1,5 +1,7 @@
 # Crow v0.2 — Raven Health & Reboot Awareness
 
+**Crow** is the Aviary Discord operations service (read-only). It runs inside `discord_bot.py` / `vulture-bot.service` alongside Vulture hunt commands. Platform context: [docs/current/AVIARY_PROJECT_CONTEXT.md](current/AVIARY_PROJECT_CONTEXT.md).
+
 Crow v0.2 expands the read-only Discord ops console with Raven health visibility aligned to:
 
 - `scripts/raven_healthcheck.sh`
@@ -57,8 +59,8 @@ Network:
 ✅ Tailscale
 Storage:
 ✅ Root SSD — 35% used
-⚠ portable_beast — MISSING
-⚠ toshiba_ext — MISSING
+⚠ toshiba_ext — NOT_MOUNTED (example)
+⚠ roost_spinning_0 — AUTOMOUNT_WAITING (example)
 Services:
 ✅ SSH — ACTIVE
 ✅ Tailscale — ACTIVE
@@ -75,8 +77,8 @@ Post-Reboot Validation
 ✅ Docker
 ✅ Samba
 ✅ Internet
-⚠ portable_beast — missing
-⚠ toshiba_ext — missing
+⚠ toshiba_ext — not mounted (example)
+⚠ microsd — missing (example)
 ✅ Vulture Bot
 ✅ Scheduler
 Overall: WARN
@@ -118,15 +120,19 @@ In addition to [v0.1 environment variables](CROW_V0_1.md), v0.2 supports:
 
 | Variable | Purpose |
 |----------|---------|
-| `CROW_EXPECTED_MOUNTS` | Comma-separated `Label:/path` pairs (default includes `/`, `/mnt/microsd`, `/mnt/portable_beast`, `/mnt/toshiba_ext`) |
+| `CROW_EXPECTED_MOUNTS` | Comma-separated `Label:/path` pairs. **Default in code** still uses legacy `/mnt/microsd`, `/mnt/portable_beast`, `/mnt/toshiba_ext`. On Raven, set to `/mnt/storage/*` paths (see below). |
 | `CROW_RAVEN_HEALTHCHECK_SCRIPT` | Optional path to `~/raven_healthcheck.sh` for future external fallback |
 | `CROW_RAVEN_POST_REBOOT_SCRIPT` | Optional path to `~/raven_post_reboot_check.sh` |
 
 Example:
 
+Recommended on Raven (matches dashboard/Canary/Roost layout):
+
 ```bash
-export CROW_EXPECTED_MOUNTS="Root SSD:/,MicroSD:/mnt/microsd,portable_beast:/mnt/portable_beast,toshiba_ext:/mnt/toshiba_ext"
+export CROW_EXPECTED_MOUNTS="Root SSD:/,MicroSD:/mnt/storage/microsd,Toshiba EXT:/mnt/storage/toshiba_ext,Pelican Backup:/mnt/storage/pelican_backup,Roost Spinning 0:/mnt/storage/roost_spinning_0,Raven NVME:/mnt/storage/raven_nvme"
 ```
+
+Legacy default (code fallback if unset): `/mnt/microsd`, `/mnt/portable_beast`, `/mnt/toshiba_ext`.
 
 ## Package layout
 

@@ -1,6 +1,6 @@
-# Vulture Dashboard v0.2
+# Aviary Dashboard v0.2 (Vulture repo)
 
-Read-only operational dashboard for Raven. Observe host health, Vulture runtime,
+Read-only operational dashboard for **Raven** (Aviary host). Observe host health, Vulture runtime,
 hunts, adapters, storage, Docker, and logs — without any write or admin controls.
 
 ## What v0.2 shows

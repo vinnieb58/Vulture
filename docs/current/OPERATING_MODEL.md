@@ -1,12 +1,14 @@
 # Vulture 2.0 — Operating Model
 
-_Last updated: 2026-05-22_
+_Last updated: 2026-06-10_
+
+**Scope:** This document describes how the **Vulture** deal-hunting service runs. For the broader **Aviary** platform (Raven, Crow, Canary, Roost, dashboard), see [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md).
 
 ---
 
-## 1. Current baseline: Vulture 2.0
+## 1. Current baseline: Vulture 2.0+
 
-Vulture 2.0 is the active, in-production version. The v1.0 designation in `README.md` and older session logs refers to the original YAML-only, webhook-only design. That design is still present in the codebase for compatibility, but it is not the default runtime path.
+Vulture 2.0+ is the active, in-production version on Raven. The v1.0 designation in older docs and `config/hunts.yaml` refers to the original YAML-only, Craigslist-only design. That path remains for dev compatibility but is **not** the Raven production default.
 
 ---
 
@@ -14,7 +16,9 @@ Vulture 2.0 is the active, in-production version. The v1.0 designation in `READM
 
 ### Discord bot — command and control
 
-`discord_bot.py` is the primary interface for managing hunts at runtime. Users create, list, enable, disable, and delete hunts through Discord slash commands. The bot writes hunt definitions directly to the SQLite database; no file editing is required.
+`discord_bot.py` is the primary interface for managing hunts at runtime. It also hosts **Crow** read-only ops commands on the same bot instance (`vulture-bot.service`).
+
+Users create, list, pause, resume, and end hunts through Discord slash commands. The bot writes hunt definitions to SQLite; no YAML editing is required in production.
 
 ### `main.py` — single hunt-cycle runner
 
@@ -22,130 +26,126 @@ Vulture 2.0 is the active, in-production version. The v1.0 designation in `READM
 
 1. Load environment (`.env`).
 2. Initialize SQLite (`data/vulture.db`).
-3. Load enabled hunts from the configured source.
-4. For each hunt: scrape → filter → deduplicate by URL → persist new listings → send Discord alerts.
-5. Log a cycle summary.
+3. Load enabled hunts from the configured source (`VULTURE_HUNT_SOURCE`).
+4. For each hunt (with multi-source fan-out): adapter → filter → dedupe → persist → Discord alert.
+5. Log a cycle summary and exit.
 
-`main.py` does not loop. It runs once and exits. Repetition is the scheduler's responsibility.
+`main.py` does not loop. Repetition is the scheduler's responsibility.
 
-### Scheduler / task layer — repetition
+### Scheduler — systemd on Raven
 
-An external scheduler (cron, systemd service, Windows Task Scheduler, or any equivalent) invokes `python main.py` on a fixed interval. The scheduler is not part of the Vulture codebase; it is an infrastructure concern.
+On Raven production:
 
-On Raven production, **`vulture-scheduler.service`** owns the hunt cycle loop. **`vulture-bot.service`** runs `discord_bot.py`. See `docs/current/RAVEN_SYSTEMD_RUNTIME.md`.
+| Unit | Role |
+|------|------|
+| `vulture-bot.service` | Long-running `discord_bot.py` |
+| `vulture-scheduler.timer` | Triggers hunt cycles every 15 minutes |
+| `vulture-scheduler.service` | Oneshot `main.py` — **inactive between runs is normal** |
+
+tmux was previously used for bot/scheduler longevity; that model is **deprecated** for production. Use tmux only for optional manual debugging.
+
+See [RAVEN_SYSTEMD_RUNTIME.md](RAVEN_SYSTEMD_RUNTIME.md).
 
 ---
 
-## 3. Hunt source: SQLite is the normal source of truth
+## 3. Hunt source: SQLite is the production source of truth
 
-The `VULTURE_HUNT_SOURCE` environment variable controls where `main.py` loads hunts from:
-
-| Value | Behavior |
-|-------|----------|
-| `db` | Load from SQLite `hunts` table only — **production default** |
+| `VULTURE_HUNT_SOURCE` | Behavior |
+|-----------------------|----------|
+| `db` | Load from SQLite `hunts` table only — **Raven production default** (`.env.example`) |
 | `yaml` | Load from `config/hunts.yaml` only — v1.0 / dev fallback |
 | `mixed` | Load both; YAML wins on name collision |
 
-In normal operation, `VULTURE_HUNT_SOURCE=db`. Hunts created via the Discord bot live in SQLite and are authoritative.
+If the variable is unset, `main.py` falls back to `yaml` — production `.env` must set `db`.
 
 ---
 
-## 4. `config/hunts.yaml` — legacy and dev compatibility only
+## 4. `config/hunts.yaml` — legacy and dev only
 
-`config/hunts.yaml` is **not** the production hunt store. Its roles are:
+Not the production hunt store. Used for:
 
-- **Legacy path:** supports `VULTURE_HUNT_SOURCE=yaml` for anyone on the old workflow.
-- **Dev / test seeding:** useful for bootstrapping a local database without the Discord bot.
-- **Mixed-mode fallback:** available as a supplement when `VULTURE_HUNT_SOURCE=mixed`.
-
-Production deployments should treat this file as a dev artifact. Changes to it have no effect when `VULTURE_HUNT_SOURCE=db`.
+- `VULTURE_HUNT_SOURCE=yaml` local workflows
+- Dev/test seeding
+- Mixed-mode supplement
 
 ---
 
-## 5. Adapters: Craigslist is the only stable production adapter
+## 5. Adapters and registry
 
-Craigslist (`adapters/craigslist.py`) is the only adapter that is tested, stable, and used in production. Hunt definitions with `source: craigslist` are the only ones that will execute successfully today.
+Adapter dispatch is **implemented** in `adapters/registry.py`. `main.py` calls `get_adapter(source)` — not scattered `if/elif` chains.
 
-Other sources (eBay, Facebook Marketplace, etc.) are not implemented. The `adapters/` directory and the `experiments/` directory contain exploration work, but no additional adapter is production-ready.
+### Registered runtime adapters (current)
 
----
+| Source | Classification | Notes |
+|--------|----------------|-------|
+| `craigslist` | **stable** | Primary production adapter |
+| `mercari` | **beta** | GraphQL search |
+| `microcenter` | **beta** | Playwright; computer/laptop verticals |
+| `offerup` | experimental | GeoIP-only location |
+| `carsdotcom` | experimental | Playwright; vehicles; flaky |
+| `swappa`, `bestbuy`, `newegg` | experimental | Vertical profiles in `engine/source_selection.py` |
 
-## 6. Adapter registry — next architecture foundation
+Probe-only work (eBay, etc.) lives under `experiments/adapters/` without runtime registration.
 
-The adapter registry is the planned mechanism for registering, discovering, and routing hunt execution to the correct adapter by source name. It is the next significant architectural milestone after Vulture 2.0 stabilizes.
-
-Until the registry is complete, adapter dispatch is handled by direct conditional logic in `main.py`. Do not modify the adapter registry work in progress; treat it as a protected foundation.
-
----
-
-## 7. Runtime filtering is deterministic
-
-Listing pass/fail decisions at runtime are made exclusively by the rule engine (`engine/rules.py`). Rules evaluate:
-
-- `max_price` — numeric ceiling
-- `include_keywords` — at least one must match the listing title (case-insensitive substring)
-- `exclude_keywords` — none may match the listing title (case-insensitive substring)
-
-This logic is static and deterministic. It does not call any external service and has no probabilistic component.
+Vertical-aware defaults: `engine/source_selection.py` selects `source_sites` per translated hunt category.
 
 ---
 
-## 8. LLM translation — hunt creation only, never runtime filtering
+## 6. Runtime filtering is deterministic
 
-LLM assistance (if used) is scoped to **translating natural-language hunt requests into structured hunt objects** before they are persisted to SQLite. Once a hunt is stored, it is a plain data record. The LLM has no role in evaluating individual listings at runtime.
-
-An LLM must never be in the critical path of deciding whether a scraped listing passes or fails. Runtime decisions belong to the deterministic rule engine.
+Listing pass/fail is exclusively `engine/rules.py` — price, keywords, and structured constraints (TV size, GPU tier, RAM, vehicle year/miles). No LLM at runtime.
 
 ---
 
-## 9. Raven — headless runtime target
+## 7. LLM translation — hunt creation only
 
-Raven is the target headless deployment environment. Vulture is designed to run without a GUI or interactive terminal. `main.py` writes all output to `logs/vulture.log` in addition to stdout, so it operates correctly when invoked by a scheduler in a headless context.
-
-Production Raven uses **systemd** (`vulture-bot.service`, `vulture-scheduler.service`) — not tmux — for bot and scheduler lifecycle. tmux remains available only for optional manual debugging.
-
-Ensure the working directory is set to the project root when invoking `python main.py` under a scheduler so that relative paths (`data/`, `logs/`, `config/`) resolve correctly.
+Natural-language `/hunt` intents are translated into structured hunt rows before SQLite persistence. Vehicle intents route through `engine/intent_translator_v2.py`. Once stored, hunts are plain data records evaluated deterministically at scrape time.
 
 ---
 
-## 10. `.env` — local only, never committed
+## 8. Raven — headless runtime target
 
-`.env` holds secrets and local configuration. It is listed in `.gitignore` and must never be committed to version control.
+Raven is the Aviary physical host. Vulture runs without GUI; logs go to `logs/vulture.log` and journald (bot/scheduler units).
 
-Use `.env.example` as the canonical reference for required and optional variables:
+Working directory for scheduled runs must be the repo root so `data/`, `logs/`, and `config/` resolve correctly.
+
+---
+
+## 9. `.env` — local only, never committed
+
+See `.env.example` for variables. Key production values:
 
 | Variable | Purpose |
 |----------|---------|
-| `DISCORD_WEBHOOK_URL` | Webhook for v1.0-style alert delivery |
+| `DISCORD_WEBHOOK_URL` | Webhook alerts for new listings |
 | `DISCORD_BOT_TOKEN` | Bot token for `discord_bot.py` |
-| `DISCORD_GUILD_ID` | Guild ID for instant slash command registration (dev) |
-| `VULTURE_HUNT_SOURCE` | Hunt source: `db` (default), `yaml`, or `mixed` |
-
-If `.env` is missing, `python-dotenv` will not error; variables must then be set in the environment by other means (e.g. systemd environment file, container env vars).
+| `DISCORD_GUILD_ID` | Optional dev guild for instant slash registration |
+| `VULTURE_HUNT_SOURCE` | `db` on Raven |
 
 ---
 
 ## Architecture summary
 
-```
-Discord bot (discord_bot.py)
-  └── creates / manages hunts in SQLite (data/vulture.db)
+```text
+Discord (Vulture hunts + Crow /check)
+  └── discord_bot.py → SQLite hunts (data/vulture.db)
 
-Scheduler (cron / systemd / Task Scheduler)
-  └── invokes: python main.py  [on interval]
-        └── loads hunts from SQLite (VULTURE_HUNT_SOURCE=db)
-              └── for each hunt:
-                    scrape (adapters/craigslist.py)
-                    filter (engine/rules.py)  ← deterministic only
-                    dedupe (engine/database.py)
-                    persist new listings
-                    alert (engine/notifier.py → Discord)
+vulture-scheduler.timer
+  └── vulture-scheduler.service → main.py (oneshot)
+        └── VULTURE_HUNT_SOURCE=db
+              └── per hunt / per source:
+                    adapters.registry.get_adapter()
+                    engine.rules (deterministic)
+                    engine.database (dedupe)
+                    engine.notifier (Discord webhook)
 ```
 
 ---
 
 ## What is NOT current
 
-- `README.md` still describes the v1.0 YAML-only, webhook-only model. It is accurate for that compatibility path but does not describe the default production configuration.
-- Windows Task Scheduler examples in `README.md` are illustrative only; Raven (Linux/headless) is the production target.
-- `config/hunts.yaml` is not a live configuration file in production.
+- YAML as primary production hunt configuration
+- tmux as production scheduler/bot supervisor
+- Adapter registry as "planned future work"
+- Craigslist as the only registered adapter
+- Treating this repo as "Vulture-only" with no Aviary/Crow/Canary context

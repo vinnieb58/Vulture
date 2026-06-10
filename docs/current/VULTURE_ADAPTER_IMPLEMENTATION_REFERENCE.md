@@ -1,10 +1,12 @@
 # Vulture Adapter Implementation Reference
 
-_Last updated: 2026-05-22_
+_Last updated: 2026-06-10_
 
 ## Purpose
 
-This file is a focused reference for how Vulture adapters should be designed, tested, registered, and promoted.
+This file is a focused reference for how **Vulture** adapters should be designed, tested, registered, and promoted.
+
+Platform context: [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md). This document is Vulture-scoped only.
 
 It is intentionally about **how Vulture works** and how future adapters should fit into the system. It does **not** document OfferUp-specific implementation details.
 
@@ -57,46 +59,23 @@ The scheduler repeats `main.py`. It does not change adapter behavior. A schedule
 
 ---
 
-## Adapter registry
+## Adapter registry (implemented)
 
-Adapter dispatch should go through a central registry, not scattered `if/elif` logic in `main.py`.
+Adapter dispatch **is** centralized in `adapters/registry.py`. `main.py` calls `get_adapter(source)` — no scattered source `if/elif` chain.
 
-Current registry responsibilities:
+Registry responsibilities:
 
 - normalize source names,
 - map source names to adapter search callables,
-- expose source capability metadata,
-- provide a single place to register future adapters,
-- allow unknown sources to be skipped or logged clearly.
+- expose capability metadata (`get_capabilities`, `get_source_metadata`),
+- register runtime adapters in `_REGISTRY`,
+- log and skip unknown sources gracefully.
 
-Expected conceptual shape:
+**Runtime-registered sources (2026-06-10):** `bestbuy`, `carsdotcom`, `craigslist`, `microcenter`, `newegg`, `offerup`, `mercari`, `swappa`.
 
-```python
-_REGISTRY = {
-    "craigslist": search_craigslist,
-}
+Classifications live in `_CAPABILITIES` (`status`: `stable` | `beta` | `experimental`). See `docs/current/CODEBASE_STATUS.md` for the current matrix.
 
-_CAPABILITIES = {
-    "craigslist": {
-        "stable": True,
-        "experimental": False,
-        "requires_browser": False,
-        "requires_login": False,
-        "supports_location": True,
-        "supports_radius": False,
-        "supports_price_filter_in_url": False,
-        "location_control": "verified",
-        "verticals": [
-            "general_marketplace",
-            "computer_parts",
-            "vehicles",
-            "home_theater",
-        ],
-    },
-}
-```
-
-The exact live names should follow the repository, but the design goal is stable: adapters should be registered centrally.
+Probe-only metadata may use `_PROBE_CAPABILITIES` without a `_REGISTRY` entry.
 
 ---
 
@@ -119,7 +98,7 @@ Future adapters may need one of these:
 3. small source-specific wrapper functions registered in the registry,
 4. adapter options passed from the hunt model.
 
-Do not redesign this interface casually. Change it only when a second or third real adapter proves the need.
+Do not redesign this interface casually. Multiple adapters already use this contract; evolve it only with a deliberate migration plan (e.g. shared `AdapterSearchContext`).
 
 ---
 

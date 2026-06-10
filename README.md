@@ -1,255 +1,141 @@
-# Vulture
+# Aviary (monorepo)
 
-Vulture is a deal-hunting tool that scrapes marketplaces for listings matching defined hunts, filters them against configurable rules, persists new finds to a local SQLite database, and sends Discord alerts for anything new.
+**Aviary** is a personal home-lab platform. This repository hosts multiple services that run primarily on **Raven**, a headless Ubuntu server.
 
-**Crow** (read-only ops console for Raven + Vulture) lives in the `crow/` package inside this repo. See [docs/CROW_V0_2.md](docs/CROW_V0_2.md) for Raven health commands (`/check raven`, `/check reboot`, …) and [docs/CROW_V0_1.md](docs/CROW_V0_1.md) for the original v0.1 surface. Start the Discord bot the same way: `python discord_bot.py`.
+| Name | Role |
+|------|------|
+| **Aviary** | Umbrella platform |
+| **Raven** | Physical server / infrastructure host |
+| **Vulture** | Marketplace deal-hunting service (core engine in this repo) |
+| **Crow** | Discord read-only ops / Raven health checks |
+| **Canary** | Periodic read-only monitoring (JSON + logs) |
+| **Dashboard** | Read-only web ops UI (`:8088`) |
+| **Roost** | Storage/NAS layer (`/mnt/storage/*`) |
+
+**Start here:** [docs/current/AVIARY_PROJECT_CONTEXT.md](docs/current/AVIARY_PROJECT_CONTEXT.md) — authoritative platform context, service catalog, Raven runtime, and agent guidance.
+
+Vulture-specific docs live under `docs/current/VULTURE_*.md`. Crow: [docs/CROW_V0_2.md](docs/CROW_V0_2.md).
 
 ---
 
-## v1.0 Scope
+## Repository layout
 
-- **Source:** Craigslist only
-- **Alerts:** Discord webhook
-- **Storage:** SQLite (local file)
-- **Hunt configuration:** YAML-driven (`config/hunts.yaml`)
-- **Rule engine:** `max_price`, `include_keywords`, `exclude_keywords`
-- **Scheduling:** External scheduler (Windows Task Scheduler or equivalent)
-
----
-
-## Folder Structure
-
-```
-vulture/
-├── adapters/
-│   └── craigslist.py       # Craigslist scraper
-├── config/
-│   ├── hunts.yaml          # Hunt definitions
-│   └── settings.yaml       # Reserved for future settings
-├── data/
-│   └── vulture.db          # SQLite database (auto-created on first run)
-├── engine/
-│   ├── database.py         # DB init, deduplication, listing persistence
-│   ├── hunts.py            # YAML hunt loader
-│   ├── notifier.py         # Discord webhook alerts
-│   └── rules.py            # Rule evaluation logic
-├── logs/
-│   └── vulture.log         # Log file (auto-created on first run)
-├── models/
-│   └── listing.py          # Listing dataclass
-├── .env                    # Discord webhook URL (not committed)
-├── main.py                 # Entry point
-└── requirements.txt        # Python dependencies
+```text
+.
+├── main.py                 # Vulture hunt-cycle runner (one shot per invocation)
+├── discord_bot.py          # Discord bot: Vulture hunt commands + Crow ops
+├── adapters/               # Marketplace source adapters + registry
+├── engine/                 # Hunts, rules, translator, DB, notifications
+├── crow/                   # Crow Discord ops package (v0.2)
+├── canary/                 # Canary monitoring service (v0.1)
+├── dashboard/              # Read-only ops dashboard (v0.2)
+├── deploy/systemd/         # Raven production unit files
+├── config/hunts.yaml       # Legacy YAML hunts (dev / yaml mode only)
+├── data/vulture.db         # SQLite (runtime; auto-created)
+├── docs/current/           # Current-state documentation
+└── scripts/                # Raven deploy and smoke scripts
 ```
 
 ---
 
-## Setup
+## Quick start (development)
 
-### 1. Clone the repository
+### 1. Clone and virtualenv
 
-```
+```bash
 git clone <repo-url>
-cd vulture
-```
-
-### 2. Create a virtual environment
-
-```
-python -m venv .venv
-```
-
-Activate it:
-
-- **Windows:** `.venv\Scripts\activate`
-- **macOS/Linux:** `source .venv/bin/activate`
-
-### 3. Install dependencies
-
-```
+cd vulture   # repo directory name may still be "vulture" on Raven
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure the Discord webhook
+### 2. Configure environment
 
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` and set at minimum:
 
-```
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your/webhook/url
-```
-
-If `DISCORD_WEBHOOK_URL` is not set, Discord alerts are skipped and a warning is logged. The rest of the run continues normally.
-
----
-
-## Configuration
-
-### `config/hunts.yaml`
-
-All hunts are defined in this file. Each hunt is an entry in the top-level `hunts` list.
-
-**Minimal hunt (no rules):**
-
-```yaml
-hunts:
-  - name: monitor_houston
-    source: craigslist
-    city: houston
-    query: monitor
-    limit: 10
-    enabled: true
+```bash
+DISCORD_BOT_TOKEN=...          # for discord_bot.py (Vulture + Crow)
+DISCORD_WEBHOOK_URL=...        # for hunt alert webhooks
+VULTURE_HUNT_SOURCE=db         # production-style: SQLite hunts from Discord
 ```
 
-**Hunt with rules:**
+### 3. Run Vulture
 
-```yaml
-hunts:
-  - name: gpu_hunt
-    source: craigslist
-    city: houston
-    query: gpu
-    limit: 20
-    enabled: true
-    rules:
-      max_price: 400
-      include_keywords:
-        - "3080"
-        - "3090"
-        - "4080"
-      exclude_keywords:
-        - broken
-        - parts only
-```
+One hunt cycle (loads hunts per `VULTURE_HUNT_SOURCE`):
 
-### Hunt fields
-
-| Field | Required | Default | Description |
-|---|---|---|---|
-| `name` | Yes | — | Unique identifier for the hunt |
-| `source` | Yes | — | Marketplace to scrape. Only `craigslist` is supported in v1.0 |
-| `city` | No | `houston` | Craigslist subdomain city |
-| `query` | Yes | — | Search query string |
-| `limit` | No | `10` | Max number of listings to fetch per run |
-| `enabled` | No | `true` | Set to `false` to disable without removing the hunt |
-| `rules` | No | none | Optional rule block (see below) |
-
-### Rule fields
-
-| Rule | Type | Description |
-|---|---|---|
-| `max_price` | integer | Listing price must be ≤ this value. Listings with no price are excluded when this rule is set. |
-| `include_keywords` | list | At least one keyword must appear in the listing title (case-insensitive, substring match). |
-| `exclude_keywords` | list | No excluded keyword may appear in the listing title (case-insensitive, substring match). |
-
-**Note on numeric keywords:** YAML parses unquoted numbers (e.g. `3080`) as integers. Vulture handles this safely, but quoting them (`"3080"`) is recommended for clarity.
-
-### Enabling and disabling hunts
-
-Set `enabled: false` on any hunt to skip it during execution. Its history in the database is preserved. Re-enable by setting `enabled: true` or removing the field entirely (missing `enabled` defaults to `true`).
-
----
-
-## Runtime Behavior
-
-### How a run works
-
-1. `main.py` initializes logging and the SQLite database.
-2. All enabled hunts are loaded from `config/hunts.yaml`.
-3. For each hunt, listings are scraped from the configured source.
-4. Each listing is evaluated against the hunt's rules (if any). Listings that fail are logged as `FILTERED` and skipped entirely.
-5. Listings that pass rules are checked against the database by URL. Duplicates are logged as `OLD` and skipped.
-6. New listings are inserted into the database, logged as `NEW`, and sent as Discord alerts.
-7. A cycle summary is logged when all hunts complete.
-
-### Deduplication
-
-Listings are deduplicated by their URL (`link` field). A listing is only inserted and alerted once, regardless of how many hunts or runs encounter it.
-
-### Discord alerts
-
-A Discord message is sent for each new listing that passes rules. Alerts include source, title, price, location, and link. If the webhook is unavailable or returns an error, the error is logged and the run continues — the listing is still saved to the database.
-
-### Logging
-
-Logs are written to both the console and `logs/vulture.log`. The log level is `INFO`. Each run produces:
-
-```
-2026-03-11 09:00:00,001 [INFO] Starting Vulture hunt cycle
-2026-03-11 09:00:00,012 [INFO] Loaded 2 hunt(s)
-2026-03-11 09:00:00,015 [INFO] Starting hunt: gpu_hunt (craigslist)
-2026-03-11 09:00:03,210 [INFO] NEW: Listing(source='craigslist', ...)
-2026-03-11 09:00:04,100 [INFO] Done hunt 'gpu_hunt'. New: 1, Existing: 4, Filtered: 2
-2026-03-11 09:00:04,200 [INFO] 1 new listing(s) found
-2026-03-11 09:00:04,201 [INFO] Hunt cycle completed
-```
-
-`logs/vulture.log` appends across runs and is not rotated automatically in v1.0.
-
----
-
-## Running Vulture
-
-### Manual run
-
-From the project root with the virtual environment active:
-
-```
+```bash
 python main.py
 ```
 
-### Windows Task Scheduler
+Discord bot (Vulture hunt commands + Crow `/check` commands):
 
-To run Vulture automatically on a schedule:
+```bash
+python discord_bot.py
+```
 
-1. Open **Task Scheduler** and click **Create Basic Task**.
-2. Set a name (e.g. `Vulture`) and a trigger (e.g. every 30 minutes).
-3. For the action, select **Start a program** and configure:
+### 4. Tests
 
-   | Field | Value |
-   |---|---|
-   | Program/script | `C:\Users\<you>\vulture\.venv\Scripts\python.exe` |
-   | Add arguments | `main.py` |
-   | Start in | `C:\Users\<you>\vulture` |
-
-4. Under **Conditions**, uncheck "Start the task only if the computer is on AC power" if running on a laptop.
-5. Under **Settings**, check "If the task is already running, do not start a new instance" to prevent overlapping runs.
-
-**Important:** Use the full path to the `.venv` Python executable, not the system Python. The **Start in** directory must be set to the project root so relative paths (`config/`, `data/`, `logs/`) resolve correctly.
+```bash
+pytest tests
+```
 
 ---
 
-## v1.0 Limitations / Deferred to v2.0
+## Vulture (deal-hunting service)
 
-- **Single source:** Only Craigslist is supported. eBay and other adapters are not implemented.
-- **No log rotation:** `logs/vulture.log` grows indefinitely. Manual cleanup or an external log rotation tool is required.
-- **No price history:** The database records `first_seen` only. Price changes on existing listings are not tracked.
-- **No re-alert logic:** A listing already in the database is never alerted again, even if its price drops.
-- **Substring keyword matching only:** `include_keywords` and `exclude_keywords` use simple substring matching. Regular expressions and whole-word matching are not supported.
-- **No web UI or CLI:** Hunts are managed by editing `config/hunts.yaml` directly.
-- **No multi-city hunts:** Each hunt targets a single Craigslist city.
+Vulture scrapes configured marketplace sources, applies **deterministic** rules, deduplicates by listing URL in SQLite, and sends Discord alerts for new matches.
+
+### Production behavior (Vulture 2.0+)
+
+- Hunts are created and managed via **Discord slash commands** (`/hunt`, `/hunt_list`, …) and stored in **SQLite** (`data/vulture.db`).
+- `VULTURE_HUNT_SOURCE=db` is the production default (see `.env.example`).
+- `main.py` is invoked on a schedule (on Raven: **`vulture-scheduler.timer`** every 15 minutes).
+- Adapter dispatch goes through **`adapters/registry.py`** with multi-source fan-out per hunt vertical.
+- Runtime filtering is **deterministic only** (`engine/rules.py`) — no LLM at scrape time.
+
+See [docs/current/VULTURE_2_0_ARCHITECTURE.md](docs/current/VULTURE_2_0_ARCHITECTURE.md) and [docs/current/OPERATING_MODEL.md](docs/current/OPERATING_MODEL.md).
+
+### Legacy v1.0 compatibility
+
+The original YAML-only, Craigslist-only, webhook-only workflow remains available for local/dev use:
+
+- Set `VULTURE_HUNT_SOURCE=yaml` and edit `config/hunts.yaml`.
+- Schedule with cron, Task Scheduler, or manual runs.
+
+That path is **not** the Raven production default. See the historical sections in git history or `docs/current/VULTURE_2_0_SOURCE_CLEANUP_AND_HISTORY.md` for the v1.0 → 2.0 transition narrative.
 
 ---
 
-## Troubleshooting
+## Crow, Canary, dashboard
 
-**No listings appear / run finishes with all `OLD`**
-The database already contains these listings from a previous run. This is normal behavior. Delete `data/vulture.db` to reset state.
+| Service | Docs | Run on Raven |
+|---------|------|--------------|
+| Crow | [docs/CROW_V0_2.md](docs/CROW_V0_2.md) | Same bot as Vulture (`vulture-bot.service`) |
+| Canary | [canary/README.md](canary/README.md) | `docker compose -f docker-compose.canary.yml up -d` |
+| Dashboard | [dashboard/README.md](dashboard/README.md) | `docker compose -f docker-compose.dashboard.yml up -d` |
 
-**`FILTERED` listings that you expected to pass**
-Check your `max_price` threshold and keyword lists in `config/hunts.yaml`. For `max_price`, listings with no price are always filtered when the rule is set. For keywords, matching is case-insensitive substring — `"monitor"` matches `"27 inch Monitor"`.
+---
 
-**Discord alerts not arriving**
-- Confirm `DISCORD_WEBHOOK_URL` is set in `.env` and the `.env` file is in the project root.
-- Check `logs/vulture.log` for `WARNING No Discord webhook configured` or any `Failed to send Discord alert` error lines.
-- Test the webhook URL manually with a tool like `curl` or Postman.
+## Raven production deploy
 
-**`python-dotenv` not found**
-Install it manually: `pip install python-dotenv`. It is used by `engine/notifier.py` to load the `.env` file.
+On Raven, use tracked scripts from the repo root:
 
-**Task Scheduler run does nothing / exits immediately**
-- Confirm the **Start in** directory is set to the project root.
-- Confirm the **Program/script** points to the `.venv` Python executable, not the system Python.
-- Check `logs/vulture.log` for error output — the scheduler suppresses console output but the log file is always written.
+```bash
+./scripts/update_raven_quick.sh          # default operational update
+./scripts/update_raven.sh                # full validation + one hunt cycle
+```
 
-**`AttributeError` or unexpected crash**
-Check `logs/vulture.log` for lines containing `ERROR` or `CRITICAL`. Hunt-level exceptions are caught and logged with a full traceback; the remaining hunts continue to run.
+Systemd model: [docs/current/RAVEN_SYSTEMD_RUNTIME.md](docs/current/RAVEN_SYSTEMD_RUNTIME.md).
+
+---
+
+## Documentation index
+
+| Document | Purpose |
+|----------|---------|
+| [AVIARY_PROJECT_CONTEXT.md](docs/current/AVIARY_PROJECT_CONTEXT.md) | Platform vision, services, Raven inventory, accuracy notes |
+| [CODEBASE_STATUS.md](docs/current/CODEBASE_STATUS.md) | Implementation-grounded code map |
+| [PROJECT_STATUS.md](docs/current/PROJECT_STATUS.md) | Current workstream / priorities |
+| [OPERATING_MODEL.md](docs/current/OPERATING_MODEL.md) | How Vulture runs in production |
+| [SESSION_LOG.md](docs/current/SESSION_LOG.md) | Session history |

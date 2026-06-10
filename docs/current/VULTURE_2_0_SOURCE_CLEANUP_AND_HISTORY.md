@@ -1,10 +1,12 @@
 # Vulture Source Cleanup and History
 
-_Last refreshed: 2026-05-21_
+_Last refreshed: 2026-06-10_
 
 ## Purpose
 
 This file replaces the old scattered project-source context. It explains which historical assumptions are obsolete, which parts remain useful, and how to interpret the project going forward.
+
+**Platform naming (2026-06):** The repo is the **Aviary** monorepo. **Vulture** is the deal-hunting service. See [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md).
 
 The goal is to prevent future confusion when ChatGPT, Cursor, or another assistant sees older planning files.
 
