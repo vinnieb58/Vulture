@@ -1,47 +1,55 @@
 # Vulture 2.0+ Adapter Expansion Plan (Current Reality)
 
-Last refreshed: 2026-05-28 (UTC)
+Last refreshed: 2026-06-10 (UTC)
+
+Platform context: [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md).
 
 ## Current adapter baseline
 
-The registry foundation already exists in `adapters/registry.py`.
+The registry foundation **exists and is in production use** in `adapters/registry.py`.
 
 ### Runtime-registered adapters
 
-| Source | Classification | Why |
-|---|---|---|
+| Source | Classification | Notes |
+|--------|----------------|-------|
 | `craigslist` | stable | Primary production adapter |
-| `offerup` | experimental candidate | Works as adapter, but location control is GeoIP-only |
-| `carsdotcom` | experimental candidate | Works with Playwright on residential-like network conditions; still marked experimental |
+| `mercari` | beta | GraphQL search |
+| `microcenter` | beta | Playwright; `storeid`; computer/laptop verticals |
+| `offerup` | experimental | GeoIP-only location |
+| `carsdotcom` | experimental | Playwright; vehicles; flaky |
+| `swappa` | experimental | Requests/HTML |
+| `bestbuy` | experimental | Playwright |
+| `newegg` | experimental | Requests/HTML |
 
-### Probe-only/deferred
+Vertical defaults: `engine/source_selection.py` includes experimental retail sources in computer/gaming/retail profiles when registered.
 
-| Source | Classification | Why |
-|---|---|---|
-| eBay | probe only | Recon documents repeated 403/network-layer block; Browse API suggested |
-| Micro Center | probe only | Probe script exists; no runtime adapter |
-| Mercari | deferred | No implementation/probe in repository |
+### Probe-only / no runtime adapter
 
-## Expansion policy (from current code constraints)
+| Source | Status |
+|--------|--------|
+| eBay | Probe scripts under `experiments/adapters/`; Browse API recommended |
+| Facebook Marketplace, others | Recon/probe only unless added to `_REGISTRY` |
 
-1. Keep runtime deterministic (`rules.py`) and adapter outputs normalized to `Listing`.
-2. Keep adapter side effects out of adapter modules (no direct DB writes/alerts from adapters).
-3. Promote adapters to stable only after repeated smoke results in real run cycles.
-4. Keep capability metadata truthful (`stable`, `experimental`, `requires_browser`, `supports_location`, etc.).
+## Expansion policy
 
-## Next adapter hardening priorities
+1. Keep runtime deterministic (`rules.py`); adapters return normalized `Listing` objects.
+2. No DB writes or alerts inside adapter modules.
+3. Promote to stable only after repeated smoke/hunt-cycle evidence on Raven.
+4. Keep `_CAPABILITIES` truthful (`geoip_only`, `requires_browser`, `failure_mode`, etc.).
 
-1. Add repeatable smoke checks for all registered adapters.
-2. Record per-adapter pass/fail evidence in docs/session logs.
-3. Add minimal regression coverage around registry metadata access paths.
-4. Avoid introducing new adapter families until current experimental adapters have clear status evidence.
+## Next hardening priorities
 
-## Promotion checklist (experimental -> stable)
+1. Repeatable smoke checks for all `_REGISTRY` sources (`scripts/smoke_*`).
+2. Log outcomes in `SESSION_LOG.md`.
+3. Regression tests for registry metadata and source selection paths.
+4. One new source at a time — avoid parallel unproven adapters.
 
-An adapter should only be promoted to stable when all are true:
+## Promotion checklist (experimental/beta → stable)
 
-- Runs repeatedly without fatal errors in normal hunt cycles
-- Returns normalized listings (`source`, `title`, `price`, `location`, `link`)
-- Dedupe and alerts behave correctly under real data
-- Location behavior is documented and predictable
-- Bot/rules pipeline operates without adapter-specific hacks in `main.py`
+All must be true:
+
+- Repeated successful runs on Raven without crashing hunt cycles
+- Normalized listings (`source`, `title`, `price`, `location`, `link`)
+- Dedupe and alerts behave under real data
+- Location behavior documented and predictable
+- No adapter-specific hacks accumulating in `main.py` beyond documented options (e.g. `storeid`)

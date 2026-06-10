@@ -1,6 +1,6 @@
 # Crow v0.1
 
-Crow is the read-only Discord command and control layer for **The Aviary** — the operations surface for **Raven** (Ubuntu host) and **Vulture** (deal-hunting runtime).
+Crow is the read-only Discord operations service for **Aviary** — observability for **Raven** (Ubuntu host) and **Vulture** (deal-hunting runtime). Authoritative platform context: [docs/current/AVIARY_PROJECT_CONTEXT.md](current/AVIARY_PROJECT_CONTEXT.md).
 
 ## Why Crow lives in the Vulture repo (for now)
 

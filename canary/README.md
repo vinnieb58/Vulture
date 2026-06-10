@@ -1,6 +1,6 @@
 # Canary v0.1 — read-only Raven monitoring
 
-Canary is a lightweight, **read-only** Raven monitoring service for the Vulture repo. It runs periodic health checks, writes a machine-readable status file, and logs each run. It does **not** perform control or admin actions.
+**Canary** is an Aviary monitoring service — lightweight, **read-only** Raven health checks in the Vulture monorepo. Platform context: [docs/current/AVIARY_PROJECT_CONTEXT.md](../docs/current/AVIARY_PROJECT_CONTEXT.md). It runs periodic health checks, writes a machine-readable status file, and logs each run. It does **not** perform control or admin actions.
 
 ## What Canary does
 

@@ -1,3 +1,58 @@
+# SESSION LOG - 2026-06-10
+
+## Branch
+
+`cursor/aviary-docs-transition-3510`
+
+## Session goal
+
+Align project documentation with the **Aviary** umbrella transition: Vulture scoped as one service; Raven/Crow/Canary/Roost/dashboard accurately described.
+
+## Work completed
+
+### Aviary master doc
+
+- Added `docs/current/AVIARY_PROJECT_CONTEXT.md` — service catalog, Raven inventory, storage (`/mnt/storage/*`), network, runtime model, Vulture/Crow/Canary/dashboard status, roadmap, agent guidance, **Documentation Accuracy Notes**.
+
+### Updated docs
+
+- `README.md` — Aviary monorepo framing; Vulture quick start; legacy v1.0 demoted
+- `docs/current/PROJECT_STATUS.md`, `CODEBASE_STATUS.md`, `OPERATING_MODEL.md`
+- `docs/current/VULTURE_2_0_*.md`, `VULTURE_PROGRAMMING_REFERENCE.md`, `VULTURE_ADAPTER_IMPLEMENTATION_REFERENCE.md`
+- `docs/CROW_V0_1.md`, `docs/CROW_V0_2.md` — Aviary links; `/mnt/storage` mount examples
+- `docs/current/RAVEN_SYSTEMD_RUNTIME.md` — Aviary/Raven intro
+
+### Stale statements removed or corrected
+
+| Stale claim | Correction |
+|-------------|--------------|
+| Vulture = whole platform | Aviary umbrella; Vulture = deal-hunting service |
+| YAML primary production path | `VULTURE_HUNT_SOURCE=db` on Raven |
+| Adapter registry "future" | Implemented in `adapters/registry.py` (8 sources) |
+| Craigslist only stable adapter | + beta/experimental registered adapters |
+| tmux scheduler | systemd timer + oneshot service |
+| Crow default = current storage | Documented legacy vs `/mnt/storage/*` mismatch |
+
+### Code/doc contradictions (documented, not code-changed)
+
+- `crow/config.py` default mounts vs dashboard/Canary `/mnt/storage/*`
+- `main.py` env fallback `yaml` vs `.env.example` `db`
+
+## Verification
+
+- `git status -sb`
+- `find docs/ -maxdepth 3 -type f | sort`
+- `rg` stale-term scan
+- `python -m compileall -q adapters engine dashboard crow canary scripts main.py discord_bot.py`
+- `pytest tests`
+
+## Recommended next step
+
+1. Set `CROW_EXPECTED_MOUNTS` on Raven to `/mnt/storage/*` paths (or update `crow/config.py` defaults in a small follow-up).
+2. Continue adapter smoke evidence logging.
+
+---
+
 # SESSION LOG - 2026-03-29
 
 ## Branch

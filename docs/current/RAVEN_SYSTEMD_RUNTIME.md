@@ -1,6 +1,8 @@
 # Raven production runtime (systemd)
 
-Raven runs Vulture bot and scheduler as **systemd services**, not tmux sessions.
+**Raven** is the Aviary physical host. This document covers how **Vulture** (bot + hunt scheduler) and sibling Docker services run on Raven. Platform overview: [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md).
+
+Raven runs the Vulture Discord bot (Vulture hunts + Crow) and hunt scheduler as **systemd services**, not tmux sessions.
 
 ## Services
 
