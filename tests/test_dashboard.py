@@ -139,22 +139,65 @@ class TestDashboardHTTP:
         monkeypatch.setattr("vulture_runtime.LOG_PATH", log_path)
         return TestClient(dashboard_app.app)
 
-    def test_index_missing_db_and_log_returns_200(self, client):
-        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
-            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
-                response = client.get("/")
-        assert response.status_code == 200
-        assert "Vulture Dashboard" in response.text
-        assert "read-only" in response.text
+    def _stub_host(self, client, *, active="unavailable", systemctl="unavailable"):
+        """Helper: GET / with host commands stubbed out."""
+        with patch("host_status.run_host_command", return_value=(False, active)):
+            with patch("host_status.run_systemctl", return_value=(False, systemctl)):
+                return client.get("/")
 
-    def test_index_when_commands_fail_returns_200(self, client):
-        with patch("host_status.run_host_command", return_value=(False, "timed out")):
-            with patch("host_status.run_systemctl", return_value=(False, "timed out")):
-                response = client.get("/")
+    # ── Nest Overview (/) ────────────────────────────────────────────
+
+    def test_nest_home_missing_db_and_log_returns_200(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Nest" in response.text
+        assert "read-only" not in response.text  # overview has no "read-only" badge
+
+    def test_nest_home_shows_raven_health_card(self, client):
+        response = self._stub_host(client)
         assert response.status_code == 200
         assert "Raven Health" in response.text
 
-    def test_index_when_docker_unavailable_returns_200(self, client):
+    def test_nest_home_shows_storage_card(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Storage" in response.text
+
+    def test_nest_home_shows_vulture_card(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Vulture" in response.text
+
+    def test_nest_home_shows_network_card(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Network" in response.text
+
+    def test_nest_home_shows_navigation(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "/storage" in response.text
+        assert "/vulture" in response.text
+        assert "/advanced" in response.text
+
+    # ── Advanced Ops (/advanced) ──────────────────────────────────
+
+    def test_advanced_missing_db_and_log_returns_200(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/advanced")
+        assert response.status_code == 200
+        assert "Raven Ops" in response.text
+        assert "read-only" in response.text
+
+    def test_advanced_when_commands_fail_returns_200(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "timed out")):
+            with patch("host_status.run_systemctl", return_value=(False, "timed out")):
+                response = client.get("/advanced")
+        assert response.status_code == 200
+        assert "Raven Health" in response.text
+
+    def test_advanced_when_docker_unavailable_returns_200(self, client):
         with patch("host_status.run_host_command", return_value=(False, "cannot connect")):
             with patch("host_status.systemctl_is_active", return_value=(True, "active")):
                 with patch("host_status.systemctl_is_enabled", return_value=(True, "enabled")):
@@ -163,9 +206,51 @@ class TestDashboardHTTP:
         assert docker.warning is not None
         with patch("host_status.run_host_command", return_value=(False, "cannot connect")):
             with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
-                response = client.get("/")
+                response = client.get("/advanced")
         assert response.status_code == 200
         assert "Docker" in response.text
+
+    # ── Storage detail (/storage) ─────────────────────────────────
+
+    def test_storage_page_returns_200(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/storage")
+        assert response.status_code == 200
+        assert "Storage" in response.text
+
+    def test_storage_page_shows_drives(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/storage")
+        assert response.status_code == 200
+        # Toshiba EXT and MicroSD should appear from storage_config defaults
+        assert "Toshiba" in response.text or "toshiba" in response.text.lower()
+
+    # ── Vulture detail (/vulture) ─────────────────────────────────
+
+    def test_vulture_page_returns_200(self, client):
+        response = self._stub_host(client)
+        # /vulture doesn't call host_status directly, but stub ensures no issues
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            response = client.get("/vulture")
+        assert response.status_code == 200
+        assert "Vulture" in response.text
+
+    # ── Resilience: missing optional storage must not crash any page ──
+
+    def test_missing_optional_storage_does_not_crash_home(self, client):
+        """Missing optional drives (Pelican, NVME) must not crash the Nest home page."""
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/")
+        assert response.status_code == 200
+
+    def test_missing_optional_storage_does_not_crash_storage_page(self, client):
+        with patch("storage_probe.probe_expected_drive", side_effect=RuntimeError("boom")):
+            response = client.get("/storage")
+        assert response.status_code == 200
 
 
 class TestDefensiveReaders:
@@ -257,6 +342,161 @@ class TestHostCommands:
                             result = _scheduler_freshness([])
         assert result["status"] in ("fresh", "stale", "seen")
         assert "journal" in result["detail"]
+
+
+class TestNestCardComputation:
+    """Unit tests for the Nest overview card summary logic in app.py."""
+
+    def test_raven_card_ok_when_no_issues(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": "0.2 / 0.3 / 0.4 (1/5/15 min)",
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=2, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] == "OK"
+        assert "healthy" in card["headline"].lower()
+
+    def test_raven_card_fail_when_units_failed(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": ["myservice.service"],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=1, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] == "FAIL"
+        assert "failed" in card["headline"].lower()
+
+    def test_raven_card_warn_when_internet_down(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "1 day",
+            "failed_units": [],
+            "internet_ok": False,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] == "WARN"
+
+    def test_storage_card_ok_when_all_mounted_with_low_usage(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="MicroSD", path="/mnt/storage/microsd", required=True,
+                          status="OK", percent_used=30.0, used="30G", size="100G", available="70G"),
+            StorageStatus(name="Toshiba EXT", path="/mnt/storage/toshiba_ext", required=True,
+                          status="OK", percent_used=50.0, used="500G", size="1T", available="500G"),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "OK"
+        assert "healthy" in card["headline"].lower()
+
+    def test_storage_card_warn_when_optional_missing(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="MicroSD", path="/mnt/storage/microsd", required=True,
+                          status="OK", percent_used=20.0),
+            StorageStatus(name="Pelican Backup", path="/mnt/storage/pelican_backup", required=False,
+                          status="NOT_MOUNTED"),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "WARN"
+
+    def test_storage_card_fail_when_required_missing(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="MicroSD", path="/mnt/storage/microsd", required=True,
+                          status="NOT_MOUNTED"),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "FAIL"
+
+    def test_storage_card_warn_when_high_disk_usage(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="Toshiba EXT", path="/mnt/storage/toshiba_ext", required=True,
+                          status="OK", percent_used=87.0, used="870G", size="1T", available="130G"),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "WARN"
+        assert "87%" in card["headline"] or "Toshiba" in card["headline"]
+
+    def test_storage_card_legacy_drives_ignored_when_missing(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="portable_beast", path="/mnt/storage/portable_beast",
+                          required=False, legacy=True, status="NOT_MOUNTED"),
+        ]
+        card = _compute_storage_card(mounts)
+        # Legacy unmounted drives should not push overall status to WARN
+        assert card["status"] == "OK"
+
+    def test_vulture_card_ok_when_scheduler_fresh(self):
+        from app import _compute_vulture_card
+        vulture = {
+            "scheduler_freshness": {
+                "status": "fresh",
+                "detail": "timer: active · service: inactive",
+                "next_run": "Mon 12:00",
+                "last_success": "Mon 11:50",
+            },
+            "processes": [],
+        }
+        db = {"hunt_counts": {"active": 3, "total": 5, "paused": 1, "ended": 1}}
+        card = _compute_vulture_card(vulture, db)
+        assert card["status"] == "OK"
+        assert "active" in card["headline"].lower()
+
+    def test_vulture_card_fail_when_unhealthy(self):
+        from app import _compute_vulture_card
+        vulture = {
+            "scheduler_freshness": {
+                "status": "unhealthy",
+                "detail": "timer missing",
+                "next_run": None,
+                "last_success": None,
+            },
+            "processes": [],
+        }
+        db = {"hunt_counts": {"active": 0, "total": 2, "paused": 0, "ended": 2}}
+        card = _compute_vulture_card(vulture, db)
+        assert card["status"] == "FAIL"
+
+    def test_network_card_ok_when_all_present(self):
+        from app import _compute_network_card
+        raven = {"lan_ip": "192.168.1.10", "tailscale_ip": "100.x.y.z", "internet_ok": True}
+        card = _compute_network_card(raven)
+        assert card["status"] == "OK"
+        assert card["lan_ip"] == "192.168.1.10"
+
+    def test_network_card_warn_when_tailscale_missing(self):
+        from app import _compute_network_card
+        raven = {"lan_ip": "192.168.1.10", "tailscale_ip": None, "internet_ok": True}
+        card = _compute_network_card(raven)
+        assert card["status"] == "WARN"
 
 
 class TestSchedulerHealth:
