@@ -294,7 +294,8 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         status = "running"
         detail_parts.append("hunt cycle in progress")
     elif activity and activity.get("status") == "stale":
-        warning = str(activity["warning"])
+        # Timer is active; log staleness is informational only, not a warning.
+        # Only the timer state (missing/inactive/no next run) should produce a warning.
         status = "stale"
         detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "fresh":

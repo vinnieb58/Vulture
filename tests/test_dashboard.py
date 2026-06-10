@@ -308,13 +308,14 @@ class TestSchedulerHealth:
         assert result["status"] == "unhealthy"
         assert result["warning"] == "Scheduler timer missing/inactive"
 
-    def test_timer_active_no_recent_logs_stale(self):
+    def test_timer_active_no_recent_logs_stale_no_warning(self):
+        # Timer is healthy (active, has next run); stale logs are informational only.
         journal = [
             "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(service_active="inactive", journal=journal)
         assert result["status"] == "stale"
-        assert "No scheduler activity within" in (result["warning"] or "")
+        assert result["warning"] is None
 
     def test_service_failed_unhealthy(self):
         result = self._evaluate(service_active="failed")
@@ -326,3 +327,11 @@ class TestSchedulerHealth:
         assert result["status"] == "running"
         assert result["warning"] is None
         assert "hunt cycle in progress" in result["detail"]
+
+    def test_timer_active_oneshot_inactive_no_logs_no_warning(self):
+        # Oneshot service is idle between runs; timer is active with next run scheduled.
+        # No journal entries at all; timer health is the sole indicator.
+        result = self._evaluate(service_active="inactive", journal=[])
+        assert result["warning"] is None
+        assert result["timer_active"] == "active"
+        assert result["service_active"] == "inactive"

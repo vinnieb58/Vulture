@@ -340,3 +340,94 @@ class TestStorageDisplayClass:
 
     def test_red_for_parent_root(self):
         assert status_display_class("NOT_MOUNTED_PARENT_ROOT", required=False) == "bad"
+
+
+MOUNTINFO_DOCKER_OVERLAY_ROOT = """\
+24 0 0:38 / / rw,relatime shared:1 - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/ABC:/var/lib/docker/overlay2/l/DEF,upperdir=/var/lib/docker/overlay2/HASH/diff,workdir=/var/lib/docker/overlay2/HASH/work
+"""
+
+
+class TestDashboardWarningFixes:
+    """Regression tests for the four warning fixes in the dashboard."""
+
+    def test_docker_overlay_root_no_fstype_mismatch_warning(self):
+        # When the dashboard container reads the root fs as overlay, it must not
+        # produce an FSTYPE_MISMATCH warning against the expected ext4.
+        drive = ExpectedDrive(
+            name="Root filesystem",
+            path="/host/root",
+            expected_source="/dev/sda2",
+            expected_fstype="ext4",
+            role="root",
+            required=True,
+        )
+        with _mountinfo_patch(MOUNTINFO_DOCKER_OVERLAY_ROOT):
+            with patch("storage_probe.run_command", return_value=(False, "")):
+                with patch(
+                    "storage_probe.run_host_command",
+                    return_value=(True, "overlay overlay"),
+                ):
+                    with patch("storage_probe.systemctl_is_active", return_value=(True, "unknown")):
+                        with patch.object(Path, "exists", return_value=True):
+                            with patch("storage_probe._lookup_uuid", return_value=(None, None)):
+                                with patch("storage_probe._lookup_label", return_value=None):
+                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status != "FSTYPE_MISMATCH", (
+            f"Overlay root should not produce FSTYPE_MISMATCH; got status={result.status}"
+        )
+        assert result.warning is None or "overlay" not in (result.warning or "").lower() or "ext4" not in (result.warning or "").lower()
+
+    def test_portable_beast_legacy_inactive_no_warning(self):
+        # portable_beast has legacy=True; LEGACY_PATH status must not propagate as a warning.
+        drive = ExpectedDrive(
+            name="portable_beast",
+            path="/mnt/storage/portable_beast",
+            role="storage",
+            required=False,
+            legacy=True,
+        )
+        with _mountinfo_patch(MOUNTINFO_ROOT):
+            with patch("storage_probe.run_command", side_effect=_mock_df):
+                with patch("storage_probe.run_host_command", return_value=(False, "")):
+                    with patch("storage_probe.systemctl_is_active", return_value=(True, "unknown")):
+                        with patch.object(Path, "exists", return_value=True):
+                            result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status == "LEGACY_PATH"
+        assert result.warning is None, (
+            f"Legacy path must not produce a warning; got: {result.warning!r}"
+        )
+
+    def test_toshiba_ext_disk_usage_90pct_warning(self):
+        # Toshiba EXT at 90% usage must still generate a warning (threshold preserved).
+        drive = ExpectedDrive(
+            name="Toshiba EXT",
+            path="/mnt/storage/toshiba_ext",
+            expected_uuid="0846863B46862A10",
+            expected_fstype="ntfs3",
+            expected_label="TOSHIBA EXT",
+            required=True,
+        )
+
+        def df_90pct(args, **_kwargs):
+            path = args[-1] if args else ""
+            if path == drive.path:
+                return (
+                    True,
+                    "Filesystem      Size  Used Avail Use% Mounted on\n"
+                    "/dev/sdb1       1.4T  1.3T   140G  90% /mnt/storage/toshiba_ext\n",
+                )
+            return _mock_df(args, **_kwargs)
+
+        with _mountinfo_patch(MOUNTINFO_WITH_TOSHIBA):
+            with patch("storage_probe.run_command", side_effect=df_90pct):
+                with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
+                    with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
+                        with patch("storage_probe._lookup_uuid", return_value=("0846863B46862A10", None)):
+                            with patch("storage_probe._lookup_label", return_value="TOSHIBA EXT"):
+                                with patch.object(Path, "exists", return_value=True):
+                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status in ("OK", "OK_AUTOMOUNTED")
+        assert result.percent_used == 90.0
+        assert result.warning is not None
+        assert "90" in result.warning
+        assert result.path == "/mnt/storage/toshiba_ext"

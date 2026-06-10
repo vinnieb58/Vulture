@@ -73,7 +73,9 @@ class StorageStatus:
             self.label = self.name
         self.mounted = self.status in GREEN_STATUSES
         self.filesystem = self.actual_source
-        if self.status not in GREEN_STATUSES and self.message:
+        # LEGACY_PATH is informational; legacy drives are not expected to be active,
+        # so they must not appear as dashboard warnings.
+        if self.status not in GREEN_STATUSES and self.status != "LEGACY_PATH" and self.message:
             self.warning = self.message
 
 
@@ -496,29 +498,35 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
             )
 
     if drive.expected_fstype and actual_fstype and not _fstype_matches(drive.expected_fstype, actual_fstype):
-        return StorageStatus(
-            name=drive.name,
-            path=drive.path,
-            expected_uuid=drive.expected_uuid,
-            expected_fstype=drive.expected_fstype,
-            expected_label=drive.expected_label,
-            role=drive.role,
-            required=drive.required,
-            legacy=drive.legacy,
-            path_exists=True,
-            is_mountpoint=True,
-            automount_unit_state=automount_state,
-            mount_unit_state=mount_state,
-            actual_source=actual_source,
-            actual_fstype=actual_fstype,
-            actual_label=actual_label,
-            actual_uuid=actual_uuid,
-            status="FSTYPE_MISMATCH",
-            message=(
-                f"Mounted filesystem type {actual_fstype} does not match expected "
-                f"{drive.expected_fstype}."
-            ),
-        )
+        # Inside a Docker container the host root filesystem appears as overlay because
+        # the container itself runs on overlay. Skip the fstype check for root drives
+        # when the observed type is an overlay variant — it cannot be accurate from here.
+        if drive.role == "root" and actual_fstype.lower() in ("overlay", "overlayfs"):
+            pass
+        else:
+            return StorageStatus(
+                name=drive.name,
+                path=drive.path,
+                expected_uuid=drive.expected_uuid,
+                expected_fstype=drive.expected_fstype,
+                expected_label=drive.expected_label,
+                role=drive.role,
+                required=drive.required,
+                legacy=drive.legacy,
+                path_exists=True,
+                is_mountpoint=True,
+                automount_unit_state=automount_state,
+                mount_unit_state=mount_state,
+                actual_source=actual_source,
+                actual_fstype=actual_fstype,
+                actual_label=actual_label,
+                actual_uuid=actual_uuid,
+                status="FSTYPE_MISMATCH",
+                message=(
+                    f"Mounted filesystem type {actual_fstype} does not match expected "
+                    f"{drive.expected_fstype}."
+                ),
+            )
 
     if drive.expected_label and actual_label and actual_label != drive.expected_label:
         return StorageStatus(
