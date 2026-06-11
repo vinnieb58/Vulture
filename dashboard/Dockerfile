@@ -5,6 +5,9 @@
 
 FROM python:3.12-slim
 
+ARG BUILD_GIT_COMMIT=unknown
+ARG BUILD_TIMESTAMP=unknown
+
 WORKDIR /app
 
 RUN apt-get update \
@@ -28,7 +31,9 @@ COPY templates/ templates/
 ENV VULTURE_DB_PATH=/app/data/vulture.db \
     VULTURE_LOG_PATH=/app/logs/vulture.log \
     DASHBOARD_HOST_ROOT=/host/root \
-    DASHBOARD_HOST_PROC=/host/proc
+    DASHBOARD_HOST_PROC=/host/proc \
+    DASHBOARD_BUILD_GIT_COMMIT=${BUILD_GIT_COMMIT} \
+    DASHBOARD_BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
 
 EXPOSE 8088
 

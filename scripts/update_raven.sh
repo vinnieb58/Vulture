@@ -136,17 +136,22 @@ ensure_storage_mountpoints() {
     echo "  Mountpoint directories present (drives may be unplugged)"
 }
 
-restart_dashboard() {
-    section "Vulture Dashboard (Docker)"
-    ensure_storage_mountpoints
-    if ! docker compose -f docker-compose.dashboard.yml up -d --build; then
-        echo "  ERROR: failed to start vulture-dashboard"
-        docker compose -f docker-compose.dashboard.yml ps 2>&1 || true
-        docker compose -f docker-compose.dashboard.yml logs --tail 50 2>&1 || true
+REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
+
+restart_docker_stacks() {
+    section "Docker stacks (dashboard + canary)"
+
+    if [[ ! -x "$REBUILD_DOCKER_SCRIPT" ]]; then
+        echo "  ERROR: rebuild helper not found or not executable: ${REBUILD_DOCKER_SCRIPT}"
         exit 1
     fi
-    echo "  Dashboard started: http://raven:8088"
-    docker compose -f docker-compose.dashboard.yml ps 2>&1 || true
+
+    if ! "$REBUILD_DOCKER_SCRIPT"; then
+        echo "  ERROR: failed to rebuild Docker stacks"
+        exit 1
+    fi
+
+    echo "  Dashboard: http://raven:8088"
 }
 
 show_runtime_status() {
@@ -291,9 +296,9 @@ else
 fi
 
 if [[ "${SKIP_DASHBOARD_RESTART:-0}" == "1" ]]; then
-    section "Skipping dashboard restart (SKIP_DASHBOARD_RESTART=1)"
+    section "Skipping Docker stack rebuild (SKIP_DASHBOARD_RESTART=1)"
 else
-    restart_dashboard
+    restart_docker_stacks
 fi
 
 echo ""
@@ -311,8 +316,8 @@ echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
 echo "    docker ps"
 echo "    curl -I http://localhost:8088"
 echo ""
-echo "  Dashboard recovery (if needed):"
-echo "    docker compose -f docker-compose.dashboard.yml up -d --build"
+echo "  Docker recovery (if needed):"
+echo "    ./scripts/rebuild_docker.sh"
 echo ""
 echo "  tmux is deprecated for normal production runtime."
 echo "  Use it only for optional manual debugging if needed."

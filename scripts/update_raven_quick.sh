@@ -192,7 +192,7 @@ run_scheduler_once() {
 }
 
 rebuild_docker_stacks() {
-    section "Rebuilding Docker stacks"
+    section "Rebuilding Docker stacks (dashboard + canary)"
 
     if ! command -v docker &>/dev/null; then
         echo "  WARNING: docker not found; skipping stack rebuild"
@@ -235,10 +235,10 @@ show_final_status() {
     echo ""
     echo "  dashboard HTTP:"
     if command -v curl &>/dev/null; then
-        if curl -fsS -o /dev/null -I --max-time 5 http://localhost:8088 2>/dev/null; then
-            curl -I --max-time 5 http://localhost:8088 2>&1 || true
+        if curl -fsS --max-time 10 http://localhost:8088/health 2>/dev/null; then
+            echo ""
         else
-            echo "  Dashboard not reachable at http://localhost:8088"
+            echo "  Dashboard health check failed at http://localhost:8088/health"
         fi
     else
         echo "  Skipped (curl not available)"
