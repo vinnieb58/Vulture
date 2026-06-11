@@ -22,12 +22,10 @@ SUCCESS_KEYWORDS = (
     "hunt cycle completed",
     "done hunt",
 )
-ACTIVITY_KEYWORDS = (
-    "starting hunt",
-    "done hunt",
-    "hunt cycle",
-    "scheduler",
+# Scheduler-cycle lines only — adapter warnings (e.g. "zero model slugs") must not match.
+CYCLE_KEYWORDS = SUCCESS_KEYWORDS + (
     "starting vulture hunt cycle",
+    "starting hunt cycle",
 )
 
 
@@ -151,13 +149,14 @@ def _parse_log_timestamp(line: str) -> datetime | None:
     return None
 
 
-def _freshness_from_lines(
+def _last_cycle_from_lines(
     lines: list[str],
     *,
     source: str,
     success_only: bool = False,
 ) -> dict[str, Any] | None:
-    keywords = SUCCESS_KEYWORDS if success_only else ACTIVITY_KEYWORDS
+    """Find the most recent scheduler cycle line (journal or vulture.log)."""
+    keywords = SUCCESS_KEYWORDS if success_only else CYCLE_KEYWORDS
     for line in reversed(lines):
         lower = line.lower()
         if not any(k in lower for k in keywords):
@@ -165,32 +164,31 @@ def _freshness_from_lines(
         ts = _parse_log_timestamp(line)
         if ts is None:
             continue
-        age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
-        if age_min <= SCHEDULER_FRESH_MINUTES:
-            return {
-                "status": "fresh",
-                "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
-                "warning": None,
-                "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "last_success_age_min": int(age_min),
-            }
+        age_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
         return {
-            "status": "stale",
-            "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
-            "warning": f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min",
+            "detail": f"Last scheduler cycle ~{age_min} min ago ({source})",
             "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "last_success_age_min": int(age_min),
+            "last_success_age_min": age_min,
+            "fresh": age_min <= SCHEDULER_FRESH_MINUTES,
         }
     return None
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """Parse NEXT column from ``systemctl list-timers`` for *unit*."""
     for line in output.splitlines():
         if unit not in line:
             continue
         parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        if not parts or parts[0] in ("NEXT", "n/a"):
+            continue
+        # NEXT column: "Thu 2026-06-12 16:19:49 UTC"
+        if len(parts) >= 4 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[1]):
+            next_ts = f"{parts[0]} {parts[1]} {parts[2]} {parts[3]}"
+            left_match = re.search(r"([\d]+h(?:\s+[\d]+min)?|[\d]+min)\s+left", line)
+            if left_match:
+                return f"{next_ts} ({left_match.group(1)} left)"
+            return next_ts
     return None
 
 
@@ -244,10 +242,12 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
-    - Service inactive/dead after success = idle between runs
-    - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    Authoritative signals (in order):
+    - ``systemctl list-timers`` next-run for schedule health
+    - ``journalctl -u vulture-scheduler.service`` cycle-complete lines for last run
+    - vulture.log cycle lines as fallback (success/cycle keywords only)
+
+    Adapter warnings in vulture.log do not affect scheduler health.
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -256,15 +256,15 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
 
-    journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
-    from_journal = _freshness_from_lines(journal, source="journal")
-    from_log = _freshness_from_lines(log_lines, source="vulture.log")
-    activity = from_journal or from_log
+    journal = _journal_lines(SCHEDULER_SERVICE_UNIT)
+    cycle_journal = _last_cycle_from_lines(journal, source="journal")
+    cycle_log = _last_cycle_from_lines(log_lines, source="vulture.log")
+    last_cycle = cycle_journal or cycle_log
 
     last_success = None
     last_success_age_min = None
-    success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
-    success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
+    success_journal = _last_cycle_from_lines(journal, source="journal", success_only=True)
+    success_log = _last_cycle_from_lines(log_lines, source="vulture.log", success_only=True)
     success = success_journal or success_log
     if success:
         last_success = success.get("last_success")
@@ -293,19 +293,30 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
-    elif activity and activity.get("status") == "fresh":
+    elif timer_healthy and next_run:
+        # Timer heartbeat + scheduled next run = healthy regardless of log age.
         status = "fresh"
-        detail_parts.append(activity["detail"])
-    elif journal:
+        detail_parts.append("timer active; next run scheduled")
+        if last_cycle:
+            detail_parts.append(last_cycle["detail"])
+    elif timer_healthy and last_cycle and last_cycle.get("fresh"):
+        status = "fresh"
+        detail_parts.append(last_cycle["detail"])
+    elif timer_healthy and last_cycle:
+        status = "stale"
+        detail_parts.append(last_cycle["detail"])
+        warning = (
+            f"No scheduler cycle within {SCHEDULER_FRESH_MINUTES} min "
+            "and no upcoming timer run"
+        )
+    elif timer_healthy and journal:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
+    elif timer_healthy:
+        status = "seen"
+        detail_parts.append("timer active; awaiting first journal cycle line")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        detail_parts.append("no recent scheduler cycle in journal or log tail")
 
     if next_run:
         detail_parts.append(f"next run {next_run}")
