@@ -6,6 +6,7 @@ Lightweight tests for the Nest v1 / Raven Ops dashboard (read-only FastAPI app).
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,17 +36,23 @@ from host_status import (  # noqa: E402
     _check_service,
     get_docker_snapshot,
     get_raven_health,
+    get_service_statuses,
     get_storage_status,
 )
 from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _get_timer_next_run_show,
     _list_timer_next_run,
     _parse_timer_next_run,
     _scheduler_freshness,
 )
-from host_status import ServiceStatus  # noqa: E402
+from host_status import (  # noqa: E402
+    IGNORED_FAILED_UNITS,
+    ServiceStatus,
+    _read_failed_units,
+)
 
 
 SAMPLE_DF = """\
@@ -849,3 +856,341 @@ class TestSchedulerHealth:
         assert result["next_run"] == "Thu 2026-06-11 17:00:00 UTC", (
             f"next_run should be full timestamp, got {result['next_run']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# New tests required by the health-fix issue
+# ---------------------------------------------------------------------------
+
+class TestTimerNextRunMachineReadable:
+    """Tests for _get_timer_next_run_show (machine-readable NextElapseUSecRealtime)."""
+
+    def test_parses_usec_timestamp_to_full_datetime(self):
+        """A non-zero microsecond timestamp must produce a full 'Day YYYY-MM-DD HH:MM:SS UTC' string."""
+        # 2026-06-11 17:00:00 UTC in microseconds
+        usec = 1749657600 * 1_000_000  # Thu 2026-06-11 17:00:00 UTC
+        with patch("vulture_runtime.run_systemctl", return_value=(True, str(usec))):
+            result = _get_timer_next_run_show("vulture-scheduler.timer")
+        assert result is not None
+        # Must contain a full date, not a bare weekday
+        assert re.match(r"\w+ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$", result), (
+            f"expected full timestamp, got {result!r}"
+        )
+
+    def test_returns_none_for_zero_usec(self):
+        """Zero microseconds means no scheduled run — must return None."""
+        with patch("vulture_runtime.run_systemctl", return_value=(True, "0")):
+            result = _get_timer_next_run_show("vulture-scheduler.timer")
+        assert result is None
+
+    def test_returns_none_when_systemctl_fails(self):
+        """systemctl failure must not raise; must return None."""
+        with patch("vulture_runtime.run_systemctl", return_value=(False, "unavailable")):
+            result = _get_timer_next_run_show("vulture-scheduler.timer")
+        assert result is None
+
+    def test_returns_none_for_non_integer_output(self):
+        """Non-integer output (e.g. property name echoed back) must return None gracefully."""
+        with patch("vulture_runtime.run_systemctl", return_value=(True, "n/a")):
+            result = _get_timer_next_run_show("vulture-scheduler.timer")
+        assert result is None
+
+    def test_list_timer_next_run_tries_show_before_list_timers(self):
+        """_list_timer_next_run must call systemctl show first; list-timers is fallback."""
+        usec = 1749657600 * 1_000_000
+        calls: list[list] = []
+
+        def fake_run_systemctl(subargs, **kwargs):
+            calls.append(list(subargs))
+            if subargs[0] == "show":
+                return True, str(usec)
+            return True, "unreachable"
+
+        with patch("vulture_runtime.run_systemctl", side_effect=fake_run_systemctl):
+            result = _list_timer_next_run("vulture-scheduler.timer")
+
+        assert calls[0][0] == "show", f"first call should be 'show', got: {calls[0]}"
+        assert result is not None
+        assert re.match(r"\w+ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$", result)
+        # list-timers should NOT have been called since show succeeded
+        assert not any(c[0] == "list-timers" for c in calls), (
+            "list-timers should not be called when systemctl show succeeds"
+        )
+
+    def test_list_timer_next_run_falls_back_to_list_timers_when_show_returns_zero(self):
+        """When systemctl show returns 0 (unscheduled), fall back to list-timers."""
+        unit_output = (
+            "NEXT                        LEFT      LAST                        "
+            "PASSED   UNIT                       ACTIVATES\n"
+            "Thu 2026-06-11 17:00:00 UTC 5min left Thu 2026-06-11 16:45:00 UTC "
+            "10min    vulture-scheduler.timer     vulture-scheduler.service\n"
+        )
+
+        def fake_run_systemctl(subargs, **kwargs):
+            if subargs[0] == "show":
+                return True, "0"  # Not scheduled via show
+            if "vulture-scheduler.timer" in subargs and subargs[0] == "list-timers":
+                return True, unit_output
+            return True, unit_output
+
+        with patch("vulture_runtime.run_systemctl", side_effect=fake_run_systemctl):
+            result = _list_timer_next_run("vulture-scheduler.timer")
+
+        assert result == "Thu 2026-06-11 17:00:00 UTC"
+
+    def test_parse_timer_next_run_rejects_unit_name_in_time_position(self):
+        """A partially-matched row where the time field contains the unit name must be
+        rejected rather than returning a bogus 'Day YYYY-MM-DD unit-name...' string."""
+        # Simulate a truncation scenario where only date is present but next column
+        # is the unit name rather than HH:MM:SS.
+        output = (
+            "NEXT  LEFT  LAST  PASSED  UNIT\n"
+            "Thu 2026-06-11 vulture-scheduler.timer vulture-scheduler.service\n"
+        )
+        result = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert result is None
+
+
+class TestSchedulerStalenessWithJournal:
+    """Tests for improved stale-vs-journal health logic."""
+
+    def _evaluate(
+        self,
+        *,
+        timer_active: str = "active",
+        timer_unit: str | None = "vulture-scheduler.timer",
+        service_active: str = "inactive",
+        journal: list[str] | None = None,
+        log_lines: list[str] | None = None,
+        next_run: str | None = None,
+        now: datetime | None = None,
+    ):
+        timer_svc = ServiceStatus(
+            "vulture-scheduler timer",
+            timer_unit,
+            timer_active,
+            "enabled" if timer_unit else "not configured",
+        )
+        service_svc = ServiceStatus(
+            "vulture-scheduler service",
+            "vulture-scheduler.service",
+            service_active,
+            "disabled",
+        )
+        now = now or datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime._list_timer_next_run", return_value=next_run):
+                    with patch("vulture_runtime._journal_lines", return_value=journal or []):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            mock_dt.now.return_value = now
+                            return _evaluate_scheduler_health(log_lines or [])
+
+    def test_stale_log_but_recent_journal_success_is_healthy(self):
+        """Recent hunt-cycle-completed in journal overrides stale vulture.log activity.
+
+        If the journal (preferred source) shows a recent success, the scheduler
+        must be considered healthy even when the log file has old activity.
+        """
+        journal = [
+            # Recent: 5 min ago at now=12:00
+            "2026-06-07T11:55:00+0000 python[1]: 2026-06-07 11:55:00,000 [INFO] Hunt cycle completed",
+        ]
+        stale_log_lines = [
+            # Old: 200 min ago at now=12:00
+            "2026-06-07 08:40:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=journal,
+            log_lines=stale_log_lines,
+            next_run=None,
+            now=datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        # Journal shows fresh success; should not be stale regardless of log file
+        assert result["status"] == "fresh", f"expected 'fresh', got {result['status']!r}"
+        assert result["warning"] is None
+        assert "journal" in result["detail"]
+
+    def test_timer_active_next_run_scheduled_stale_log_is_seen(self):
+        """Timer active + valid next_run + stale log → 'seen' (OK), not 'stale' (WARN)."""
+        stale_log_lines = [
+            # 303 min old — beyond SCHEDULER_FRESH_MINUTES threshold
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],  # journal unavailable
+            log_lines=stale_log_lines,
+            next_run="Thu 2026-06-11 18:30:00 UTC",
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "seen", f"expected 'seen' (timer has next_run), got {result['status']!r}"
+        assert result["warning"] is None
+
+    def test_timer_active_no_next_run_stale_log_no_journal_is_stale(self):
+        """Timer active + stale log + no next_run + no journal → 'stale' (WARN).
+
+        This is the case where the timer may be stuck: no scheduled run AND
+        no recent activity anywhere.
+        """
+        stale_log_lines = [
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=stale_log_lines,
+            next_run=None,  # No upcoming run visible
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "stale", f"expected 'stale', got {result['status']!r}"
+
+    def test_journal_unavailable_timer_active_with_next_run_is_seen(self):
+        """When journal is inaccessible but timer is active with a next run, report 'seen'."""
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],  # journal unavailable
+            log_lines=[],  # no log activity
+            next_run="Thu 2026-06-11 18:30:00 UTC",
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "seen"
+        assert result["warning"] is None
+
+    def test_journal_unavailable_detail_note(self):
+        """When journal returns no lines and no log activity, the detail string mentions
+        journal unavailability so the operator knows why no freshness data is shown."""
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=[],
+            next_run=None,
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        # Should still be "seen" (timer active is the health source)
+        assert result["status"] == "seen"
+        assert "journal unavailable" in result["detail"] or "no recent" in result["detail"]
+
+
+class TestFailedUnitAllowlist:
+    """Tests for the IGNORED_FAILED_UNITS allowlist and HEALTH card behaviour."""
+
+    def test_ignored_unit_is_in_allowlist(self):
+        """systemd-networkd-wait-online.service must be in the default allowlist."""
+        assert "systemd-networkd-wait-online.service" in IGNORED_FAILED_UNITS
+
+    def test_read_failed_units_splits_actionable_and_ignored(self):
+        """_read_failed_units must separate actionable vs ignored units."""
+        output = (
+            "UNIT                                    LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "systemd-networkd-wait-online.service    loaded failed failed Wait for Network\n"
+            "myapp.service                           loaded failed failed My App\n"
+            "\n"
+            "2 loaded units listed.\n"
+        )
+        with patch("host_status.run_systemctl", return_value=(True, output)):
+            actionable, ignored, warn = _read_failed_units()
+        assert "myapp.service" in actionable
+        assert "systemd-networkd-wait-online.service" not in actionable
+        assert "systemd-networkd-wait-online.service" in ignored
+        assert warn is None
+
+    def test_read_failed_units_returns_empty_ignored_when_none_present(self):
+        """When no ignored units appear in systemctl --failed output, ignored list is empty."""
+        output = (
+            "UNIT               LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "myapp.service      loaded failed failed My App\n"
+            "\n"
+            "1 loaded units listed.\n"
+        )
+        with patch("host_status.run_systemctl", return_value=(True, output)):
+            actionable, ignored, warn = _read_failed_units()
+        assert "myapp.service" in actionable
+        assert ignored == []
+
+    def test_raven_card_ok_when_only_ignored_unit_failed(self):
+        """HEALTH must not FAIL when the only failed unit is systemd-networkd-wait-online.service."""
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": [],  # Filtered out — no actionable failures
+            "ignored_failed_units": ["systemd-networkd-wait-online.service"],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=2, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] != "FAIL", (
+            "HEALTH must not FAIL when only ignored units are present"
+        )
+        assert card["status"] == "OK"
+        assert "healthy" in card["headline"].lower()
+
+    def test_raven_card_ok_includes_ignored_units_in_output(self):
+        """The ignored_failed_units must be forwarded in the raven card dict."""
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": [],
+            "ignored_failed_units": ["systemd-networkd-wait-online.service"],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=1, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert "ignored_failed_units" in card
+        assert "systemd-networkd-wait-online.service" in card["ignored_failed_units"]
+
+    def test_raven_card_fail_when_real_core_service_failed(self):
+        """HEALTH must FAIL when an actionable (non-ignored) service fails."""
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": ["docker.service"],  # Real core failure
+            "ignored_failed_units": [],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] == "FAIL"
+        assert "docker.service" in card["headline"] or "failed" in card["headline"].lower()
+
+    def test_raven_card_fail_when_both_ignored_and_real_unit_failed(self):
+        """HEALTH must FAIL when a real unit is failed, even if ignored units also appear."""
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": ["myapp.service"],
+            "ignored_failed_units": ["systemd-networkd-wait-online.service"],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=1, stopped_count=0)
+        card = _compute_raven_card(raven, [], docker)
+        assert card["status"] == "FAIL"
+
+    def test_get_raven_health_includes_ignored_failed_units_key(self):
+        """get_raven_health() must include ignored_failed_units in the returned dict."""
+        with patch("host_status.run_host_command", return_value=(False, "fail")):
+            with patch("host_status.run_systemctl", return_value=(False, "fail")):
+                health = get_raven_health()
+        assert "ignored_failed_units" in health
+        assert isinstance(health["ignored_failed_units"], list)

@@ -207,32 +207,66 @@ def _parse_timer_next_run(output: str, unit: str) -> str | None:
         # a line truncated to "Thu" or "Thu 2026-06-11" does not produce a
         # misleading single-word or partial result.
         if len(parts) >= 4 and re.match(r"\d{4}-\d{2}-\d{2}$", parts[1]):
-            return " ".join(parts[0:4])
+            # Validate that parts[2] looks like a time (HH:MM:SS), not a unit name
+            if re.match(r"\d{2}:\d{2}:\d{2}$", parts[2]):
+                return " ".join(parts[0:4])
         # Cannot recover a full timestamp (truncated or unexpected format).
         return None
     return None
 
 
+def _get_timer_next_run_show(unit: str) -> str | None:
+    """Query next run via ``systemctl show --property=NextElapseUSecRealtime``.
+
+    This machine-readable approach returns an integer microsecond timestamp
+    that we convert to a human-readable string.  It is immune to the
+    400-character truncation that can corrupt ``list-timers`` output when many
+    system timers appear before the vulture entry.  Returns ``None`` when the
+    property is unset (0) or when systemctl is unavailable.
+    """
+    ok, out = run_systemctl(
+        ["show", unit, "--property=NextElapseUSecRealtime", "--value"],
+        timeout=10.0,
+    )
+    if not ok or not out.strip():
+        return None
+    val = out.strip()
+    if not val or val == "0":
+        return None
+    try:
+        usec = int(val)
+        if usec == 0:
+            return None
+        ts = datetime.fromtimestamp(usec / 1_000_000, tz=timezone.utc)
+        return ts.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
     """Return the next scheduled run timestamp for *unit*, or ``None``.
 
-    Uses a **unit-filtered** ``systemctl list-timers`` call first.  The
-    unfiltered form lists every system timer and the cumulative output often
-    exceeds the 400-character truncation applied by ``_run_raw``; when many
-    timers appear before the vulture entry the line is cut mid-token (e.g.
-    to just ``"Thu"``) and only a partial value can be extracted.  Filtering
-    to the single unit produces an output of ~250 characters — well within
-    the limit — so the full four-part timestamp is always available.
+    Tries three sources in order of reliability:
 
-    Falls back to the unfiltered list for older systemd versions that do not
-    accept a unit-name argument to ``list-timers``.
+    1. ``systemctl show --property=NextElapseUSecRealtime --value`` — machine-readable
+       integer microsecond timestamp; immune to output truncation.
+    2. Unit-filtered ``systemctl list-timers <unit>`` — compact output (~250 chars)
+       that fits within the 400-char ``_run_raw`` limit.
+    3. Unfiltered ``systemctl list-timers --all`` — fallback for older systemd
+       versions that do not accept a unit-name argument.
     """
+    # Preferred: machine-readable property avoids all parsing fragility.
+    result = _get_timer_next_run_show(unit)
+    if result:
+        return result
+
     # Unit-specific query: header + one data row ≈ 250 chars, safe from truncation.
     ok, out = run_systemctl(["list-timers", unit, "--all", "--no-pager"], timeout=10.0)
     if ok and out.strip():
         result = _parse_timer_next_run(out, unit)
         if result:
             return result
+
     # Fallback: older systemd may not accept a unit filter for list-timers.
     ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
     if not ok or not out.strip():
@@ -283,10 +317,18 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
-    - Service inactive/dead after success = idle between runs
-    - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    Health rules (in priority order):
+    - Timer missing/inactive → unhealthy
+    - Service in failed state → unhealthy
+    - Service currently active → running (hunt cycle in progress)
+    - Timer active + recent journal/log success → fresh
+    - Timer active + valid next_run scheduled → seen (OK)
+    - Timer active + stale activity + no next_run → stale (WARN)
+
+    The systemd timer is the authoritative health heartbeat.  Stale
+    ``vulture.log`` activity is only a WARN when the timer has NO upcoming
+    run AND journal also shows no recent success.  Journal is preferred over
+    the log file; the log file is used only as a fallback.
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -296,6 +338,9 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     next_run = _list_timer_next_run()
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
+    journal_available = bool(journal)
+
+    # Prefer journal over log file for freshness detection.
     from_journal = _freshness_from_lines(journal, source="journal")
     from_log = _freshness_from_lines(log_lines, source="vulture.log")
     activity = from_journal or from_log
@@ -334,10 +379,18 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         detail_parts.append("hunt cycle in progress")
     elif activity and activity.get("status") == "stale":
         # Timer is healthy; the systemd timer is the authoritative health source.
-        # Stale log activity is informational only — downgrade to "seen" (OK) when a
-        # next run is scheduled so the card does not show a false WARN.  Only emit
-        # "stale" when no next run is visible (timer may be stuck).
-        status = "seen" if next_run else "stale"
+        # Stale activity is informational only when:
+        #   - a next run is scheduled (timer is not stuck), OR
+        #   - journal shows a recent successful run (log may be behind)
+        # Only emit "stale" when no next_run is visible AND journal has no
+        # recent success — that combination suggests the timer may be stuck.
+        recent_journal_success = (
+            success_journal is not None and success_journal.get("status") == "fresh"
+        )
+        if next_run or recent_journal_success:
+            status = "seen"
+        else:
+            status = "stale"
         detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
@@ -347,14 +400,17 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         # is normal between runs — report "seen" so the card shows OK.
         status = "seen"
         detail_parts.append("timer scheduled; no recent log activity")
-    elif journal:
+    elif journal_available:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
     else:
         # Timer is healthy (active) but no log/journal evidence yet — no failure
         # signal, so treat as "seen" rather than leaving status as "unknown".
         status = "seen"
-        detail_parts.append("timer active; no recent scheduler activity")
+        if not journal_available:
+            detail_parts.append("timer active; journal unavailable, no recent log activity")
+        else:
+            detail_parts.append("timer active; no recent scheduler activity")
 
     if next_run:
         detail_parts.append(f"next run {next_run}")
@@ -372,6 +428,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "next_run": next_run,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
+        "journal_available": journal_available,
     }
 
 
