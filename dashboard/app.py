@@ -69,7 +69,11 @@ def _compute_raven_card(
     docker: DockerSnapshot,
 ) -> dict[str, Any]:
     """Plain-English Raven health card for the Nest overview."""
+    # Actionable failed units drive the FAIL status.  Ignored units (e.g.
+    # systemd-networkd-wait-online.service) are noisy on Ubuntu/headless servers
+    # and are surfaced as informational items without triggering HEALTH FAIL.
     failed = raven.get("failed_units", [])
+    ignored_failed = raven.get("ignored_failed_units", [])
     internet_ok = raven.get("internet_ok", True)
 
     issues: list[str] = []
@@ -88,6 +92,8 @@ def _compute_raven_card(
             issues.append(f"{svc.label} is {svc.active}")
 
     if issues:
+        # Only FAIL when there are actionable failed units.  Other issues
+        # (internet, critical services) are WARN regardless.
         status = "FAIL" if failed else "WARN"
         headline = issues[0]
     else:
@@ -105,6 +111,7 @@ def _compute_raven_card(
         "status": status,
         "headline": headline,
         "issues": issues,
+        "ignored_failed_units": ignored_failed,
         "hostname": raven.get("hostname", "unknown"),
         "uptime": raven.get("uptime", "unknown"),
         "load_average": raven.get("load_average"),

@@ -33,6 +33,18 @@ from subprocess_util import run_command
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
 HOST_PROC = Path(os.environ.get("DASHBOARD_HOST_PROC", "/host/proc"))
 
+# Units that are commonly noisy on Ubuntu/headless servers and do not indicate
+# a real Aviary/Raven service failure.  They are filtered out of the actionable
+# failed-unit list so that HEALTH only FAILs for services that actually matter.
+# These units still appear in the `ignored_failed_units` key so the dashboard
+# can surface them as informational items without polluting the health status.
+IGNORED_FAILED_UNITS: frozenset[str] = frozenset(
+    os.environ.get(
+        "DASHBOARD_IGNORED_FAILED_UNITS",
+        "systemd-networkd-wait-online.service",
+    ).split(",")
+)
+
 SERVICE_UNITS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("SSH", ("ssh.service", "ssh.socket", "sshd.service")),
     ("tailscaled", ("tailscaled.service", "tailscaled")),
@@ -162,12 +174,20 @@ def _check_internet() -> tuple[bool, str | None]:
     return False, err or "Unreachable"
 
 
-def _read_failed_units() -> tuple[list[str], str | None]:
+def _read_failed_units() -> tuple[list[str], list[str], str | None]:
+    """Return (actionable_units, ignored_units, warning_or_None).
+
+    *actionable_units* are failed systemd units that warrant a HEALTH FAIL.
+    *ignored_units* are known-noisy units (see ``IGNORED_FAILED_UNITS``) that
+    are reported for informational purposes but do not trigger a FAIL.
+    """
     ok, out = run_systemctl(["--failed", "--no-pager"], timeout=10.0)
     if not ok:
-        return [], out or "systemctl unavailable"
-    units = parse_systemctl_failed(out)
-    return units, None
+        return [], [], out or "systemctl unavailable"
+    all_units = parse_systemctl_failed(out)
+    actionable = [u for u in all_units if u not in IGNORED_FAILED_UNITS]
+    ignored = [u for u in all_units if u in IGNORED_FAILED_UNITS]
+    return actionable, ignored, None
 
 
 def _read_memory() -> tuple[MemoryInfo | None, str | None]:
@@ -304,7 +324,7 @@ def get_raven_health() -> dict[str, Any]:
     lan_ip, lan_warn = _read_lan_ip()
     ts_ip, ts_warn = _read_tailscale_ip()
     internet_ok, internet_warn = _check_internet()
-    failed_units, failed_warn = _read_failed_units()
+    failed_units, ignored_failed_units, failed_warn = _read_failed_units()
     memory, memory_warn = _read_memory()
     load, load_warn = _read_load()
 
@@ -322,6 +342,7 @@ def get_raven_health() -> dict[str, Any]:
         "internet_ok": internet_ok,
         "failed_units": failed_units,
         "failed_count": len(failed_units),
+        "ignored_failed_units": ignored_failed_units,
         "memory": memory,
         "load_average": load,
         "warnings": warnings,
