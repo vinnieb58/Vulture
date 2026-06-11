@@ -188,22 +188,52 @@ def _freshness_from_lines(
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """Extract the next-run timestamp from ``systemctl list-timers`` output.
+
+    Returns the full ``"DayOfWeek YYYY-MM-DD HH:MM:SS TZ"`` string, or ``None``
+    when the timer has no upcoming run (``n/a``) or when the output is truncated
+    to fewer than four whitespace-separated tokens and a full timestamp cannot be
+    recovered.  Returning ``None`` rather than a partial value (e.g. just the
+    weekday) keeps downstream consumers honest about what they actually know.
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
         parts = line.split()
         if not parts or parts[0] in ("NEXT", "n/a"):
             return None
-        # systemctl list-timers NEXT column: "DayOfWeek YYYY-MM-DD HH:MM:SS TZ"
-        # Grab all four words when parts[1] looks like a date to avoid returning
-        # only the weekday abbreviation (which is what parts[0] alone would give).
+        # Expected format: "DayOfWeek YYYY-MM-DD HH:MM:SS TZ ..."
+        # Require at least 4 parts and a well-formed date in position 1 so that
+        # a line truncated to "Thu" or "Thu 2026-06-11" does not produce a
+        # misleading single-word or partial result.
         if len(parts) >= 4 and re.match(r"\d{4}-\d{2}-\d{2}$", parts[1]):
             return " ".join(parts[0:4])
-        return parts[0]
+        # Cannot recover a full timestamp (truncated or unexpected format).
+        return None
     return None
 
 
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
+    """Return the next scheduled run timestamp for *unit*, or ``None``.
+
+    Uses a **unit-filtered** ``systemctl list-timers`` call first.  The
+    unfiltered form lists every system timer and the cumulative output often
+    exceeds the 400-character truncation applied by ``_run_raw``; when many
+    timers appear before the vulture entry the line is cut mid-token (e.g.
+    to just ``"Thu"``) and only a partial value can be extracted.  Filtering
+    to the single unit produces an output of ~250 characters — well within
+    the limit — so the full four-part timestamp is always available.
+
+    Falls back to the unfiltered list for older systemd versions that do not
+    accept a unit-name argument to ``list-timers``.
+    """
+    # Unit-specific query: header + one data row ≈ 250 chars, safe from truncation.
+    ok, out = run_systemctl(["list-timers", unit, "--all", "--no-pager"], timeout=10.0)
+    if ok and out.strip():
+        result = _parse_timer_next_run(out, unit)
+        if result:
+            return result
+    # Fallback: older systemd may not accept a unit filter for list-timers.
     ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
     if not ok or not out.strip():
         return None
@@ -321,7 +351,10 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        # Timer is healthy (active) but no log/journal evidence yet — no failure
+        # signal, so treat as "seen" rather than leaving status as "unknown".
+        status = "seen"
+        detail_parts.append("timer active; no recent scheduler activity")
 
     if next_run:
         detail_parts.append(f"next run {next_run}")

@@ -41,6 +41,7 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _list_timer_next_run,
     _parse_timer_next_run,
     _scheduler_freshness,
 )
@@ -679,3 +680,133 @@ class TestSchedulerHealth:
         )
         assert result["status"] == "fresh"
         assert result["warning"] is None
+
+    # ── Truncation / unit-filter regression tests ─────────────────────────────
+
+    def test_parse_timer_next_run_returns_none_for_truncated_line(self):
+        """A line with fewer than four whitespace tokens (e.g. output cut by the
+        400-char _run_raw limit) must return None, not a partial weekday string."""
+        # Simulate: systemctl output truncated so vulture line appears as "Thu"
+        output = "NEXT  LEFT  LAST  PASSED  UNIT\nThu vulture-scheduler.timer\n"
+        result = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert result is None
+
+    def test_parse_timer_next_run_returns_none_for_partial_date_parts(self):
+        """Three-part line (weekday + date, no time) must return None."""
+        output = (
+            "NEXT  LEFT  LAST  PASSED  UNIT\n"
+            "Thu 2026-06-11 vulture-scheduler.timer\n"
+        )
+        result = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert result is None
+
+    def test_list_timer_next_run_tries_unit_filter_first(self):
+        """_list_timer_next_run must call run_systemctl with the unit name as a
+        filter argument before falling back to the full unfiltered list.  The
+        unit-filtered form produces a compact output (~250 chars) that is safe
+        from the 400-char truncation applied by _run_raw."""
+        unit_output = (
+            "NEXT                        LEFT      LAST                        "
+            "PASSED   UNIT                       ACTIVATES\n"
+            "Thu 2026-06-11 17:00:00 UTC 5min left Thu 2026-06-11 16:45:00 UTC "
+            "10min    vulture-scheduler.timer     vulture-scheduler.service\n"
+        )
+        calls: list[list] = []
+
+        def fake_run_systemctl(subargs, **kwargs):
+            calls.append(list(subargs))
+            if "vulture-scheduler.timer" in subargs:
+                return True, unit_output
+            return False, "not called"
+
+        with patch("vulture_runtime.run_systemctl", side_effect=fake_run_systemctl):
+            result = _list_timer_next_run("vulture-scheduler.timer")
+
+        # First call must include the unit name as a filter.
+        assert calls[0][1] == "vulture-scheduler.timer", (
+            f"first call should pass the unit as arg, got: {calls[0]}"
+        )
+        assert result == "Thu 2026-06-11 17:00:00 UTC"
+
+    def test_list_timer_next_run_fallback_when_unit_filter_fails(self):
+        """When the unit-filtered call returns no useful output, fall back to the
+        unfiltered list."""
+        full_output = (
+            "NEXT                        LEFT      LAST                        "
+            "PASSED   UNIT                       ACTIVATES\n"
+            "Thu 2026-06-11 17:00:00 UTC 5min left Thu 2026-06-11 16:45:00 UTC "
+            "10min    vulture-scheduler.timer     vulture-scheduler.service\n"
+        )
+
+        def fake_run_systemctl(subargs, **kwargs):
+            if "vulture-scheduler.timer" in subargs and subargs[0] == "list-timers":
+                # Simulate older systemd: unit filter returns no output.
+                return True, "No timers listed."
+            return True, full_output
+
+        with patch("vulture_runtime.run_systemctl", side_effect=fake_run_systemctl):
+            result = _list_timer_next_run("vulture-scheduler.timer")
+
+        assert result == "Thu 2026-06-11 17:00:00 UTC"
+
+    def test_regression_production_truncation_scenario(self):
+        """Regression: full unfiltered systemctl output truncated at 400 chars places
+        the vulture timer line beyond the limit.  The unit-filtered query must return
+        the full timestamp; the status must be 'seen', not 'stale'.
+
+        Simulates the exact production failure reported (305 min stale, next run Thu).
+        """
+        # Build a realistic unfiltered output where system timers appear before
+        # vulture-scheduler.timer and push it past the 400-char limit.
+        header = (
+            "NEXT                        LEFT           LAST                        "
+            "PASSED       UNIT                           ACTIVATES\n"
+        )
+        sys_line = (
+            "Thu 2026-06-11 16:45:00 UTC 10min left     Thu 2026-06-11 16:30:00 UTC "
+            "15min ago    logrotate.timer                logrotate.service\n"
+        )
+        vulture_line = (
+            "Thu 2026-06-11 17:00:00 UTC 25min left     Thu 2026-06-11 16:45:00 UTC "
+            "30min ago    vulture-scheduler.timer        vulture-scheduler.service\n"
+        )
+        # Full output: header + sys_line + vulture_line → truncated at 400 chars
+        full_output_raw = header + sys_line + vulture_line
+        truncated = full_output_raw[:400] + "…"  # mirrors _run_raw behaviour
+
+        # The unit-filtered output is compact and never truncated.
+        unit_output = header + vulture_line
+
+        def fake_run_systemctl(subargs, **kwargs):
+            if "vulture-scheduler.timer" in subargs and subargs[0] == "list-timers":
+                return True, unit_output
+            return True, truncated
+
+        timer_svc = ServiceStatus(
+            "vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled"
+        )
+        service_svc = ServiceStatus(
+            "vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled"
+        )
+        # Stale log lines (305 min old) — mirror the production report
+        log_lines = [
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime.run_systemctl", side_effect=fake_run_systemctl):
+                    with patch("vulture_runtime._journal_lines", return_value=[]):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            # now ≈ 18:24 UTC (305 min after 13:18)
+                            mock_dt.now.return_value = datetime(
+                                2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc
+                            )
+                            result = _evaluate_scheduler_health(log_lines)
+
+        # Timer healthy with valid next_run → "seen", never "stale"
+        assert result["status"] == "seen", f"expected 'seen', got {result['status']!r}"
+        assert result["warning"] is None
+        # next_run must be the full timestamp, not just "Thu"
+        assert result["next_run"] == "Thu 2026-06-11 17:00:00 UTC", (
+            f"next_run should be full timestamp, got {result['next_run']!r}"
+        )
