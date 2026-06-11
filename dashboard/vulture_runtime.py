@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from host_commands import run_host_command, run_systemctl, systemctl_is_active, systemctl_is_enabled
-from host_status import ServiceStatus, _check_service, _normalize_unit_state, _resolve_unit
+from host_status import HOST_ROOT, ServiceStatus, _check_service, _normalize_unit_state, _resolve_unit
 from subprocess_util import run_command
 
 LOG_PATH = Path(os.environ.get("VULTURE_LOG_PATH", "/app/logs/vulture.log"))
@@ -140,15 +142,69 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
-def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
-    if m:
-        raw = f"{m.group(1)} {m.group(2)}"
+# Matches both journalctl short-iso ("2026-06-05T21:55:07-0500") and the naive
+# Python logging format used by vulture.log ("2026-06-11 11:35:06,318").
+_TIMESTAMP_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?(Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _log_timezone() -> tzinfo:
+    """
+    Timezone for naive vulture.log timestamps.
+
+    Python logging's %(asctime)s writes host-local time with no offset, so naive
+    timestamps must be localized before any stale math against UTC "now".
+    Resolution order: VULTURE_LOG_TZ env var, host /etc/timezone, host
+    /etc/localtime symlink, then the dashboard's own local timezone.
+    """
+    candidates: list[str] = []
+    env_tz = os.environ.get("VULTURE_LOG_TZ", "").strip()
+    if env_tz:
+        candidates.append(env_tz)
+    for path in (HOST_ROOT / "etc/timezone", Path("/etc/timezone")):
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return None
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            candidates.append(text)
+    for path in (HOST_ROOT / "etc/localtime", Path("/etc/localtime")):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            continue
+        if "zoneinfo/" in target:
+            candidates.append(target.rsplit("zoneinfo/", 1)[-1])
+    for name in candidates:
+        if name.upper() in ("UTC", "ETC/UTC"):
+            return timezone.utc
+        try:
+            return ZoneInfo(name)
+        except (KeyError, ValueError, OSError):
+            continue
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _parse_log_timestamp(line: str) -> datetime | None:
+    """Parse a log/journal line timestamp into an aware UTC-comparable datetime."""
+    m = _TIMESTAMP_RE.search(line)
+    if not m:
+        return None
+    try:
+        naive = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    offset = m.group(3)
+    if offset == "Z":
+        return naive.replace(tzinfo=timezone.utc)
+    if offset:
+        digits = offset.replace(":", "")
+        sign = 1 if digits.startswith("+") else -1
+        delta = timedelta(hours=int(digits[1:3]), minutes=int(digits[3:5]))
+        return naive.replace(tzinfo=timezone(sign * delta))
+    return naive.replace(tzinfo=_log_timezone())
 
 
 def _freshness_from_lines(
@@ -165,39 +221,62 @@ def _freshness_from_lines(
         ts = _parse_log_timestamp(line)
         if ts is None:
             continue
-        age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+        ts_utc = ts.astimezone(timezone.utc)
+        age_min = (datetime.now(timezone.utc) - ts_utc).total_seconds() / 60
         if age_min <= SCHEDULER_FRESH_MINUTES:
             return {
                 "status": "fresh",
                 "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
                 "warning": None,
-                "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "last_success": ts_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "last_success_age_min": int(age_min),
             }
         return {
             "status": "stale",
             "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
             "warning": f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min",
-            "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "last_success": ts_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "last_success_age_min": int(age_min),
         }
     return None
 
 
-def _parse_timer_next_run(output: str, unit: str) -> str | None:
+# NEXT column of `systemctl list-timers`: optional weekday, date, time,
+# optional timezone abbreviation/offset (e.g. "Thu 2026-06-11 12:00:00 CDT").
+_TIMER_NEXT_RE = re.compile(
+    r"((?:[A-Za-z]{3}\s+)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[A-Z+][A-Za-z0-9+:/_-]{1,9})?)"
+)
+_TIMER_LEFT_RE = re.compile(r"(\d+\s*\w+(?:\s+\d+\s*\w+)*)\s+left\b")
+
+
+def _parse_timer_next_run(output: str, unit: str) -> tuple[str | None, bool]:
+    """
+    Extract the full NEXT timestamp (plus time-left when present) for a timer unit.
+
+    Returns (next_run, known): known is True when the unit's row was found, so
+    callers can distinguish "no upcoming run" from "list-timers unavailable".
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
-    return None
+        stripped = line.strip()
+        if stripped.startswith(("n/a", "-")):
+            return None, True
+        m = _TIMER_NEXT_RE.search(line)
+        if not m:
+            return None, True
+        next_str = " ".join(m.group(1).split())
+        left = _TIMER_LEFT_RE.search(line, m.end())
+        if left:
+            return f"{next_str} ({' '.join(left.group(1).split())} left)", True
+        return next_str, True
+    return None, False
 
 
-def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
+def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> tuple[str | None, bool]:
     ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
     if not ok or not out.strip():
-        return None
+        return None, False
     return _parse_timer_next_run(out, unit)
 
 
@@ -254,7 +333,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         (SCHEDULER_TIMER_UNIT, SCHEDULER_TIMER_UNIT.replace(".timer", "")),
     )
     service_svc = _check_scheduler_service()
-    next_run = _list_timer_next_run()
+    next_run, next_run_known = _list_timer_next_run()
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
     from_journal = _freshness_from_lines(journal, source="journal")
@@ -294,18 +373,26 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         status = "running"
         detail_parts.append("hunt cycle in progress")
     elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
+        # Timer is active; log staleness alone is informational, not a warning.
+        # Warn only when list-timers confirms there is also no upcoming run.
         status = "stale"
         detail_parts.append(activity["detail"])
+        if next_run_known and not next_run:
+            warning = "Scheduler timer has no upcoming run"
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
         detail_parts.append(activity["detail"])
     elif journal:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
+        if next_run_known and not next_run:
+            status = "stale"
+            warning = "Scheduler timer has no upcoming run"
     else:
         detail_parts.append("no recent scheduler lines in journal or log tail")
+        if next_run_known and not next_run:
+            status = "stale"
+            warning = "Scheduler timer has no upcoming run"
 
     if next_run:
         detail_parts.append(f"next run {next_run}")
