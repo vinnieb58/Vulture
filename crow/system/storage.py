@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from crow.checks.system import get_disk_entries_for_paths, parse_df_output
-from crow.config import EXPECTED_STORAGE_MOUNTS
+from crow.config import DISK_CRITICAL_PERCENT, DISK_WARN_PERCENT, EXPECTED_STORAGE_MOUNTS
 from crow.system._status import StatusItem, StatusLevel
 
 
@@ -65,8 +65,11 @@ def _path_in_proc_mounts(path: str) -> bool:
 
 def storage_level(mount: StorageMount, *, required: bool = True) -> StatusLevel:
     if mount.mounted:
-        if mount.percent_used is not None and mount.percent_used >= 90:
-            return "warn"
+        if mount.percent_used is not None:
+            if mount.percent_used >= DISK_CRITICAL_PERCENT:
+                return "fail"
+            if mount.percent_used >= DISK_WARN_PERCENT:
+                return "warn"
         return "ok"
     if required and mount.path != "/":
         return "warn"

@@ -94,9 +94,25 @@ class TestStorageLevel:
         mount = StorageMount("portable_beast", "/mnt/portable_beast", False, None)
         assert storage_level(mount) == "warn"
 
-    def test_mounted_high_usage_warn(self):
+    def test_mounted_critical_usage_fail(self):
         mount = StorageMount("Root SSD", "/", True, 92.0)
+        assert storage_level(mount) == "fail"
+
+    def test_mounted_at_exactly_90_pct_is_fail(self):
+        mount = StorageMount("Toshiba EXT", "/mnt/storage/toshiba_ext", True, 90.0)
+        assert storage_level(mount) == "fail"
+
+    def test_mounted_at_89_pct_is_warn(self):
+        mount = StorageMount("Toshiba EXT", "/mnt/storage/toshiba_ext", True, 89.0)
         assert storage_level(mount) == "warn"
+
+    def test_mounted_at_exactly_80_pct_is_warn(self):
+        mount = StorageMount("MicroSD", "/mnt/storage/microsd", True, 80.0)
+        assert storage_level(mount) == "warn"
+
+    def test_mounted_at_79_pct_is_ok(self):
+        mount = StorageMount("MicroSD", "/mnt/storage/microsd", True, 79.0)
+        assert storage_level(mount) == "ok"
 
     def test_format_missing_mount(self):
         mount = StorageMount("toshiba_ext", "/mnt/toshiba_ext", False, None)
