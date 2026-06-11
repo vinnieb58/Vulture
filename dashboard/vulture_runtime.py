@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,9 @@ SUCCESS_KEYWORDS = (
     "hunt cycle completed",
     "done hunt",
 )
+# Tokens that indicate scheduler / hunt-cycle activity, NOT generic adapter
+# warnings.  Lines like "[WARNING] Swappa: zero model slugs ..." intentionally
+# do not match anything here so they cannot make the scheduler look stale.
 ACTIVITY_KEYWORDS = (
     "starting hunt",
     "done hunt",
@@ -140,12 +143,40 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
+_TS_WITH_TZ = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?\s*([+-])(\d{2}):?(\d{2})"
+)
+_TS_NAIVE = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
+
+
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
+    """Parse the first ISO-8601 timestamp on a log line into a tz-aware UTC datetime.
+
+    Lines with explicit offsets (e.g. journalctl `short-iso` output
+    ``2026-06-05T21:55:07-0500 ...``) are converted to UTC.  Naive timestamps
+    (e.g. vulture.log ``2026-06-11 11:35:06,318 [WARNING] ...``) are assumed to
+    be UTC because that is what Vulture writes; the important property is that
+    every datetime returned by this helper is timezone-aware so stale-math
+    against ``datetime.now(timezone.utc)`` never mixes naive/aware values.
+    """
+    m = _TS_WITH_TZ.search(line)
     if m:
-        raw = f"{m.group(1)} {m.group(2)}"
+        date, time_, sign, hh, mm = m.groups()
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            naive = datetime.strptime(f"{date} {time_}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            naive = None
+        if naive is not None:
+            sign_mul = 1 if sign == "+" else -1
+            delta = timedelta(hours=int(hh), minutes=int(mm)) * sign_mul
+            return naive.replace(tzinfo=timezone(delta)).astimezone(timezone.utc)
+
+    m = _TS_NAIVE.search(line)
+    if m:
+        try:
+            return datetime.strptime(
+                f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
         except ValueError:
             pass
     return None
@@ -185,12 +216,31 @@ def _freshness_from_lines(
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """Extract the NEXT column for ``unit`` from ``systemctl list-timers`` output.
+
+    ``list-timers`` is a column-aligned table whose columns can each contain
+    spaces (``NEXT`` is e.g. ``Thu 2026-06-11 17:30:00 UTC`` and ``LEFT`` is
+    e.g. ``50min left``).  The legacy implementation split on any whitespace
+    and returned ``parts[0]`` which is just ``"Thu"`` — that's why the
+    dashboard previously displayed ``Next run Thu``.  Columns are always
+    separated by two or more spaces, so split accordingly and reassemble the
+    NEXT column with the optional LEFT (``in 50min``) suffix for readability.
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        cols = [c.strip() for c in re.split(r"\s{2,}", line.strip()) if c.strip()]
+        if not cols or cols[0] in ("NEXT", "n/a", "-"):
+            # Header row, or timer with no scheduled next run.
+            if cols and cols[0] in ("n/a", "-"):
+                return None
+            continue
+        next_run = cols[0]
+        left = cols[1] if len(cols) > 1 else ""
+        left = re.sub(r"\s*left\s*$", "", left).strip()
+        if left and left not in ("n/a", "-"):
+            return f"{next_run} (in {left})"
+        return next_run
     return None
 
 
@@ -244,10 +294,21 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
-    - Service inactive/dead after success = idle between runs
-    - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    The dashboard distinguishes three different signals:
+
+    * **Scheduler timer status** – authoritative for *schedule health*.  A
+      healthy ``vulture-scheduler.timer`` with a scheduled next run is the
+      definitive indicator that the scheduler will keep firing.  This is the
+      ONLY signal allowed to raise a warning on the scheduler card.
+    * **Scheduler cycle success** – ``hunt cycle completed`` / ``done hunt``
+      lines, preferentially read from
+      ``journalctl -u vulture-scheduler.service`` (single-purpose, never
+      polluted by adapter chatter) and only falling back to ``vulture.log``.
+      Used for the "last success" timestamp; informational only.
+    * **General Vulture log activity** – everything else in ``vulture.log``.
+      Reported as informational context but never used to mark the
+      scheduler stale, so adapter warnings like
+      ``Swappa: zero model slugs ...`` cannot trip the scheduler card.
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -257,6 +318,8 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     next_run = _list_timer_next_run()
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
+    # Prefer authoritative signals (service journal) over noisy vulture.log
+    # tails for both general activity and explicit success markers.
     from_journal = _freshness_from_lines(journal, source="journal")
     from_log = _freshness_from_lines(log_lines, source="vulture.log")
     activity = from_journal or from_log
@@ -294,8 +357,9 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         status = "running"
         detail_parts.append("hunt cycle in progress")
     elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
+        # Timer is healthy; log staleness is informational only, never a
+        # warning.  Only timer / service state can flip the scheduler card to
+        # WARN or FAIL (see _compute_vulture_card).
         status = "stale"
         detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "fresh":
@@ -320,6 +384,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "service": service_svc,
         "timer_active": timer_svc.active,
         "service_active": service_svc.active,
+        "timer_healthy": timer_healthy,
         "next_run": next_run,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
@@ -346,7 +411,9 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         "warning": scheduler["warning"],
         "next_run": scheduler.get("next_run"),
         "last_success": scheduler.get("last_success"),
+        "last_success_age_min": scheduler.get("last_success_age_min"),
         "timer_active": scheduler.get("timer_active"),
+        "timer_healthy": scheduler.get("timer_healthy", False),
         "service_active": scheduler.get("service_active"),
     }
 

@@ -172,28 +172,50 @@ def _compute_storage_card(storage: list[StorageStatus]) -> dict[str, Any]:
 
 
 def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[str, Any]:
-    """Plain-English Vulture status card for the Nest overview."""
+    """Plain-English Vulture status card for the Nest overview.
+
+    Schedule health is driven by the systemd timer, not by tail-of-log
+    chatter.  When the timer is active (and the oneshot service hasn't
+    failed) the scheduler is healthy *by construction* — the next run is
+    already scheduled.  In that case "stale" general-log activity is shown
+    as informational context, but the card status stays OK so adapter
+    warnings like "zero model slugs" cannot make the scheduler look broken.
+    """
     freshness = vulture.get("scheduler_freshness", {})
     sched_status = freshness.get("status", "unknown")
     next_run = freshness.get("next_run")
+    timer_healthy = bool(freshness.get("timer_healthy"))
 
-    if sched_status in ("fresh", "running", "seen"):
+    def _active_headline() -> str:
+        if next_run:
+            return f"Vulture scheduler active; next run {next_run}"
+        return "Vulture scheduler active"
+
+    if sched_status == "running":
         status = "OK"
-        if sched_status == "running":
-            headline = "Vulture hunt cycle in progress"
-        elif next_run:
-            headline = f"Vulture scheduler active; next run {next_run}"
-        else:
-            headline = "Vulture scheduler active"
+        headline = "Vulture hunt cycle in progress"
+    elif sched_status in ("fresh", "seen"):
+        status = "OK"
+        headline = _active_headline()
     elif sched_status == "stale":
-        status = "WARN"
-        headline = "Vulture scheduler may be stale"
+        if timer_healthy:
+            # Timer is firing on schedule; the lull in vulture.log is
+            # informational only (see _evaluate_scheduler_health).
+            status = "OK"
+            headline = _active_headline()
+        else:
+            status = "WARN"
+            headline = "Vulture scheduler may be stale"
     elif sched_status == "unhealthy":
         status = "FAIL"
         headline = "Vulture scheduler unhealthy"
     else:
-        status = "UNKNOWN"
-        headline = "Vulture scheduler status unknown"
+        if timer_healthy:
+            status = "OK"
+            headline = _active_headline()
+        else:
+            status = "UNKNOWN"
+            headline = "Vulture scheduler status unknown"
 
     bot_running = False
     processes = vulture.get("processes", [])

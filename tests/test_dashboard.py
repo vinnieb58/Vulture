@@ -41,6 +41,8 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _parse_log_timestamp,
+    _parse_timer_next_run,
     _scheduler_freshness,
 )
 from host_status import ServiceStatus  # noqa: E402
@@ -575,3 +577,164 @@ class TestSchedulerHealth:
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+
+    def test_fresh_adapter_warning_does_not_mark_scheduler_stale(self):
+        """Regression: a recent ``Swappa: zero model slugs`` WARNING line is
+        not scheduler activity and must not satisfy the freshness check, but
+        also must not be misinterpreted as scheduler signal.  The only signal
+        the evaluator should react to is the lack of recent scheduler
+        activity, which while ``stale`` must produce ``warning is None``
+        because the timer is healthy."""
+        log_lines = [
+            "2026-06-11 05:00:00,000 [INFO] Done hunt 'ddr4_desktop_ram'",
+            "2026-06-11 11:35:06,318 [WARNING] Swappa: zero model slugs "
+            "for query 'DDR4 desktop RAM' - query may match nothing",
+        ]
+        now = datetime(2026, 6, 11, 16, 49, 0, tzinfo=timezone.utc)
+        with patch("vulture_runtime._check_service", return_value=ServiceStatus(
+            "vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled"
+        )):
+            with patch("vulture_runtime._check_scheduler_service", return_value=ServiceStatus(
+                "vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled"
+            )):
+                with patch(
+                    "vulture_runtime._list_timer_next_run",
+                    return_value="Thu 2026-06-11 17:30:00 UTC (in 41min)",
+                ):
+                    with patch("vulture_runtime._journal_lines", return_value=[]):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            mock_dt.now.return_value = now
+                            result = _evaluate_scheduler_health(log_lines)
+        assert result["warning"] is None
+        assert result["timer_healthy"] is True
+        # The "Done hunt" line drives last_success; the Swappa WARNING line
+        # is correctly ignored for both activity and success freshness.
+        assert result["last_success"] == "2026-06-11 05:00:00 UTC"
+
+
+class TestSchedulerCardBehaviour:
+    """Card-level behaviour: timer-active overrides log staleness to OK."""
+
+    def _card(self, **freshness):
+        from app import _compute_vulture_card
+        vulture = {"scheduler_freshness": freshness, "processes": []}
+        db = {"hunt_counts": {"active": 1, "total": 1}}
+        return _compute_vulture_card(vulture, db)
+
+    def test_stale_logs_with_active_timer_is_ok(self):
+        """Regression for raven:8088 'Vulture scheduler may be stale' alert
+        while vulture.log was actively producing lines and the timer was
+        healthy with a scheduled next run."""
+        card = self._card(
+            status="stale",
+            timer_healthy=True,
+            timer_active="active",
+            next_run="Thu 2026-06-11 17:30:00 UTC (in 41min)",
+            last_success="2026-06-11 11:19:49 UTC",
+            detail="Last scheduler activity ~314 min ago (vulture.log)",
+        )
+        assert card["status"] == "OK"
+        assert "may be stale" not in card["headline"]
+        assert "next run" in card["headline"].lower()
+        assert "17:30" in card["headline"]
+
+    def test_stale_logs_without_timer_is_warn(self):
+        card = self._card(
+            status="stale",
+            timer_healthy=False,
+            timer_active="inactive",
+            next_run=None,
+        )
+        assert card["status"] == "WARN"
+        assert "stale" in card["headline"].lower()
+
+    def test_unhealthy_status_is_fail(self):
+        card = self._card(
+            status="unhealthy",
+            timer_healthy=False,
+            timer_active="not found",
+            next_run=None,
+        )
+        assert card["status"] == "FAIL"
+
+    def test_running_status_shows_in_progress(self):
+        card = self._card(
+            status="running",
+            timer_healthy=True,
+            timer_active="active",
+            next_run="Thu 2026-06-11 17:30:00 UTC (in 41min)",
+        )
+        assert card["status"] == "OK"
+        assert "in progress" in card["headline"].lower()
+
+    def test_next_run_uses_full_timestamp_in_headline(self):
+        card = self._card(
+            status="fresh",
+            timer_healthy=True,
+            timer_active="active",
+            next_run="Thu 2026-06-11 17:30:00 UTC (in 41min)",
+        )
+        # The headline must NOT be the bare weekday "Thu" that the legacy
+        # parser produced; it must include the full timestamp.
+        assert "Thu 2026-06-11 17:30:00 UTC" in card["headline"]
+
+
+class TestTimerNextRunParser:
+    """Regression for 'Next run Thu' — full NEXT column must be extracted."""
+
+    LIST_TIMERS_OUTPUT = (
+        "NEXT                         LEFT          "
+        "LAST                         PASSED        "
+        "UNIT                         ACTIVATES\n"
+        "Thu 2026-06-11 17:30:00 UTC  50min left    "
+        "Thu 2026-06-11 17:00:00 UTC  19min ago     "
+        "vulture-scheduler.timer      vulture-scheduler.service\n"
+        "Fri 2026-06-12 03:10:14 UTC  9h left       "
+        "Thu 2026-06-11 03:10:14 UTC  14h ago       "
+        "logrotate.timer              logrotate.service\n"
+    )
+
+    def test_parses_full_next_run_column(self):
+        result = _parse_timer_next_run(self.LIST_TIMERS_OUTPUT, "vulture-scheduler.timer")
+        assert result is not None
+        assert result.startswith("Thu 2026-06-11 17:30:00 UTC")
+        # Relative left-time should be suffixed for usefulness.
+        assert "in 50min" in result
+
+    def test_does_not_return_bare_weekday(self):
+        result = _parse_timer_next_run(self.LIST_TIMERS_OUTPUT, "vulture-scheduler.timer")
+        assert result != "Thu"
+        assert result is not None and " " in result
+
+    def test_returns_none_for_unknown_unit(self):
+        result = _parse_timer_next_run(self.LIST_TIMERS_OUTPUT, "nope.timer")
+        assert result is None
+
+    def test_handles_na_next_run(self):
+        out = (
+            "NEXT  LEFT  LAST  PASSED  UNIT                     ACTIVATES\n"
+            "n/a   n/a   -     -       vulture-scheduler.timer  vulture-scheduler.service\n"
+        )
+        assert _parse_timer_next_run(out, "vulture-scheduler.timer") is None
+
+
+class TestLogTimestampParser:
+    """Stale math must not mix naive UTC and offset-aware timestamps."""
+
+    def test_naive_log_line_is_treated_as_utc(self):
+        ts = _parse_log_timestamp("2026-06-11 11:35:06,318 [WARNING] Swappa: ...")
+        assert ts is not None
+        assert ts.tzinfo is not None
+        assert ts == datetime(2026, 6, 11, 11, 35, 6, tzinfo=timezone.utc)
+
+    def test_journal_offset_is_converted_to_utc(self):
+        # 21:55:07-0500 == 02:55:07 UTC the following day.
+        ts = _parse_log_timestamp(
+            "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Done hunt"
+        )
+        assert ts is not None
+        assert ts.tzinfo is not None
+        assert ts == datetime(2026, 6, 6, 2, 55, 7, tzinfo=timezone.utc)
+
+    def test_unparseable_line_returns_none(self):
+        assert _parse_log_timestamp("no timestamp here") is None
