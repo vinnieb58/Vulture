@@ -41,6 +41,7 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _parse_timer_next_run,
     _scheduler_freshness,
 )
 from host_status import ServiceStatus  # noqa: E402
@@ -549,12 +550,14 @@ class TestSchedulerHealth:
         assert result["warning"] == "Scheduler timer missing/inactive"
 
     def test_timer_active_no_recent_logs_stale_no_warning(self):
-        # Timer is healthy (active, has next run); stale logs are informational only.
+        # Timer is healthy (active, has next run); stale log activity should not
+        # produce a WARN — the timer is the authoritative health source.
         journal = [
             "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(service_active="inactive", journal=journal)
-        assert result["status"] == "stale"
+        # next_run is scheduled ("Mon 2026-06-07 12:00:00 UTC"), so status → "seen" not "stale"
+        assert result["status"] == "seen"
         assert result["warning"] is None
 
     def test_service_failed_unhealthy(self):
@@ -575,3 +578,104 @@ class TestSchedulerHealth:
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+        # next_run is set in the helper ("Mon 2026-06-07 12:00:00 UTC"), so timer
+        # with scheduled run and no log activity → "seen", not "unknown".
+        assert result["status"] == "seen"
+
+    # ── New targeted tests covering the reported stale-warning regression ──────
+
+    def test_adapter_warning_in_log_does_not_affect_scheduler_freshness(self):
+        """A fresh adapter warning (e.g. Swappa zero slugs) in vulture.log must not
+        make the scheduler appear stale.  Only scheduler-keyword lines count."""
+        log_lines = [
+            # Stale scheduler line (2h old at now=12:00)
+            "2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
+            # Fresh adapter warning — matches ERROR_PATTERNS but NOT ACTIVITY_KEYWORDS;
+            # must be completely ignored for scheduler freshness.
+            "2026-06-07 11:55:00,318 [WARNING] Swappa: zero model slugs for query 'DDR4 desktop RAM'",
+        ]
+        # Call _evaluate_scheduler_health directly so we can supply log_lines.
+        timer_svc = ServiceStatus(
+            "vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled"
+        )
+        service_svc = ServiceStatus(
+            "vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled"
+        )
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime._list_timer_next_run", return_value="Mon 2026-06-07 12:15:00 UTC"):
+                    with patch("vulture_runtime._journal_lines", return_value=[]):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            mock_dt.now.return_value = datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+                            result = _evaluate_scheduler_health(log_lines)
+        # Timer healthy with next_run; Swappa warning must not push scheduler to "stale"
+        assert result["status"] in ("seen", "fresh")
+        assert result["warning"] is None
+
+    def test_timer_active_stale_logs_no_next_run_is_stale(self):
+        """When timer is active but reports no upcoming run AND logs are stale,
+        the scheduler deserves a 'stale' status (timer may be stuck)."""
+        journal = [
+            "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=journal,
+            next_run=None,  # no scheduled next run
+        )
+        assert result["status"] == "stale"
+        # No warning raised purely from log staleness — only timer state triggers warning.
+        assert result["warning"] is None
+
+    def test_parse_timer_next_run_returns_full_timestamp(self):
+        """_parse_timer_next_run must return the full 'Day YYYY-MM-DD HH:MM:SS TZ'
+        string, not just the weekday abbreviation."""
+        output = (
+            "NEXT                          LEFT           LAST                          "
+            "PASSED       UNIT                           ACTIVATES\n"
+            "Thu 2026-06-11 16:49:21 UTC   10min left     Thu 2026-06-11 16:34:21 UTC   "
+            "4min ago     vulture-scheduler.timer        vulture-scheduler.service\n"
+        )
+        result = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert result == "Thu 2026-06-11 16:49:21 UTC"
+
+    def test_parse_timer_next_run_returns_none_for_no_next_run(self):
+        """When systemctl reports 'n/a' for the next run, return None."""
+        output = (
+            "NEXT  LEFT  LAST  PASSED  UNIT                           ACTIVATES\n"
+            "n/a   n/a   n/a   n/a     vulture-scheduler.timer        vulture-scheduler.service\n"
+        )
+        result = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert result is None
+
+    def test_vulture_card_seen_maps_to_ok(self):
+        """'seen' scheduler status must render the Vulture card as OK, not WARN."""
+        from app import _compute_vulture_card
+        vulture = {
+            "scheduler_freshness": {
+                "status": "seen",
+                "detail": "timer scheduled; no recent log activity",
+                "next_run": "Thu 2026-06-11 16:49:21 UTC",
+                "last_success": None,
+            },
+            "processes": [],
+        }
+        db = {"hunt_counts": {"active": 2, "total": 4, "paused": 0, "ended": 2}}
+        card = _compute_vulture_card(vulture, db)
+        assert card["status"] == "OK"
+        assert "Thu 2026-06-11 16:49:21 UTC" in card["headline"]
+
+    def test_recent_journal_success_marks_scheduler_healthy(self):
+        """A recent hunt-cycle-completed line in the service journal must mark the
+        scheduler as 'fresh' with no warning."""
+        journal = [
+            "2026-06-07T11:58:00+0000 python[1]: 2026-06-07 11:58:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=journal,
+            next_run="Mon 2026-06-07 12:13:00 UTC",
+            now=datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
