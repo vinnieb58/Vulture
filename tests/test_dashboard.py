@@ -41,6 +41,7 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _parse_timer_next_run,
     _scheduler_freshness,
 )
 from host_status import ServiceStatus  # noqa: E402
@@ -340,7 +341,7 @@ class TestHostCommands:
                         ) as mock_dt:
                             mock_dt.now.return_value = datetime(2026, 6, 6, 3, 0, 0, tzinfo=timezone.utc)
                             result = _scheduler_freshness([])
-        assert result["status"] in ("fresh", "stale", "seen")
+        assert result["status"] == "fresh"
         assert "journal" in result["detail"]
 
 
@@ -507,6 +508,7 @@ class TestSchedulerHealth:
         timer_unit: str | None = "vulture-scheduler.timer",
         service_active: str = "inactive",
         journal: list[str] | None = None,
+        log_lines: list[str] | None = None,
         next_run: str | None = "Mon 2026-06-07 12:00:00 UTC",
         now: datetime | None = None,
     ):
@@ -531,7 +533,7 @@ class TestSchedulerHealth:
                     with patch("vulture_runtime._journal_lines", return_value=journal or []):
                         with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
                             mock_dt.now.return_value = now
-                            return _evaluate_scheduler_health([])
+                            return _evaluate_scheduler_health(log_lines or [])
 
     def test_timer_active_service_inactive_success_healthy(self):
         journal = [
@@ -575,3 +577,38 @@ class TestSchedulerHealth:
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+
+    def test_fresh_warning_line_does_not_mark_scheduler_stale(self):
+        journal = [
+            "2026-06-07T11:58:00+0000 python[1]: 2026-06-07 11:58:00,000 [INFO] Hunt cycle completed",
+        ]
+        warning_only_logs = [
+            "2026-06-07 11:59:00,000 [WARNING] Swappa: zero model slugs for query 'DDR4 desktop RAM'",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=journal,
+            log_lines=warning_only_logs,
+            next_run="Mon 2026-06-07 12:10:00 UTC",
+        )
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+
+    def test_stale_when_no_recent_run_and_no_upcoming_run(self):
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=[],
+            next_run=None,
+        )
+        assert result["status"] == "stale"
+        assert result["warning"] is not None
+        assert "No upcoming scheduler run detected" in result["warning"]
+
+    def test_parse_timer_next_run_includes_datetime_and_relative(self):
+        timer_output = (
+            "Thu 2026-06-11 12:00:00 UTC  24min left  Thu 2026-06-11 11:36:00 UTC  "
+            "0s ago  vulture-scheduler.timer  vulture-scheduler.service\n"
+        )
+        parsed = _parse_timer_next_run(timer_output, "vulture-scheduler.timer")
+        assert parsed == "Thu 2026-06-11 12:00:00 UTC (24min left)"

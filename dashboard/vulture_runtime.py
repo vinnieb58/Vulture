@@ -141,11 +141,31 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
 
 
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
+    iso_match = re.search(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2}))",
+        line,
+    )
+    if iso_match:
+        raw = iso_match.group(1).replace(",", ".")
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        if re.search(r"[+-]\d{4}$", raw):
+            raw = f"{raw[:-5]}{raw[-5:-2]}:{raw[-2:]}"
+        try:
+            parsed = datetime.fromisoformat(raw)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?", line)
     if m:
         raw = f"{m.group(1)} {m.group(2)}"
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
         except ValueError:
             pass
     return None
@@ -186,16 +206,28 @@ def _freshness_from_lines(
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
     for line in output.splitlines():
-        if unit not in line:
+        text = line.strip()
+        if not text:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        columns = [part.strip() for part in re.split(r"\s{2,}", text) if part.strip()]
+        if unit not in columns:
+            continue
+        unit_idx = columns.index(unit)
+        next_run = columns[0]
+        if next_run.lower() in ("next", "n/a"):
+            return None
+        left = columns[1] if unit_idx > 1 else None
+        if left and left.lower() != "n/a":
+            return f"{next_run} ({left})"
+        return next_run
     return None
 
 
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
-    ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
+    ok, out = run_systemctl(
+        ["list-timers", "--all", "--no-pager", "--no-legend"],
+        timeout=10.0,
+    )
     if not ok or not out.strip():
         return None
     return _parse_timer_next_run(out, unit)
@@ -256,7 +288,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
 
-    journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
+    journal = _journal_lines(SCHEDULER_SERVICE_UNIT)
     from_journal = _freshness_from_lines(journal, source="journal")
     from_log = _freshness_from_lines(log_lines, source="vulture.log")
     activity = from_journal or from_log
@@ -293,6 +325,12 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
+    elif not next_run and (not activity or activity.get("status") != "fresh"):
+        status = "stale"
+        warning = f"No upcoming scheduler run detected for {SCHEDULER_TIMER_UNIT}"
+        detail_parts.append("timer active but next run unavailable")
+        if activity:
+            detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "stale":
         # Timer is active; log staleness is informational only, not a warning.
         # Only the timer state (missing/inactive/no next run) should produce a warning.
