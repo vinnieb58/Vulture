@@ -284,6 +284,36 @@ class TestDashboardHTTP:
         response = client.get("/health")
         assert "application/json" in response.headers.get("content-type", "")
 
+    def test_scheduler_health_returns_200_json(self, client):
+        """GET /scheduler-health must return 200 with scheduler evidence fields."""
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                with patch("vulture_runtime._journal_lines", return_value=[]):
+                    response = client.get("/scheduler-health")
+        assert response.status_code == 200
+        data = response.json()
+        assert "scheduler_status" in data
+        assert "detail" in data
+        assert "timer_active" in data
+        assert "timer_enabled" in data
+        assert "next_run" in data
+        assert "last_success" in data
+        assert "last_success_source" in data
+        assert "journal_available" in data
+        assert "log_mtime_age_minutes" in data
+        assert "scheduler_status_reason" in data
+        assert "server_time" in data
+
+    def test_scheduler_health_status_reason_present(self, client):
+        """scheduler_status_reason must be a non-None string."""
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                with patch("vulture_runtime._journal_lines", return_value=[]):
+                    response = client.get("/scheduler-health")
+        data = response.json()
+        assert data["scheduler_status_reason"] is not None
+        assert isinstance(data["scheduler_status_reason"], str)
+
 
 class TestDefensiveReaders:
     def test_read_db_snapshot_missing_db(self, tmp_path, monkeypatch):
@@ -1030,23 +1060,52 @@ class TestSchedulerStalenessWithJournal:
         assert result["status"] == "seen", f"expected 'seen' (timer has next_run), got {result['status']!r}"
         assert result["warning"] is None
 
-    def test_timer_active_no_next_run_stale_log_no_journal_is_stale(self):
-        """Timer active + stale log + no next_run + no journal → 'stale' (WARN).
+    def test_timer_active_no_next_run_stale_log_inaccessible_journal_is_seen(self):
+        """Timer active + stale log + no next_run + journal inaccessible → 'seen', not 'stale'.
 
-        This is the case where the timer may be stuck: no scheduled run AND
-        no recent activity anywhere.
+        When journal returns no lines (inaccessible from Docker or no entries),
+        log-file staleness alone must NOT mark the scheduler stale.  The timer
+        being active is the authoritative health signal.
         """
         stale_log_lines = [
             "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(
             service_active="inactive",
-            journal=[],
+            journal=[],  # journal inaccessible / empty
             log_lines=stale_log_lines,
-            next_run=None,  # No upcoming run visible
+            next_run=None,
             now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
         )
-        assert result["status"] == "stale", f"expected 'stale', got {result['status']!r}"
+        # Timer active; log is the only stale evidence — should be "seen", not "stale"
+        assert result["status"] == "seen", (
+            f"expected 'seen' (log-only stale must not override active timer), "
+            f"got {result['status']!r}"
+        )
+        assert result["warning"] is None
+
+    def test_timer_active_no_next_run_stale_journal_confirms_stale(self):
+        """Timer active + stale JOURNAL + no next_run → 'stale' (WARN).
+
+        When journal IS accessible and its keyword matches show stale activity,
+        that is positive evidence of scheduler staleness with no next run.
+        """
+        stale_journal = [
+            "2026-06-11T13:18:58+0000 python[1]: 2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        stale_log_lines = [
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=stale_journal,  # journal accessible, shows stale
+            log_lines=stale_log_lines,
+            next_run=None,
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "stale", (
+            f"expected 'stale' (journal confirms stale), got {result['status']!r}"
+        )
 
     def test_journal_unavailable_timer_active_with_next_run_is_seen(self):
         """When journal is inaccessible but timer is active with a next run, report 'seen'."""
@@ -1073,6 +1132,98 @@ class TestSchedulerStalenessWithJournal:
         # Should still be "seen" (timer active is the health source)
         assert result["status"] == "seen"
         assert "journal unavailable" in result["detail"] or "no recent" in result["detail"]
+
+    # ── New tests required by the health-fix issue ─────────────────────────────
+
+    def test_stale_log_inaccessible_journal_detail_mentions_journal_unavailable(self):
+        """When log is stale and journal is inaccessible, detail must say 'journal unavailable'
+        so operators know why no journal evidence appears."""
+        stale_log_lines = [
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],  # journal inaccessible
+            log_lines=stale_log_lines,
+            next_run=None,
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "seen"
+        assert "journal unavailable" in result["detail"], (
+            f"detail should mention journal unavailable, got: {result['detail']!r}"
+        )
+
+    def test_detail_includes_timer_state_for_healthy_scheduler(self):
+        """Detail string must include timer state (active/enabled) for non-unhealthy statuses."""
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=[],
+            next_run="Thu 2026-06-11 18:30:00 UTC",
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "seen"
+        assert "timer" in result["detail"], (
+            f"detail should include timer state, got: {result['detail']!r}"
+        )
+
+    def test_detail_does_not_imply_log_mtime_is_authoritative(self):
+        """Detail must not suggest vulture.log is the primary evidence when timer is active
+        and journal is inaccessible."""
+        stale_log_lines = [
+            "2026-06-11 13:18:58,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=stale_log_lines,
+            next_run=None,
+            now=datetime(2026, 6, 11, 18, 23, 58, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "seen"
+        # "journal unavailable" tells operators that log mtime is not authoritative
+        assert "journal unavailable" in result["detail"]
+        # The reason must not imply stale
+        assert result["scheduler_status_reason"] is not None
+        assert "stale" not in result["scheduler_status_reason"] or "log stale" in result["scheduler_status_reason"]
+
+    def test_new_health_fields_present(self):
+        """_evaluate_scheduler_health must include timer_enabled, last_success_source,
+        log_mtime_age_minutes, and scheduler_status_reason in its return value."""
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],
+            log_lines=[],
+            next_run="Thu 2026-06-11 18:30:00 UTC",
+        )
+        assert "timer_enabled" in result
+        assert "last_success_source" in result
+        assert "log_mtime_age_minutes" in result
+        assert "scheduler_status_reason" in result
+        assert result["scheduler_status_reason"] is not None
+
+    def test_production_regression_stale_log_active_timer_no_journal_is_seen(self):
+        """Regression test for the exact production failure:
+        vulture.log shows 300 min stale, timer IS active, journald inaccessible from Docker.
+        Expected: 'seen' (OK) not 'stale' (WARN).
+        """
+        # Simulates the exact symptom reported: "Last scheduler activity ~300 min ago (vulture.log)"
+        log_lines = [
+            "2026-06-11 16:06:21,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            service_active="inactive",
+            journal=[],       # journald inaccessible from Docker
+            log_lines=log_lines,
+            next_run=None,    # timer is OnUnitInactiveSec (monotonic); NextElapseUSecRealtime = 0
+            now=datetime(2026, 6, 11, 21, 6, 21, tzinfo=timezone.utc),  # 300 min later
+        )
+        assert result["status"] == "seen", (
+            f"Production regression: timer active + journal inaccessible + stale log "
+            f"must be 'seen', got {result['status']!r} (reason: {result.get('scheduler_status_reason')!r})"
+        )
+        assert result["warning"] is None
+        assert "journal unavailable" in result["detail"]
 
 
 class TestFailedUnitAllowlist:
