@@ -41,11 +41,10 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _parse_log_timestamp,
+    _parse_timer_next_run,
     _scheduler_freshness,
 )
-from host_status import ServiceStatus  # noqa: E402
-
-
 SAMPLE_DF = """\
 Filesystem      Size  Used Avail Use% Mounted on
 /dev/mmcblk0p2   58G   18G   38G  32% /host/root
@@ -343,6 +342,11 @@ class TestHostCommands:
         assert result["status"] in ("fresh", "stale", "seen")
         assert "journal" in result["detail"]
 
+    def test_parse_log_timestamp_keeps_journal_offset_timezone_safe(self):
+        line = "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Hunt cycle completed"
+        parsed = _parse_log_timestamp(line)
+        assert parsed == datetime(2026, 6, 6, 2, 55, 7, tzinfo=timezone.utc)
+
 
 class TestNestCardComputation:
     """Unit tests for the Nest overview card summary logic in app.py."""
@@ -507,6 +511,7 @@ class TestSchedulerHealth:
         timer_unit: str | None = "vulture-scheduler.timer",
         service_active: str = "inactive",
         journal: list[str] | None = None,
+        log_lines: list[str] | None = None,
         next_run: str | None = "Mon 2026-06-07 12:00:00 UTC",
         now: datetime | None = None,
     ):
@@ -531,7 +536,7 @@ class TestSchedulerHealth:
                     with patch("vulture_runtime._journal_lines", return_value=journal or []):
                         with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
                             mock_dt.now.return_value = now
-                            return _evaluate_scheduler_health([])
+                            return _evaluate_scheduler_health(log_lines or [])
 
     def test_timer_active_service_inactive_success_healthy(self):
         journal = [
@@ -542,19 +547,20 @@ class TestSchedulerHealth:
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+        assert "scheduler success" in result["detail"]
 
     def test_timer_missing_service_inactive_unhealthy(self):
         result = self._evaluate(timer_active="not found", timer_unit=None)
         assert result["status"] == "unhealthy"
         assert result["warning"] == "Scheduler timer missing/inactive"
 
-    def test_timer_active_no_recent_logs_stale_no_warning(self):
-        # Timer is healthy (active, has next run); stale logs are informational only.
+    def test_timer_active_old_success_seen_without_warning(self):
+        # Timer is healthy (active, has next run); old success is informational only.
         journal = [
             "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(service_active="inactive", journal=journal)
-        assert result["status"] == "stale"
+        assert result["status"] == "seen"
         assert result["warning"] is None
 
     def test_service_failed_unhealthy(self):
@@ -572,6 +578,33 @@ class TestSchedulerHealth:
         # Oneshot service is idle between runs; timer is active with next run scheduled.
         # No journal entries at all; timer health is the sole indicator.
         result = self._evaluate(service_active="inactive", journal=[])
+        assert result["status"] == "seen"
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+
+    def test_fresh_warning_log_does_not_make_scheduler_stale(self):
+        log_lines = [
+            "2026-06-07 11:59:00,000 [WARNING] Swappa: zero model slugs for query 'DDR4 desktop RAM' - query may match nothing",
+        ]
+        result = self._evaluate(service_active="inactive", journal=[], log_lines=log_lines)
+        assert result["status"] == "seen"
+        assert result["warning"] is None
+        assert result["last_success"] is None
+
+    def test_stale_when_no_recent_run_and_no_upcoming_run(self):
+        journal = [
+            "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal, next_run=None)
+        assert result["status"] == "stale"
+        assert result["warning"] == "No upcoming scheduler run"
+
+    def test_parse_timer_next_run_keeps_full_timestamp_and_relative(self):
+        output = (
+            "Thu 2026-06-11 17:00:00 UTC 4min left "
+            "Thu 2026-06-11 16:00:00 UTC 56min ago "
+            "vulture-scheduler.timer vulture-scheduler.service\n"
+        )
+        parsed = _parse_timer_next_run(output, "vulture-scheduler.timer")
+        assert parsed == "Thu 2026-06-11 17:00:00 UTC (4min left)"
