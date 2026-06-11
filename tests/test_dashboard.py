@@ -1,7 +1,7 @@
 """
 tests/test_dashboard.py
 
-Lightweight tests for Vulture Dashboard v0.2 (read-only FastAPI app).
+Lightweight tests for the Nest v1 / Raven Ops dashboard (read-only FastAPI app).
 """
 
 from __future__ import annotations
@@ -253,6 +253,27 @@ class TestDashboardHTTP:
             response = client.get("/storage")
         assert response.status_code == 200
 
+    # ── /health endpoint ──────────────────────────────────────────
+
+    def test_health_returns_200_json(self, client):
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert "server_time" in data
+
+    def test_health_does_not_require_db_or_log(self, client):
+        """Health probe must succeed even when all host data sources are missing."""
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_health_content_type_is_json(self, client):
+        response = client.get("/health")
+        assert "application/json" in response.headers.get("content-type", "")
+
 
 class TestDefensiveReaders:
     def test_read_db_snapshot_missing_db(self, tmp_path, monkeypatch):
@@ -443,6 +464,24 @@ class TestNestCardComputation:
         card = _compute_storage_card(mounts)
         assert card["status"] == "WARN"
         assert "87%" in card["headline"] or "Toshiba" in card["headline"]
+
+    def test_storage_card_shows_toshiba_pct_below_warn_threshold(self):
+        """Toshiba usage must appear in the drive list even below the 80% WARN threshold."""
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+        mounts = [
+            StorageStatus(name="Toshiba EXT", path="/mnt/storage/toshiba_ext", required=True,
+                          status="OK", percent_used=60.0, used="600G", size="1.0T", available="400G"),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "OK"
+        drives = card["drives"]
+        assert len(drives) == 1
+        line = drives[0]["line"]
+        # Percentage must be visible even when healthy
+        assert "60%" in line
+        # Capacity context should also appear
+        assert "600G" in line or "1.0T" in line
 
     def test_storage_card_legacy_drives_ignored_when_missing(self):
         from app import _compute_storage_card

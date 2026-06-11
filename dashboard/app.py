@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from db_readers import DB_PATH, read_db_snapshot
@@ -141,7 +141,13 @@ def _compute_storage_card(storage: list[StorageStatus]) -> dict[str, Any]:
                     if overall_status == "OK":
                         overall_status = "WARN"
                 else:
-                    drive_lines.append({"label": mount.label, "line": f"{mount.label}: {pct:.0f}% used", "status": "OK"})
+                    # Below warning threshold — always show percentage plus capacity context
+                    if mount.used and mount.size:
+                        detail = f"{mount.used} / {mount.size}"
+                        line_ok = f"{mount.label}: {pct:.0f}% used ({detail})"
+                    else:
+                        line_ok = f"{mount.label}: {pct:.0f}% used"
+                    drive_lines.append({"label": mount.label, "line": line_ok, "status": "OK"})
             else:
                 drive_lines.append({"label": mount.label, "line": f"{mount.label}: mounted", "status": "OK"})
         elif mount.required:
@@ -301,6 +307,21 @@ def _build_warnings(
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    """Lightweight process health probe used by Docker HEALTHCHECK and curl.
+
+    Returns HTTP 200 with JSON payload if the dashboard process is running.
+    Does NOT collect host data — this is a liveness check only.
+    """
+    return JSONResponse(
+        {
+            "status": "ok",
+            "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+    )
+
 
 @app.get("/", response_class=HTMLResponse)
 async def nest_overview(request: Request) -> HTMLResponse:

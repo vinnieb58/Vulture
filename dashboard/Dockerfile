@@ -1,6 +1,7 @@
-# Vulture Dashboard v0.2 — read-only FastAPI status page.
+# Nest v1 Dashboard — tablet-first household/Raven observability container.
 # Vulture runtime (bot/scheduler) stays on the host; this container observes host
 # state via carefully scoped read-only mounts.
+# Routes: / (Nest home)  /storage  /vulture  /advanced  /health
 
 FROM python:3.12-slim
 
@@ -15,6 +16,7 @@ RUN apt-get update \
         util-linux \
         systemd \
         docker.io \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -29,5 +31,8 @@ ENV VULTURE_DB_PATH=/app/data/vulture.db \
     DASHBOARD_HOST_PROC=/host/proc
 
 EXPOSE 8088
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -sf http://localhost:8088/health || exit 1
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8088"]

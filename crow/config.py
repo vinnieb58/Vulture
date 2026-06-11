@@ -55,12 +55,13 @@ RAVEN_POST_REBOOT_SCRIPT = Path(
     )
 )
 
-# Expected storage mounts: "Label:/path" comma-separated
+# Expected storage mounts: "Label:/path" comma-separated.
+# Paths follow the authoritative /mnt/storage/* layout on Raven.
+# Override via CROW_EXPECTED_MOUNTS env var for non-standard host layouts.
 _DEFAULT_EXPECTED_MOUNTS = (
     "Root SSD:/,"
-    "MicroSD:/mnt/microsd,"
-    "portable_beast:/mnt/portable_beast,"
-    "toshiba_ext:/mnt/toshiba_ext"
+    "MicroSD:/mnt/storage/microsd,"
+    "Toshiba EXT:/mnt/storage/toshiba_ext"
 )
 _expected_mounts_raw = os.getenv("CROW_EXPECTED_MOUNTS", _DEFAULT_EXPECTED_MOUNTS).strip()
 

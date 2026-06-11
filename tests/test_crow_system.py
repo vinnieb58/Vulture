@@ -221,3 +221,39 @@ class TestPostRebootValidation:
         labels = [c.label for c in result.checks]
         assert "portable_beast" in labels
         assert "toshiba_ext" in labels
+
+
+class TestCrowStorageConfig:
+    """Verify Crow config defaults use /mnt/storage/* layout (Aviary standard)."""
+
+    def test_default_mounts_use_storage_parent(self):
+        from crow.config import EXPECTED_STORAGE_MOUNTS
+
+        paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
+        for path in paths:
+            if path == "/":
+                continue  # root SSD is always /
+            assert path.startswith("/mnt/storage/"), (
+                f"Crow default mount '{path}' should use /mnt/storage/* layout"
+            )
+
+    def test_default_mounts_include_microsd(self):
+        from crow.config import EXPECTED_STORAGE_MOUNTS
+
+        paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
+        assert "/mnt/storage/microsd" in paths
+
+    def test_default_mounts_include_toshiba(self):
+        from crow.config import EXPECTED_STORAGE_MOUNTS
+
+        paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
+        assert "/mnt/storage/toshiba_ext" in paths
+
+    def test_legacy_paths_not_in_defaults(self):
+        """Old paths /mnt/microsd and /mnt/toshiba_ext must not appear in defaults."""
+        from crow.config import EXPECTED_STORAGE_MOUNTS
+
+        paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
+        assert "/mnt/microsd" not in paths, "legacy /mnt/microsd still in Crow defaults"
+        assert "/mnt/toshiba_ext" not in paths, "legacy /mnt/toshiba_ext still in Crow defaults"
+        assert "/mnt/portable_beast" not in paths, "legacy /mnt/portable_beast still in Crow defaults"

@@ -1,8 +1,9 @@
-# Vulture Dashboard v0.2 — read-only observability container for Raven.
+# Nest v1 Dashboard — tablet-first household/Raven observability container.
 # Does not run the Vulture bot or scheduler; mounts host data/logs read-only.
 #
 # Storage: bind-mount only the stable /mnt/storage parent (not individual optional
 # drive paths). Unplugged USB/HDD mountpoints must not prevent container startup.
+# Health: /health endpoint used by Docker HEALTHCHECK (curl -sf http://localhost:8088/health).
 
 services:
   vulture-dashboard:
