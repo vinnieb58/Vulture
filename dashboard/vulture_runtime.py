@@ -313,6 +313,17 @@ def _timer_is_healthy(timer_svc: ServiceStatus) -> bool:
     return timer_svc.unit is not None and timer_svc.active == "active"
 
 
+def _log_mtime_age_minutes() -> int | None:
+    """Return age of vulture.log in whole minutes, or None if unreadable."""
+    if not LOG_PATH.exists():
+        return None
+    try:
+        mtime_ts = datetime.fromtimestamp(LOG_PATH.stat().st_mtime, tz=timezone.utc)
+        return int((datetime.now(timezone.utc) - mtime_ts).total_seconds() / 60)
+    except OSError:
+        return None
+
+
 def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
@@ -323,12 +334,16 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     - Service currently active → running (hunt cycle in progress)
     - Timer active + recent journal/log success → fresh
     - Timer active + valid next_run scheduled → seen (OK)
-    - Timer active + stale activity + no next_run → stale (WARN)
+    - Timer active + journal confirms stale activity + no next_run → stale (WARN)
+    - Timer active + only log-file evidence of staleness (journal inaccessible/no
+      keyword matches) → seen (OK); log-file mtime alone is not authoritative
 
-    The systemd timer is the authoritative health heartbeat.  Stale
-    ``vulture.log`` activity is only a WARN when the timer has NO upcoming
-    run AND journal also shows no recent success.  Journal is preferred over
-    the log file; the log file is used only as a fallback.
+    The systemd timer is the authoritative health heartbeat.  ``vulture.log``
+    mtime is a weak fallback only — stale log evidence must NOT override a
+    healthy timer when journal is inaccessible or has no keyword matches.
+    Journal is preferred over the log file; ``stale`` is only emitted when
+    journal provides positive confirmation of old activity AND no next_run is
+    visible.
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -345,14 +360,18 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     from_log = _freshness_from_lines(log_lines, source="vulture.log")
     activity = from_journal or from_log
 
-    last_success = None
-    last_success_age_min = None
+    last_success: str | None = None
+    last_success_age_min: int | None = None
+    last_success_source: str | None = None
     success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
     success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
     success = success_journal or success_log
     if success:
         last_success = success.get("last_success")
         last_success_age_min = success.get("last_success_age_min")
+        last_success_source = "journal" if success is success_journal else "vulture.log"
+
+    log_mtime_age_min = _log_mtime_age_minutes()
 
     timer_healthy = _timer_is_healthy(timer_svc)
     service_running = service_svc.active == "active"
@@ -361,61 +380,106 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     warning: str | None = None
     status = "unknown"
     detail_parts: list[str] = []
+    scheduler_status_reason = "unknown"
 
     if timer_svc.unit is None or timer_svc.active in ("not found",):
         warning = "Scheduler timer missing/inactive"
         status = "unhealthy"
         detail_parts.append("timer not found")
+        scheduler_status_reason = "timer not found"
     elif not timer_healthy:
         warning = "Scheduler timer missing/inactive"
         status = "unhealthy"
         detail_parts.append(f"timer {timer_svc.active}")
+        scheduler_status_reason = f"timer {timer_svc.active}"
     elif service_failed:
         warning = "Scheduler service failed"
         status = "unhealthy"
         detail_parts.append(f"service {service_svc.active}")
+        scheduler_status_reason = "service failed"
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
+        scheduler_status_reason = "service active"
     elif activity and activity.get("status") == "stale":
         # Timer is healthy; the systemd timer is the authoritative health source.
-        # Stale activity is informational only when:
-        #   - a next run is scheduled (timer is not stuck), OR
-        #   - journal shows a recent successful run (log may be behind)
-        # Only emit "stale" when no next_run is visible AND journal has no
-        # recent success — that combination suggests the timer may be stuck.
+        # ``stale`` is only emitted when we have POSITIVE journal evidence of old
+        # activity AND no next_run is scheduled.  If journal is inaccessible (no
+        # lines returned) or has no keyword matches (from_journal is None), log-file
+        # staleness alone must not trigger WARN — the timer being active is
+        # sufficient to consider the scheduler seen/healthy.
         recent_journal_success = (
             success_journal is not None and success_journal.get("status") == "fresh"
         )
         if next_run or recent_journal_success:
             status = "seen"
-        else:
+            scheduler_status_reason = (
+                "next_run scheduled" if next_run else "recent journal success"
+            )
+        elif from_journal is not None:
+            # Journal IS accessible and keyword matches confirm stale activity.
+            # This is positive stale evidence; no next_run → stale.
             status = "stale"
+            scheduler_status_reason = "journal confirms stale activity; no next_run"
+        else:
+            # Only log-file evidence of staleness; journal has no keyword matches
+            # (inaccessible or empty).  Timer is active — do not mark stale on
+            # log-file evidence alone.
+            status = "seen"
+            scheduler_status_reason = (
+                "log stale; journal inaccessible, timer active"
+                if not journal_available
+                else "log stale; no scheduler keywords in journal, timer active"
+            )
         detail_parts.append(activity["detail"])
+        # Annotate detail so the operator knows journal was not consulted.
+        if status == "seen" and from_journal is None and not journal_available:
+            detail_parts.append("journal unavailable")
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
         detail_parts.append(activity["detail"])
+        scheduler_status_reason = "recent activity in journal/log"
     elif next_run:
         # Timer healthy with a scheduled next run; absence of recent log activity
         # is normal between runs — report "seen" so the card shows OK.
         status = "seen"
         detail_parts.append("timer scheduled; no recent log activity")
+        scheduler_status_reason = "next_run scheduled; no log activity"
     elif journal_available:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
+        scheduler_status_reason = "journal entries present"
     else:
         # Timer is healthy (active) but no log/journal evidence yet — no failure
         # signal, so treat as "seen" rather than leaving status as "unknown".
         status = "seen"
+        scheduler_status_reason = "timer active; no log/journal evidence"
         if not journal_available:
             detail_parts.append("timer active; journal unavailable, no recent log activity")
         else:
             detail_parts.append("timer active; no recent scheduler activity")
 
+    # Build rich detail: prepend timer state, append next_run, last_success, and log age.
+    timer_enabled = timer_svc.enabled
+    timer_state_str = f"timer {timer_svc.active}"
+    if timer_enabled not in ("not configured", "unknown", None, ""):
+        timer_state_str += f"/{timer_enabled}"
+
+    # Prepend timer state for non-unhealthy statuses, unless the first part already
+    # starts with "timer " (avoids "timer active/enabled · timer active; ...").
+    if status not in ("unhealthy",) and not (
+        detail_parts and detail_parts[0].startswith("timer ")
+    ):
+        detail_parts.insert(0, timer_state_str)
+
     if next_run:
         detail_parts.append(f"next run {next_run}")
     if last_success:
-        detail_parts.append(f"last success {last_success}")
+        src = f" ({last_success_source})" if last_success_source else ""
+        detail_parts.append(f"last success {last_success}{src}")
+    if log_mtime_age_min is not None and from_log is not None and from_log.get("status") == "stale":
+        # Explicitly label the log mtime so it is clear it is not the primary source.
+        detail_parts.append(f"vulture.log age {log_mtime_age_min} min")
 
     return {
         "status": status,
@@ -424,11 +488,15 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "timer": timer_svc,
         "service": service_svc,
         "timer_active": timer_svc.active,
+        "timer_enabled": timer_enabled,
         "service_active": service_svc.active,
         "next_run": next_run,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
+        "last_success_source": last_success_source,
         "journal_available": journal_available,
+        "log_mtime_age_minutes": log_mtime_age_min,
+        "scheduler_status_reason": scheduler_status_reason,
     }
 
 
@@ -452,8 +520,13 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         "warning": scheduler["warning"],
         "next_run": scheduler.get("next_run"),
         "last_success": scheduler.get("last_success"),
+        "last_success_source": scheduler.get("last_success_source"),
         "timer_active": scheduler.get("timer_active"),
+        "timer_enabled": scheduler.get("timer_enabled"),
         "service_active": scheduler.get("service_active"),
+        "journal_available": scheduler.get("journal_available"),
+        "log_mtime_age_minutes": scheduler.get("log_mtime_age_minutes"),
+        "scheduler_status_reason": scheduler.get("scheduler_status_reason"),
     }
 
     warnings: list[str] = []

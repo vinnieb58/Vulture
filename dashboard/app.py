@@ -335,6 +335,41 @@ async def health() -> JSONResponse:
     )
 
 
+@app.get("/scheduler-health")
+async def scheduler_health() -> JSONResponse:
+    """Scheduler health debug endpoint.
+
+    Returns rich evidence about the Vulture scheduler so operators can diagnose
+    WARN/stale conditions without needing host shell access.  Fields document
+    which data source drove the status determination.
+
+    This endpoint performs host commands (systemctl, journalctl) and is NOT
+    suitable as a liveness probe — use ``/health`` for that.
+    """
+    from log_readers import read_log_snapshot
+    from vulture_runtime import _evaluate_scheduler_health
+
+    logs = read_log_snapshot()
+    sched = _evaluate_scheduler_health(logs.get("lines", []))
+    return JSONResponse(
+        {
+            "scheduler_status": sched["status"],
+            "detail": sched["detail"],
+            "warning": sched.get("warning"),
+            "timer_active": sched.get("timer_active"),
+            "timer_enabled": sched.get("timer_enabled"),
+            "service_active": sched.get("service_active"),
+            "next_run": sched.get("next_run"),
+            "last_success": sched.get("last_success"),
+            "last_success_source": sched.get("last_success_source"),
+            "journal_available": sched.get("journal_available"),
+            "log_mtime_age_minutes": sched.get("log_mtime_age_minutes"),
+            "scheduler_status_reason": sched.get("scheduler_status_reason"),
+            "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def nest_overview(request: Request) -> HTMLResponse:
     """Nest Overview — tablet-friendly summary with plain-English status."""
