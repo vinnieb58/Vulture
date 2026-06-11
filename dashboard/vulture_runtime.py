@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -140,15 +140,42 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
+def _offset_to_tz(token: str) -> timezone | None:
+    """Convert an offset token like ``+0000``/``-05:00``/``Z`` to a tzinfo."""
+    if token in ("Z", "z"):
+        return timezone.utc
+    cleaned = token.replace(":", "")
+    if len(cleaned) != 5 or cleaned[0] not in "+-":
+        return None
+    sign = 1 if cleaned[0] == "+" else -1
+    hours = int(cleaned[1:3])
+    minutes = int(cleaned[3:5])
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
-    if m:
-        raw = f"{m.group(1)} {m.group(2)}"
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return None
+    """Parse the first timestamp on a log/journal line as a tz-aware UTC datetime.
+
+    journalctl ``short-iso`` lines carry an explicit offset (e.g. ``-0500``); when
+    present it is honoured and normalised to UTC so stale math never mixes naive
+    local and UTC datetimes. Plain ``vulture.log`` lines have no offset and are
+    assumed to be UTC (Vulture logs in UTC).
+    """
+    m = re.search(
+        r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?\s*([+-]\d{2}:?\d{2}|Z)?",
+        line,
+    )
+    if not m:
+        return None
+    raw = f"{m.group(1)} {m.group(2)}"
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    tz = _offset_to_tz(m.group(3)) if m.group(3) else timezone.utc
+    if tz is None:
+        tz = timezone.utc
+    return dt.replace(tzinfo=tz).astimezone(timezone.utc)
 
 
 def _freshness_from_lines(
@@ -184,21 +211,85 @@ def _freshness_from_lines(
     return None
 
 
-def _parse_timer_next_run(output: str, unit: str) -> str | None:
+def _parse_timer_datetime(value: str | None) -> datetime | None:
+    """Parse a ``systemctl list-timers`` NEXT/LAST cell into a tz-aware UTC datetime.
+
+    Cells look like ``Thu 2026-06-11 17:00:00 UTC``. UTC and numeric offsets are
+    honoured; other timezone abbreviations are assumed to be UTC so the value is
+    always tz-aware (Raven runs in UTC).
+    """
+    if not value:
+        return None
+    m = re.search(
+        r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\s+([A-Za-z]{1,5}|[+-]\d{2}:?\d{2}))?",
+        value,
+    )
+    if not m:
+        return None
+    raw = f"{m.group(1)} {m.group(2)}"
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    token = m.group(3)
+    tz = timezone.utc
+    if token and token[0] in "+-":
+        tz = _offset_to_tz(token) or timezone.utc
+    return dt.replace(tzinfo=tz).astimezone(timezone.utc)
+
+
+def _parse_timer_schedule(output: str, unit: str) -> dict[str, str | None]:
+    """Extract the NEXT / LEFT / LAST columns for ``unit`` from list-timers output.
+
+    Columns are separated by runs of 2+ spaces while each cell (e.g. the NEXT
+    timestamp ``Thu 2026-06-11 17:00:00 UTC``) contains single spaces, so the
+    whole cell is preserved rather than just the leading weekday token.
+    """
+    empty = ("", "n/a", "-")
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
-    return None
+        cols = re.split(r"\s{2,}", line.strip())
+        next_run = cols[0].strip() if len(cols) >= 1 else ""
+        left = cols[1].strip() if len(cols) >= 2 else ""
+        last_run = cols[2].strip() if len(cols) >= 3 else ""
+        return {
+            "next_run": None if next_run in empty else next_run,
+            "left": None if left in empty else left,
+            "last_run": None if last_run in empty else last_run,
+        }
+    return {"next_run": None, "left": None, "last_run": None}
 
 
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
     ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
     if not ok or not out.strip():
         return None
-    return _parse_timer_next_run(out, unit)
+    return _parse_timer_schedule(out, unit).get("next_run")
+
+
+def _relative_phrase(target: datetime, now: datetime) -> str:
+    """Human relative duration between ``now`` and ``target`` (both tz-aware)."""
+    seconds = (target - now).total_seconds()
+    future = seconds >= 0
+    seconds = abs(seconds)
+    if seconds < 90 * 60:
+        magnitude = f"{int(round(seconds / 60))} min"
+    elif seconds < 36 * 3600:
+        magnitude = f"{seconds / 3600:.1f} hr"
+    else:
+        magnitude = f"{seconds / 86400:.1f} days"
+    return f"in {magnitude}" if future else f"{magnitude} ago"
+
+
+def _format_next_run(next_run: str | None, now: datetime) -> str | None:
+    """Return a display string for the next run with a relative hint when possible."""
+    if not next_run:
+        return None
+    dt = _parse_timer_datetime(next_run)
+    if dt is None:
+        return next_run
+    return f"{next_run} ({_relative_phrase(dt, now)})"
 
 
 def _check_scheduler_service() -> ServiceStatus:
@@ -249,12 +340,17 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     - Service active = hunt cycle in progress
     - Timer missing/inactive = unhealthy
     """
+    now = datetime.now(timezone.utc)
     timer_svc = _check_service(
         "vulture-scheduler timer",
         (SCHEDULER_TIMER_UNIT, SCHEDULER_TIMER_UNIT.replace(".timer", "")),
     )
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
+    next_run_display = _format_next_run(next_run, now)
+    # systemctl only lists a NEXT cell when the timer has an upcoming activation,
+    # so its presence is the authoritative signal that the schedule is healthy.
+    has_upcoming_run = next_run is not None
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
     from_journal = _freshness_from_lines(journal, source="journal")
@@ -293,22 +389,30 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
+    elif has_upcoming_run:
+        # Timer is active with an upcoming run scheduled -> the schedule itself is
+        # healthy. Stale log tails and ordinary adapter warnings (e.g. "zero model
+        # slugs") are informational only and must not flag the scheduler.
+        status = "fresh"
+        detail_parts.append(activity["detail"] if activity else "timer active; next run scheduled")
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
+        detail_parts.append(activity["detail"])
+    elif activity and activity.get("status") == "stale":
+        # Timer active but no upcoming run *and* the last cycle is old -> stale.
+        status = "stale"
+        warning = "Scheduler has no upcoming run and last cycle is stale"
         detail_parts.append(activity["detail"])
     elif journal:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        status = "stale"
+        warning = "Scheduler has no upcoming run and no recent activity"
+        detail_parts.append("no upcoming run and no recent scheduler activity")
 
-    if next_run:
-        detail_parts.append(f"next run {next_run}")
+    if next_run_display:
+        detail_parts.append(f"next run {next_run_display}")
     if last_success:
         detail_parts.append(f"last success {last_success}")
 
@@ -320,7 +424,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "service": service_svc,
         "timer_active": timer_svc.active,
         "service_active": service_svc.active,
-        "next_run": next_run,
+        "next_run": next_run_display,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
     }
