@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from host_commands import run_host_command, run_systemctl, systemctl_is_active, systemctl_is_enabled
 from host_status import ServiceStatus, _check_service, _normalize_unit_state, _resolve_unit
@@ -140,15 +140,89 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
-def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
+_NAIVE_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
+# journalctl -o short-iso prefixes lines with e.g. 2026-06-11T11:35:06-0500
+_JOURNAL_TS_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:[.,]\d+)?([+-]\d{2}:?\d{2})?"
+)
+MAX_UTC_OFFSET = timedelta(hours=14)
+
+
+def _parse_naive_timestamp(line: str) -> datetime | None:
+    m = _NAIVE_TS_RE.search(line)
     if m:
-        raw = f"{m.group(1)} {m.group(2)}"
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
         except ValueError:
             pass
     return None
+
+
+def _parse_journal_timestamp(line: str) -> datetime | None:
+    """Parse a journalctl short-iso line honoring its explicit UTC offset."""
+    m = _JOURNAL_TS_RE.match(line)
+    if not m:
+        return None
+    raw, offset = m.group(1), m.group(2)
+    try:
+        if offset:
+            return datetime.strptime(f"{raw}{offset.replace(':', '')}", "%Y-%m-%dT%H:%M:%S%z").astimezone(
+                timezone.utc
+            )
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _infer_log_utc_offset(log_lines: list[str]) -> timedelta | None:
+    """
+    Infer the UTC offset of naive vulture.log timestamps.
+
+    Python logging writes %(asctime)s in host-local time with no zone marker.
+    The log file's mtime is the (timezone-unambiguous) moment the last line was
+    written, so the gap between the last parseable line timestamp (read as UTC)
+    and the mtime is the log's UTC offset. Rounded to 15 min to absorb jitter.
+    """
+    try:
+        mtime = LOG_PATH.stat().st_mtime
+    except OSError:
+        return None
+    for line in reversed(log_lines):
+        naive = _parse_naive_timestamp(line)
+        if naive is None:
+            continue
+        mtime_utc = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        delta = naive.replace(tzinfo=timezone.utc) - mtime_utc
+        seconds = round(delta.total_seconds() / 900.0) * 900
+        offset = timedelta(seconds=seconds)
+        if abs(offset) > MAX_UTC_OFFSET:
+            return None
+        return offset
+    return None
+
+
+def _log_utc_offset(log_lines: list[str]) -> timedelta:
+    """UTC offset of vulture.log timestamps: env override, mtime inference, else UTC."""
+    tz_name = os.environ.get("VULTURE_LOG_TZ", "").strip()
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            offset = datetime.now(ZoneInfo(tz_name)).utcoffset()
+            if offset is not None:
+                return offset
+        except Exception:
+            pass
+    inferred = _infer_log_utc_offset(log_lines)
+    return inferred if inferred is not None else timedelta(0)
+
+
+def _parse_log_timestamp(line: str, utc_offset: timedelta | None = None) -> datetime | None:
+    """Parse a naive vulture.log timestamp into aware UTC using the given offset."""
+    naive = _parse_naive_timestamp(line)
+    if naive is None:
+        return None
+    return naive.replace(tzinfo=timezone.utc) - (utc_offset or timedelta(0))
 
 
 def _freshness_from_lines(
@@ -156,16 +230,18 @@ def _freshness_from_lines(
     *,
     source: str,
     success_only: bool = False,
+    parse_ts: Callable[[str], datetime | None] | None = None,
 ) -> dict[str, Any] | None:
+    parse = parse_ts or _parse_log_timestamp
     keywords = SUCCESS_KEYWORDS if success_only else ACTIVITY_KEYWORDS
     for line in reversed(lines):
         lower = line.lower()
         if not any(k in lower for k in keywords):
             continue
-        ts = _parse_log_timestamp(line)
+        ts = parse(line)
         if ts is None:
             continue
-        age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+        age_min = max((datetime.now(timezone.utc) - ts).total_seconds() / 60, 0.0)
         if age_min <= SCHEDULER_FRESH_MINUTES:
             return {
                 "status": "fresh",
@@ -184,21 +260,57 @@ def _freshness_from_lines(
     return None
 
 
-def _parse_timer_next_run(output: str, unit: str) -> str | None:
+# systemctl list-timers timestamps: "Thu 2026-06-11 12:00:00 UTC" (zone optional)
+_TIMER_TS_RE = re.compile(
+    r"[A-Z][a-z]{2}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+(?:[A-Z]{2,5}|[+-]\d{2}:?\d{2}))?"
+)
+
+_EMPTY_TIMER_INFO: dict[str, str | None] = {
+    "next_run": None,
+    "next_left": None,
+    "last_run": None,
+    "last_passed": None,
+}
+
+
+def _parse_timer_row(output: str, unit: str) -> dict[str, str | None] | None:
+    """Parse the NEXT/LEFT/LAST/PASSED columns of a systemctl list-timers row."""
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        head = line.split(unit, 1)[0]
+        stamps = _TIMER_TS_RE.findall(head)
+        next_run: str | None = None
+        last_run: str | None = None
+        if head.lstrip().lower().startswith(("n/a", "-")):
+            last_run = stamps[0] if stamps else None
+        else:
+            next_run = stamps[0] if stamps else None
+            last_run = stamps[1] if len(stamps) > 1 else None
+        next_left: str | None = None
+        if next_run:
+            m = re.search(re.escape(next_run) + r"\s+(.+?)\s+left\b", head)
+            if m:
+                next_left = m.group(1).strip()
+        last_passed: str | None = None
+        if last_run:
+            m = re.search(re.escape(last_run) + r"\s+(.+?)\s+ago\b", head)
+            if m:
+                last_passed = m.group(1).strip()
+        return {
+            "next_run": next_run,
+            "next_left": next_left,
+            "last_run": last_run,
+            "last_passed": last_passed,
+        }
     return None
 
 
-def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
+def _list_timer_info(unit: str = SCHEDULER_TIMER_UNIT) -> dict[str, str | None]:
     ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
     if not ok or not out.strip():
-        return None
-    return _parse_timer_next_run(out, unit)
+        return dict(_EMPTY_TIMER_INFO)
+    return _parse_timer_row(out, unit) or dict(_EMPTY_TIMER_INFO)
 
 
 def _check_scheduler_service() -> ServiceStatus:
@@ -244,27 +356,48 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
+    - Timer state and its next-run schedule are the authoritative health signal
     - Service inactive/dead after success = idle between runs
     - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    - Timer missing/inactive or service failed = unhealthy
+    - Stale only when the timer has no upcoming run AND no recent cycle activity
+    - Journal (offset-aware) is preferred over vulture.log for last-run recency;
+      adapter warnings in the log never count as scheduler activity or failure
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
         (SCHEDULER_TIMER_UNIT, SCHEDULER_TIMER_UNIT.replace(".timer", "")),
     )
     service_svc = _check_scheduler_service()
-    next_run = _list_timer_next_run()
+    timer_info = _list_timer_info()
+
+    next_run = timer_info.get("next_run")
+    next_run_display: str | None = None
+    if next_run:
+        next_run_display = next_run
+        if timer_info.get("next_left"):
+            next_run_display = f"{next_run} (in {timer_info['next_left']})"
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
-    from_journal = _freshness_from_lines(journal, source="journal")
-    from_log = _freshness_from_lines(log_lines, source="vulture.log")
+    log_offset = _log_utc_offset(log_lines)
+
+    def parse_log_ts(line: str) -> datetime | None:
+        return _parse_log_timestamp(line, utc_offset=log_offset)
+
+    from_journal = _freshness_from_lines(
+        journal, source="journal", parse_ts=_parse_journal_timestamp
+    )
+    from_log = _freshness_from_lines(log_lines, source="vulture.log", parse_ts=parse_log_ts)
     activity = from_journal or from_log
 
     last_success = None
     last_success_age_min = None
-    success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
-    success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
+    success_journal = _freshness_from_lines(
+        journal, source="journal", success_only=True, parse_ts=_parse_journal_timestamp
+    )
+    success_log = _freshness_from_lines(
+        log_lines, source="vulture.log", success_only=True, parse_ts=parse_log_ts
+    )
     success = success_journal or success_log
     if success:
         last_success = success.get("last_success")
@@ -273,6 +406,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     timer_healthy = _timer_is_healthy(timer_svc)
     service_running = service_svc.active == "active"
     service_failed = service_svc.active == "failed"
+    fresh_activity = bool(activity and activity.get("status") == "fresh")
 
     warning: str | None = None
     status = "unknown"
@@ -293,24 +427,34 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
-    elif activity and activity.get("status") == "fresh":
+    elif fresh_activity:
         status = "fresh"
         detail_parts.append(activity["detail"])
-    elif journal:
-        status = "seen"
-        detail_parts.append("scheduler journal entries present")
+    elif next_run:
+        # Timer is active with an upcoming run: schedule is healthy even if the
+        # log tail has no recent cycle lines (oneshot service idle between runs).
+        status = "scheduled"
+        if activity:
+            detail_parts.append(activity["detail"])
+        else:
+            detail_parts.append("timer active; waiting for next run")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        status = "stale"
+        warning = "Scheduler timer has no upcoming run and no recent cycle activity"
+        if activity:
+            detail_parts.append(activity["detail"])
+        else:
+            detail_parts.append("no recent scheduler activity; timer has no upcoming run")
 
-    if next_run:
-        detail_parts.append(f"next run {next_run}")
+    if next_run_display:
+        detail_parts.append(f"next run {next_run_display}")
     if last_success:
         detail_parts.append(f"last success {last_success}")
+    elif timer_info.get("last_run"):
+        trigger = timer_info["last_run"]
+        if timer_info.get("last_passed"):
+            trigger = f"{trigger} ({timer_info['last_passed']} ago)"
+        detail_parts.append(f"timer last triggered {trigger}")
 
     return {
         "status": status,
@@ -320,7 +464,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "service": service_svc,
         "timer_active": timer_svc.active,
         "service_active": service_svc.active,
-        "next_run": next_run,
+        "next_run": next_run_display,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
     }

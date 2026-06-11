@@ -6,8 +6,9 @@ Lightweight tests for Vulture Dashboard v0.2 (read-only FastAPI app).
 
 from __future__ import annotations
 
+import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,10 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _infer_log_utc_offset,
+    _parse_journal_timestamp,
+    _parse_log_timestamp,
+    _parse_timer_row,
     _scheduler_freshness,
 )
 from host_status import ServiceStatus  # noqa: E402
@@ -325,14 +330,22 @@ class TestHostCommands:
         assert "process:" in detail
 
     def test_scheduler_freshness_from_journal(self):
+        # short-iso journal stamp carries -0500: 21:55:07-0500 == 02:55:07 UTC,
+        # i.e. ~5 min before the mocked "now" — must parse as fresh, not 5h stale.
         journal = [
             "2026-06-05T21:55:07-0500 python[47497]: 2026-06-05 21:55:07,163 [INFO] Done hunt 'ddr4_desktop_ram'",
         ]
         timer_svc = ServiceStatus("vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled")
         service_svc = ServiceStatus("vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled")
+        timer_info = {
+            "next_run": "Mon 2026-06-07 12:00:00 UTC",
+            "next_left": None,
+            "last_run": None,
+            "last_passed": None,
+        }
         with patch("vulture_runtime._check_service", return_value=timer_svc):
             with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
-                with patch("vulture_runtime._list_timer_next_run", return_value="Mon 2026-06-07 12:00:00 UTC"):
+                with patch("vulture_runtime._list_timer_info", return_value=timer_info):
                     with patch("vulture_runtime._journal_lines", return_value=journal):
                         with patch(
                             "vulture_runtime.datetime",
@@ -340,7 +353,7 @@ class TestHostCommands:
                         ) as mock_dt:
                             mock_dt.now.return_value = datetime(2026, 6, 6, 3, 0, 0, tzinfo=timezone.utc)
                             result = _scheduler_freshness([])
-        assert result["status"] in ("fresh", "stale", "seen")
+        assert result["status"] == "fresh"
         assert "journal" in result["detail"]
 
 
@@ -470,6 +483,22 @@ class TestNestCardComputation:
         assert card["status"] == "OK"
         assert "active" in card["headline"].lower()
 
+    def test_vulture_card_ok_when_scheduled_with_full_next_run(self):
+        from app import _compute_vulture_card
+        vulture = {
+            "scheduler_freshness": {
+                "status": "scheduled",
+                "detail": "timer active; waiting for next run",
+                "next_run": "Thu 2026-06-11 12:00:00 UTC (in 24min)",
+                "last_success": None,
+            },
+            "processes": [],
+        }
+        db = {"hunt_counts": {"active": 1, "total": 1, "paused": 0, "ended": 0}}
+        card = _compute_vulture_card(vulture, db)
+        assert card["status"] == "OK"
+        assert "next run Thu 2026-06-11 12:00:00 UTC (in 24min)" in card["headline"]
+
     def test_vulture_card_fail_when_unhealthy(self):
         from app import _compute_vulture_card
         vulture = {
@@ -507,7 +536,9 @@ class TestSchedulerHealth:
         timer_unit: str | None = "vulture-scheduler.timer",
         service_active: str = "inactive",
         journal: list[str] | None = None,
+        log_lines: list[str] | None = None,
         next_run: str | None = "Mon 2026-06-07 12:00:00 UTC",
+        next_left: str | None = None,
         now: datetime | None = None,
     ):
         timer_svc = ServiceStatus(
@@ -524,14 +555,20 @@ class TestSchedulerHealth:
             "disabled",
             warning=service_warning,
         )
+        timer_info = {
+            "next_run": next_run,
+            "next_left": next_left,
+            "last_run": None,
+            "last_passed": None,
+        }
         now = now or datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
         with patch("vulture_runtime._check_service", return_value=timer_svc):
             with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
-                with patch("vulture_runtime._list_timer_next_run", return_value=next_run):
+                with patch("vulture_runtime._list_timer_info", return_value=timer_info):
                     with patch("vulture_runtime._journal_lines", return_value=journal or []):
                         with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
                             mock_dt.now.return_value = now
-                            return _evaluate_scheduler_health([])
+                            return _evaluate_scheduler_health(log_lines or [])
 
     def test_timer_active_service_inactive_success_healthy(self):
         journal = [
@@ -543,18 +580,60 @@ class TestSchedulerHealth:
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
 
+    def test_recent_journal_success_with_utc_offset_is_fresh(self):
+        # The journal stamp is local time with an explicit -0500 offset:
+        # 11:35:00-0500 == 16:35:00 UTC, 5 minutes before "now". Treating it as
+        # naive UTC (the old bug) would report it ~305 min stale.
+        journal = [
+            "2026-06-11T11:35:00-0500 python[1]: 2026-06-11 11:35:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(
+            journal=journal,
+            now=datetime(2026, 6, 11, 16, 40, 0, tzinfo=timezone.utc),
+        )
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+        assert "~5 min ago" in result["detail"]
+
     def test_timer_missing_service_inactive_unhealthy(self):
         result = self._evaluate(timer_active="not found", timer_unit=None)
         assert result["status"] == "unhealthy"
         assert result["warning"] == "Scheduler timer missing/inactive"
 
-    def test_timer_active_no_recent_logs_stale_no_warning(self):
-        # Timer is healthy (active, has next run); stale logs are informational only.
+    def test_timer_active_with_next_run_and_old_logs_is_scheduled_not_stale(self):
+        # Timer has an upcoming run; old cycle lines must not flag the card.
         journal = [
             "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(service_active="inactive", journal=journal)
+        assert result["status"] == "scheduled"
+        assert result["warning"] is None
+
+    def test_stale_when_no_upcoming_run_and_no_recent_activity(self):
+        journal = [
+            "2026-06-07T06:00:00+0000 python[1]: 2026-06-07 06:00:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal, next_run=None)
         assert result["status"] == "stale"
+        assert result["warning"] is not None
+        assert "no upcoming run" in result["warning"]
+
+    def test_stale_when_no_upcoming_run_and_no_activity_at_all(self):
+        result = self._evaluate(service_active="inactive", journal=[], next_run=None)
+        assert result["status"] == "stale"
+        assert result["warning"] is not None
+
+    def test_fresh_log_adapter_warning_does_not_mark_scheduler_stale(self):
+        # A fresh adapter warning is not scheduler activity, and it must not be
+        # treated as scheduler failure either; with the timer scheduled the card
+        # stays healthy even though the last cycle line is old.
+        log_lines = [
+            "2026-06-07 09:00:00,000 [INFO] Hunt cycle completed",
+            "2026-06-07 11:59:00,318 [WARNING] Swappa: zero model slugs for query "
+            "'DDR4 desktop RAM' - query may match nothing",
+        ]
+        result = self._evaluate(service_active="inactive", journal=[], log_lines=log_lines)
+        assert result["status"] == "scheduled"
         assert result["warning"] is None
 
     def test_service_failed_unhealthy(self):
@@ -572,6 +651,124 @@ class TestSchedulerHealth:
         # Oneshot service is idle between runs; timer is active with next run scheduled.
         # No journal entries at all; timer health is the sole indicator.
         result = self._evaluate(service_active="inactive", journal=[])
+        assert result["status"] == "scheduled"
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+
+    def test_next_run_display_combines_timestamp_and_relative(self):
+        result = self._evaluate(
+            next_run="Thu 2026-06-11 12:00:00 UTC",
+            next_left="24min",
+        )
+        assert result["next_run"] == "Thu 2026-06-11 12:00:00 UTC (in 24min)"
+        assert "next run Thu 2026-06-11 12:00:00 UTC (in 24min)" in result["detail"]
+
+
+class TestTimerParsing:
+    SAMPLE = (
+        "NEXT                         LEFT        LAST                         PASSED    UNIT                     ACTIVATES\n"
+        "Thu 2026-06-11 12:00:00 UTC  24min left  Thu 2026-06-11 11:45:00 UTC  9min ago  vulture-scheduler.timer  vulture-scheduler.service\n"
+        "\n"
+        "1 timers listed.\n"
+    )
+
+    def test_parse_timer_row_full_timestamps(self):
+        row = _parse_timer_row(self.SAMPLE, "vulture-scheduler.timer")
+        assert row is not None
+        assert row["next_run"] == "Thu 2026-06-11 12:00:00 UTC"
+        assert row["next_left"] == "24min"
+        assert row["last_run"] == "Thu 2026-06-11 11:45:00 UTC"
+        assert row["last_passed"] == "9min"
+
+    def test_parse_timer_row_is_not_just_weekday(self):
+        # Regression: the old parser returned only parts[0] -> "Thu".
+        row = _parse_timer_row(self.SAMPLE, "vulture-scheduler.timer")
+        assert row["next_run"] != "Thu"
+        assert "2026-06-11 12:00:00" in row["next_run"]
+
+    def test_parse_timer_row_na_next_run(self):
+        out = (
+            "n/a                          n/a   Thu 2026-06-11 11:45:00 UTC  9min ago  "
+            "vulture-scheduler.timer  vulture-scheduler.service\n"
+        )
+        row = _parse_timer_row(out, "vulture-scheduler.timer")
+        assert row is not None
+        assert row["next_run"] is None
+        assert row["last_run"] == "Thu 2026-06-11 11:45:00 UTC"
+
+    def test_parse_timer_row_unit_missing(self):
+        assert _parse_timer_row("NEXT LEFT LAST PASSED UNIT ACTIVATES\n", "vulture-scheduler.timer") is None
+
+
+class TestLogTimestampTimezones:
+    WARN_LINE = (
+        "2026-06-11 11:35:06,318 [WARNING] Swappa: zero model slugs for query "
+        "'DDR4 desktop RAM' - query may match nothing"
+    )
+    CYCLE_LINE = "2026-06-11 11:19:49,000 [INFO] Hunt cycle completed"
+
+    def _write_log(self, tmp_path, monkeypatch, lines, mtime_utc):
+        log = tmp_path / "vulture.log"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        epoch = mtime_utc.timestamp()
+        os.utime(log, (epoch, epoch))
+        monkeypatch.setattr("vulture_runtime.LOG_PATH", log)
+        return log
+
+    def test_journal_timestamp_honors_offset(self):
+        ts = _parse_journal_timestamp(
+            "2026-06-11T11:35:06-0500 python[1]: 2026-06-11 11:35:06,318 [INFO] Hunt cycle completed"
+        )
+        assert ts == datetime(2026, 6, 11, 16, 35, 6, tzinfo=timezone.utc)
+
+    def test_infer_log_offset_from_mtime(self, tmp_path, monkeypatch):
+        # Log written in local time (UTC-5); mtime is the unambiguous write moment.
+        lines = [self.CYCLE_LINE, self.WARN_LINE]
+        mtime = datetime(2026, 6, 11, 16, 35, 6, tzinfo=timezone.utc)
+        self._write_log(tmp_path, monkeypatch, lines, mtime)
+        offset = _infer_log_utc_offset(lines)
+        assert offset == timedelta(hours=-5)
+        ts = _parse_log_timestamp(self.WARN_LINE, utc_offset=offset)
+        assert ts == datetime(2026, 6, 11, 16, 35, 6, tzinfo=timezone.utc)
+
+    def test_infer_log_offset_zero_for_utc_logs(self, tmp_path, monkeypatch):
+        lines = [self.WARN_LINE]
+        mtime = datetime(2026, 6, 11, 11, 35, 6, tzinfo=timezone.utc)
+        self._write_log(tmp_path, monkeypatch, lines, mtime)
+        assert _infer_log_utc_offset(lines) == timedelta(0)
+
+    def test_local_time_log_lines_not_reported_hours_stale(self, tmp_path, monkeypatch):
+        """
+        Regression for the '~314 min ago' bug: a cycle that finished 13 minutes
+        ago (11:19:49 local, UTC-5) must read as fresh, not 5+ hours stale.
+        """
+        lines = [self.CYCLE_LINE, self.WARN_LINE]
+        mtime = datetime(2026, 6, 11, 16, 35, 6, tzinfo=timezone.utc)
+        self._write_log(tmp_path, monkeypatch, lines, mtime)
+
+        timer_svc = ServiceStatus(
+            "vulture-scheduler timer", "vulture-scheduler.timer", "active", "enabled"
+        )
+        service_svc = ServiceStatus(
+            "vulture-scheduler service", "vulture-scheduler.service", "inactive", "disabled"
+        )
+        timer_info = {
+            "next_run": "Thu 2026-06-11 11:45:00 CDT",
+            "next_left": "12min",
+            "last_run": None,
+            "last_passed": None,
+        }
+        with patch("vulture_runtime._check_service", return_value=timer_svc):
+            with patch("vulture_runtime._check_scheduler_service", return_value=service_svc):
+                with patch("vulture_runtime._list_timer_info", return_value=timer_info):
+                    with patch("vulture_runtime._journal_lines", return_value=[]):
+                        with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
+                            mock_dt.now.return_value = datetime(
+                                2026, 6, 11, 16, 33, 0, tzinfo=timezone.utc
+                            )
+                            result = _evaluate_scheduler_health(lines)
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+        assert "~13 min ago" in result["detail"]
+        assert result["last_success"] == "2026-06-11 16:19:49 UTC"
