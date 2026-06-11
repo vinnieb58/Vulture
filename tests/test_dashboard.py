@@ -41,6 +41,8 @@ from log_readers import read_log_snapshot  # noqa: E402
 from vulture_runtime import (  # noqa: E402
     _evaluate_scheduler_health,
     _format_runtime_detail,
+    _parse_log_timestamp,
+    _parse_timer_next_run,
     _scheduler_freshness,
 )
 from host_status import ServiceStatus  # noqa: E402
@@ -507,6 +509,7 @@ class TestSchedulerHealth:
         timer_unit: str | None = "vulture-scheduler.timer",
         service_active: str = "inactive",
         journal: list[str] | None = None,
+        log_lines: list[str] | None = None,
         next_run: str | None = "Mon 2026-06-07 12:00:00 UTC",
         now: datetime | None = None,
     ):
@@ -531,7 +534,7 @@ class TestSchedulerHealth:
                     with patch("vulture_runtime._journal_lines", return_value=journal or []):
                         with patch("vulture_runtime.datetime", wraps=datetime) as mock_dt:
                             mock_dt.now.return_value = now
-                            return _evaluate_scheduler_health([])
+                            return _evaluate_scheduler_health(log_lines or [])
 
     def test_timer_active_service_inactive_success_healthy(self):
         journal = [
@@ -548,14 +551,51 @@ class TestSchedulerHealth:
         assert result["status"] == "unhealthy"
         assert result["warning"] == "Scheduler timer missing/inactive"
 
-    def test_timer_active_no_recent_logs_stale_no_warning(self):
-        # Timer is healthy (active, has next run); stale logs are informational only.
+    def test_timer_active_old_logs_but_scheduled_is_fresh(self):
+        # Timer is active with an upcoming run; old keyword activity in the log
+        # tail is informational only and must NOT mark the scheduler stale.
         journal = [
-            "2026-06-07T10:00:00+0000 python[1]: 2026-06-07 10:00:00,000 [INFO] Hunt cycle completed",
+            "2026-06-07T06:00:00+0000 python[1]: 2026-06-07 06:00:00,000 [INFO] Hunt cycle completed",
         ]
         result = self._evaluate(service_active="inactive", journal=journal)
-        assert result["status"] == "stale"
+        assert result["status"] == "fresh"
         assert result["warning"] is None
+        # Last success is still surfaced for display even though it is old.
+        assert result["last_success"] == "2026-06-07 06:00:00 UTC"
+
+    def test_fresh_log_warning_does_not_make_scheduler_stale(self):
+        # A fresh adapter / no-result warning ("zero model slugs") in vulture.log
+        # is not scheduler activity and must not affect scheduler health.
+        log_lines = [
+            "2026-06-07 11:59:30,318 [WARNING] Swappa: zero model slugs for query "
+            "'DDR4 desktop RAM' - query may match nothing",
+        ]
+        result = self._evaluate(service_active="inactive", journal=[], log_lines=log_lines)
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+        # The adapter warning is not treated as a scheduler success/activity line.
+        assert result["last_success"] is None
+
+    def test_recent_journal_success_marks_healthy_without_next_run(self):
+        # Even if list-timers reports no upcoming run, a recent successful cycle
+        # from the service journal keeps the scheduler healthy.
+        journal = [
+            "2026-06-07T11:50:00+0000 python[1]: 2026-06-07 11:50:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal, next_run=None)
+        assert result["status"] == "fresh"
+        assert result["warning"] is None
+        assert result["last_success"] == "2026-06-07 11:50:00 UTC"
+
+    def test_stale_when_no_upcoming_run_and_no_recent_success(self):
+        # Timer active but systemd reports no upcoming run and no recent cycle
+        # success -> genuinely stale / wedged scheduler.
+        journal = [
+            "2026-06-07T06:00:00+0000 python[1]: 2026-06-07 06:00:00,000 [INFO] Hunt cycle completed",
+        ]
+        result = self._evaluate(service_active="inactive", journal=journal, next_run=None)
+        assert result["status"] == "stale"
+        assert result["warning"] is not None
 
     def test_service_failed_unhealthy(self):
         result = self._evaluate(service_active="failed")
@@ -575,3 +615,43 @@ class TestSchedulerHealth:
         assert result["warning"] is None
         assert result["timer_active"] == "active"
         assert result["service_active"] == "inactive"
+        assert result["status"] == "fresh"
+
+
+class TestTimerNextRunParsing:
+    LIST_TIMERS = (
+        "NEXT                        LEFT       LAST                        PASSED  "
+        "UNIT                    ACTIVATES\n"
+        "Thu 2026-06-11 17:00:00 UTC 26min left Thu 2026-06-11 16:45:00 UTC 4min ago "
+        "vulture-scheduler.timer vulture-scheduler.service\n"
+    )
+
+    def test_next_run_returns_full_timestamp_not_weekday(self):
+        next_run = _parse_timer_next_run(self.LIST_TIMERS, "vulture-scheduler.timer")
+        # Must be a useful timestamp, not just "Thu".
+        assert next_run == "2026-06-11 17:00:00 UTC"
+        assert next_run != "Thu"
+
+    def test_next_run_none_when_unit_absent(self):
+        assert _parse_timer_next_run(self.LIST_TIMERS, "other.timer") is None
+
+    def test_next_run_none_when_na(self):
+        text = (
+            "NEXT LEFT LAST PASSED UNIT ACTIVATES\n"
+            "n/a  n/a  Thu 2026-06-11 16:45:00 UTC 4min ago "
+            "vulture-scheduler.timer vulture-scheduler.service\n"
+        )
+        assert _parse_timer_next_run(text, "vulture-scheduler.timer") is None
+
+
+class TestLogTimestampTimezone:
+    def test_naive_log_line_treated_as_utc(self):
+        ts = _parse_log_timestamp("2026-06-11 11:35:06,318 [WARNING] Swappa: zero model slugs")
+        assert ts == datetime(2026, 6, 11, 11, 35, 6, tzinfo=timezone.utc)
+
+    def test_journal_offset_normalised_to_utc(self):
+        # 21:55:07-0500 is 02:55:07 UTC the next day; must not be read as naive UTC.
+        ts = _parse_log_timestamp(
+            "2026-06-05T21:55:07-0500 python[1]: 2026-06-05 21:55:07,163 [INFO] Done hunt"
+        )
+        assert ts == datetime(2026, 6, 6, 2, 55, 7, tzinfo=timezone.utc)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -140,15 +140,47 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
+_TIMESTAMP_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?\s*([+-]\d{2}:?\d{2}|Z)?"
+)
+
+
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
-    if m:
-        raw = f"{m.group(1)} {m.group(2)}"
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return None
+    """Parse the first ISO-ish timestamp in *line* into an aware UTC datetime.
+
+    Handles both naive application log lines (``2026-06-11 11:35:06,318``),
+    assumed UTC, and journal ``short-iso`` lines that carry an explicit offset
+    (``2026-06-05T21:55:07-0500``). Normalising everything to UTC keeps the
+    stale math from mixing naive/aware or local/UTC datetimes.
+    """
+    m = _TIMESTAMP_RE.search(line)
+    if not m:
+        return None
+    date_s, time_s, tz_s = m.group(1), m.group(2), m.group(3)
+    try:
+        dt = datetime.strptime(f"{date_s} {time_s}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    if tz_s and tz_s not in ("Z", "z"):
+        digits = tz_s.replace(":", "")
+        sign = -1 if digits[0] == "-" else 1
+        offset = timedelta(hours=int(digits[1:3]), minutes=int(digits[3:5])) * sign
+        return dt.replace(tzinfo=timezone(offset)).astimezone(timezone.utc)
+    return dt.replace(tzinfo=timezone.utc)
+
+
+def _format_relative(target: datetime, now: datetime) -> str:
+    """Human relative duration like ``in 27 min`` / ``5h 12m ago``."""
+    delta = (target - now).total_seconds()
+    future = delta >= 0
+    minutes = int(abs(delta) // 60)
+    if minutes < 60:
+        rel = f"{minutes} min"
+    elif minutes < 1440:
+        rel = f"{minutes // 60}h {minutes % 60}m"
+    else:
+        rel = f"{minutes // 1440}d {(minutes % 1440) // 60}h"
+    return f"in {rel}" if future else f"{rel} ago"
 
 
 def _freshness_from_lines(
@@ -184,13 +216,32 @@ def _freshness_from_lines(
     return None
 
 
+_NEXT_RUN_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s+([A-Za-z]{2,5}|[+-]\d{2}:?\d{2}))?"
+)
+
+
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """Extract the full NEXT timestamp for *unit* from ``systemctl list-timers``.
+
+    ``list-timers`` rows look like::
+
+        NEXT                        LEFT       LAST                        ... UNIT
+        Thu 2026-06-11 17:00:00 UTC 26min left Thu 2026-06-11 11:00:00 UTC ... vulture-scheduler.timer
+
+    The previous implementation returned ``parts[0]`` (the weekday, e.g.
+    ``Thu``), which is useless on the dashboard. We instead return the full
+    ``YYYY-MM-DD HH:MM:SS TZ`` of the NEXT column.
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        if line.strip().lower().startswith("n/a"):
+            return None
+        m = _NEXT_RUN_RE.search(line)
+        if m:
+            date_s, time_s, tz_s = m.group(1), m.group(2), m.group(3)
+            return f"{date_s} {time_s}" + (f" {tz_s}" if tz_s else "")
     return None
 
 
@@ -242,12 +293,24 @@ def _timer_is_healthy(timer_svc: ServiceStatus) -> bool:
 
 def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
-    Scheduler health for oneshot service + timer architecture.
+    Scheduler health for the oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
-    - Service inactive/dead after success = idle between runs
-    - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    The systemd timer is the authoritative signal for schedule health, so the
+    sources are weighted deliberately:
+
+    - **Schedule health**: ``vulture-scheduler.timer`` state + its upcoming
+      ``NEXT`` run (``systemctl list-timers``). An active timer with an upcoming
+      run is healthy regardless of how chatty ``vulture.log`` has been.
+    - **Last cycle run**: explicit cycle-complete lines from
+      ``journalctl -u vulture-scheduler.service`` (falling back to the same
+      keywords in ``vulture.log``).
+    - **General log activity**: informational only. Adapter/no-result warnings
+      such as "zero model slugs" never match the scheduler keywords and must
+      never be treated as scheduler activity *or* failure.
+
+    Status values: ``running`` (cycle in progress), ``fresh`` (timer healthy /
+    scheduled), ``stale`` (timer active but nothing scheduled and no recent
+    run), ``unhealthy`` (timer missing/inactive or service failed).
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -255,24 +318,29 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     )
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
+    next_run_dt = _parse_log_timestamp(next_run) if next_run else None
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
-    from_journal = _freshness_from_lines(journal, source="journal")
-    from_log = _freshness_from_lines(log_lines, source="vulture.log")
-    activity = from_journal or from_log
 
-    last_success = None
-    last_success_age_min = None
-    success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
-    success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
-    success = success_journal or success_log
-    if success:
-        last_success = success.get("last_success")
-        last_success_age_min = success.get("last_success_age_min")
+    # General activity (informational): most recent scheduler-keyword line.
+    activity = _freshness_from_lines(journal, source="journal") or _freshness_from_lines(
+        log_lines, source="vulture.log"
+    )
+
+    # Last successful cycle: authoritative from explicit cycle-complete lines.
+    success = _freshness_from_lines(
+        journal, source="journal", success_only=True
+    ) or _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
+    last_success = success.get("last_success") if success else None
+    last_success_age_min = success.get("last_success_age_min") if success else None
 
     timer_healthy = _timer_is_healthy(timer_svc)
     service_running = service_svc.active == "active"
     service_failed = service_svc.active == "failed"
+    has_upcoming_run = bool(next_run)
+    recent_success = (
+        last_success_age_min is not None and last_success_age_min <= SCHEDULER_FRESH_MINUTES
+    )
 
     warning: str | None = None
     status = "unknown"
@@ -293,22 +361,32 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
-    elif activity and activity.get("status") == "fresh":
+    elif has_upcoming_run or recent_success:
+        # Timer is active and either has an upcoming run or recently completed a
+        # cycle -> healthy. Old log keyword activity is purely informational here.
         status = "fresh"
-        detail_parts.append(activity["detail"])
-    elif journal:
-        status = "seen"
-        detail_parts.append("scheduler journal entries present")
+        if has_upcoming_run:
+            detail_parts.append("timer active; run scheduled")
+        else:
+            detail_parts.append("timer active; recent cycle success")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        # Timer is active but systemd reports no upcoming run and we have no
+        # recent successful cycle -> genuinely stale / wedged.
+        status = "stale"
+        warning = "Scheduler timer active but no upcoming run scheduled"
+        detail_parts.append("timer active; no upcoming run, no recent cycle success")
 
+    # Informational activity note (never downgrades a timer-healthy status).
+    if activity:
+        detail_parts.append(activity["detail"])
+
+    next_run_relative = None
     if next_run:
-        detail_parts.append(f"next run {next_run}")
+        if next_run_dt is not None:
+            next_run_relative = _format_relative(next_run_dt, datetime.now(timezone.utc))
+            detail_parts.append(f"next run {next_run} ({next_run_relative})")
+        else:
+            detail_parts.append(f"next run {next_run}")
     if last_success:
         detail_parts.append(f"last success {last_success}")
 
@@ -321,6 +399,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "timer_active": timer_svc.active,
         "service_active": service_svc.active,
         "next_run": next_run,
+        "next_run_relative": next_run_relative,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
     }
@@ -345,6 +424,7 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         "detail": scheduler["detail"],
         "warning": scheduler["warning"],
         "next_run": scheduler.get("next_run"),
+        "next_run_relative": scheduler.get("next_run_relative"),
         "last_success": scheduler.get("last_success"),
         "timer_active": scheduler.get("timer_active"),
         "service_active": scheduler.get("service_active"),

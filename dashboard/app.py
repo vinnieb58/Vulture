@@ -176,13 +176,18 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     freshness = vulture.get("scheduler_freshness", {})
     sched_status = freshness.get("status", "unknown")
     next_run = freshness.get("next_run")
+    next_run_relative = freshness.get("next_run_relative")
+
+    next_run_display = next_run
+    if next_run and next_run_relative:
+        next_run_display = f"{next_run} ({next_run_relative})"
 
     if sched_status in ("fresh", "running", "seen"):
         status = "OK"
         if sched_status == "running":
             headline = "Vulture hunt cycle in progress"
-        elif next_run:
-            headline = f"Vulture scheduler active; next run {next_run}"
+        elif next_run_display:
+            headline = f"Vulture scheduler active; next run {next_run_display}"
         else:
             headline = "Vulture scheduler active"
     elif sched_status == "stale":
@@ -207,7 +212,7 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
         "status": status,
         "headline": headline,
         "scheduler_status": sched_status,
-        "next_run": next_run,
+        "next_run": next_run_display,
         "last_success": freshness.get("last_success"),
         "bot_running": bot_running,
         "active_hunts": hunt_counts.get("active", 0),
