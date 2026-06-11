@@ -444,7 +444,7 @@
         <div class="card">
           <div class="card-label">Scheduler health</div>
           <div class="card-value small">
-            <span class="pill {% if vulture.scheduler_freshness.status in ('fresh', 'running', 'seen') %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% elif vulture.scheduler_freshness.status == 'unhealthy' %}bad{% else %}muted{% endif %}">
+            <span class="pill {% if vulture.scheduler_freshness.status in ('fresh', 'running', 'scheduled', 'seen') %}ok{% elif vulture.scheduler_freshness.status == 'stale' %}warn{% elif vulture.scheduler_freshness.status == 'unhealthy' %}bad{% else %}muted{% endif %}">
               {{ vulture.scheduler_freshness.status }}
             </span>
           </div>

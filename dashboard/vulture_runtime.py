@@ -30,6 +30,13 @@ ACTIVITY_KEYWORDS = (
     "starting vulture hunt cycle",
 )
 
+# Matches the NEXT/LAST column produced by `systemctl list-timers`, e.g.
+# "Thu 2026-06-11 17:00:00 UTC". split()[0] yields just "Thu" which is why
+# the dashboard previously displayed "Next run Thu".
+_TIMER_DATETIME_RE = re.compile(
+    r"([A-Z][a-z]{2})\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\S+)"
+)
+
 
 @dataclass
 class ProcessMatch:
@@ -185,13 +192,72 @@ def _freshness_from_lines(
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """
+    Extract the full NEXT timestamp for ``unit`` from `systemctl list-timers`.
+
+    The output format is roughly::
+
+        NEXT                         LEFT       LAST                         PASSED  UNIT
+        Thu 2026-06-11 17:00:00 UTC  22min      Thu 2026-06-11 16:00:00 UTC  37min   vulture-scheduler.timer
+
+    The first match on the line is the NEXT run; a line starting with
+    ``n/a`` indicates no upcoming run is scheduled.
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        stripped = line.lstrip()
+        if stripped.startswith("n/a"):
+            return None
+        match = _TIMER_DATETIME_RE.search(line)
+        if match:
+            return " ".join(match.groups())
     return None
+
+
+def _parse_next_run_datetime(value: str | None) -> datetime | None:
+    """Parse a NEXT-run string like ``Thu 2026-06-11 17:00:00 UTC``.
+
+    Returns a timezone-aware datetime (UTC when the source declares UTC,
+    otherwise the parsed value is treated as UTC to keep stale math sane).
+    """
+    if not value:
+        return None
+    match = _TIMER_DATETIME_RE.search(value)
+    if not match:
+        return None
+    _, date_part, time_part, tz_part = match.groups()
+    try:
+        naive = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    # systemd renders the timestamp in the timer's configured timezone. We
+    # only fully understand UTC here; other zones are assumed UTC-equivalent
+    # for the purposes of "is this in the past?" comparisons, which is
+    # acceptable given the schedule granularity (minutes/hours) and avoids
+    # pulling in zoneinfo for every dashboard render.
+    return naive.replace(tzinfo=timezone.utc)
+
+
+def _format_relative(target: datetime, *, now: datetime) -> str:
+    """Render ``target`` as a short relative string like ``in 22 min``."""
+    delta = target - now
+    seconds = int(delta.total_seconds())
+    future = seconds >= 0
+    seconds = abs(seconds)
+    if seconds < 60:
+        unit = f"{seconds}s"
+    elif seconds < 3600:
+        unit = f"{seconds // 60} min"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        unit = f"{hours}h {mins}m" if mins else f"{hours}h"
+    else:
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        unit = f"{days}d {hours}h" if hours else f"{days}d"
+    return f"in {unit}" if future else f"{unit} ago"
 
 
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
@@ -244,10 +310,30 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     """
     Scheduler health for oneshot service + timer architecture.
 
-    - Timer active = heartbeat OK
-    - Service inactive/dead after success = idle between runs
-    - Service active = hunt cycle in progress
-    - Timer missing/inactive = unhealthy
+    Authority order (most authoritative first):
+
+    1. The systemd timer unit's active state and upcoming run answer
+       "is the schedule itself healthy?". A healthy active timer with a
+       future NEXT run is the strongest signal that scheduling is OK,
+       independent of how recently a cycle happened to log something.
+    2. The oneshot service unit answers "is a cycle running, or did the
+       last one fail?".
+    3. ``journalctl -u vulture-scheduler.service`` and explicit
+       cycle-complete lines in ``logs/vulture.log`` answer "when did the
+       last cycle actually succeed?". Adapter chatter that does not match
+       SUCCESS/ACTIVITY keywords (e.g. ``Swappa: zero model slugs``) is
+       ignored on purpose so a noisy adapter cannot make the scheduler
+       look healthier or sicker than it is.
+
+    Resulting statuses:
+
+    - ``running``    a hunt cycle is in progress right now
+    - ``fresh``      a successful cycle ran within ``SCHEDULER_FRESH_MINUTES``
+    - ``scheduled``  timer is active with a future NEXT run; idle window
+    - ``stale``      timer healthy but no recent run *and* no upcoming run
+    - ``seen``       activity in journal but cannot bucket it further
+    - ``unhealthy``  timer missing/inactive or service failed
+    - ``unknown``    nothing usable
     """
     timer_svc = _check_service(
         "vulture-scheduler timer",
@@ -255,6 +341,12 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     )
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
+    next_run_dt = _parse_next_run_datetime(next_run)
+    now = datetime.now(timezone.utc)
+    next_run_in_future = next_run_dt is not None and next_run_dt > now
+    next_run_relative = (
+        _format_relative(next_run_dt, now=now) if next_run_dt is not None else None
+    )
 
     journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
     from_journal = _freshness_from_lines(journal, source="journal")
@@ -293,13 +385,24 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
+        detail_parts.append(activity["detail"])
+    elif next_run_in_future:
+        # Timer is active and the next run is genuinely upcoming. Between
+        # cycles, log tails will look "stale" relative to a 30-minute
+        # window; that is expected, not a problem, and must not surface
+        # as a warning ("Vulture scheduler may be stale").
+        status = "scheduled"
+        if activity:
+            detail_parts.append(activity["detail"])
+        else:
+            detail_parts.append("timer scheduled; awaiting next cycle")
+    elif activity and activity.get("status") == "stale":
+        # Timer active but no upcoming run AND no recent activity. Surface
+        # as stale; still informational only — the timer warning channel
+        # owns hard failures.
+        status = "stale"
         detail_parts.append(activity["detail"])
     elif journal:
         status = "seen"
@@ -308,7 +411,10 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         detail_parts.append("no recent scheduler lines in journal or log tail")
 
     if next_run:
-        detail_parts.append(f"next run {next_run}")
+        if next_run_relative:
+            detail_parts.append(f"next run {next_run} ({next_run_relative})")
+        else:
+            detail_parts.append(f"next run {next_run}")
     if last_success:
         detail_parts.append(f"last success {last_success}")
 
@@ -321,6 +427,7 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         "timer_active": timer_svc.active,
         "service_active": service_svc.active,
         "next_run": next_run,
+        "next_run_relative": next_run_relative,
         "last_success": last_success,
         "last_success_age_min": last_success_age_min,
     }
@@ -345,6 +452,7 @@ def get_vulture_runtime(log_lines: list[str] | None = None) -> dict[str, Any]:
         "detail": scheduler["detail"],
         "warning": scheduler["warning"],
         "next_run": scheduler.get("next_run"),
+        "next_run_relative": scheduler.get("next_run_relative"),
         "last_success": scheduler.get("last_success"),
         "timer_active": scheduler.get("timer_active"),
         "service_active": scheduler.get("service_active"),

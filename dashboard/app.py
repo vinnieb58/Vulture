@@ -176,13 +176,31 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     freshness = vulture.get("scheduler_freshness", {})
     sched_status = freshness.get("status", "unknown")
     next_run = freshness.get("next_run")
+    next_run_relative = freshness.get("next_run_relative")
 
-    if sched_status in ("fresh", "running", "seen"):
+    # Render a single "Next run" string for the card that includes the
+    # relative duration so we never show just a weekday like "Thu".
+    if next_run and next_run_relative:
+        next_run_display = f"{next_run} ({next_run_relative})"
+    elif next_run:
+        next_run_display = next_run
+    elif next_run_relative:
+        next_run_display = next_run_relative
+    else:
+        next_run_display = None
+
+    # Healthy schedule states: the systemd timer is the authoritative
+    # signal. "scheduled" means the timer is active and the next run is
+    # genuinely upcoming, even when no cycle has logged anything in the
+    # last few minutes (normal between cycles). Adapter-only warnings
+    # such as "Swappa: zero model slugs" are not scheduler activity and
+    # are intentionally not part of this calculation.
+    if sched_status in ("fresh", "running", "scheduled", "seen"):
         status = "OK"
         if sched_status == "running":
             headline = "Vulture hunt cycle in progress"
-        elif next_run:
-            headline = f"Vulture scheduler active; next run {next_run}"
+        elif next_run_display:
+            headline = f"Vulture scheduler active; next run {next_run_display}"
         else:
             headline = "Vulture scheduler active"
     elif sched_status == "stale":
@@ -207,7 +225,9 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
         "status": status,
         "headline": headline,
         "scheduler_status": sched_status,
-        "next_run": next_run,
+        "next_run": next_run_display,
+        "next_run_raw": next_run,
+        "next_run_relative": next_run_relative,
         "last_success": freshness.get("last_success"),
         "bot_running": bot_running,
         "active_hunts": hunt_counts.get("active", 0),
