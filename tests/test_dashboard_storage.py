@@ -41,6 +41,11 @@ MOUNTINFO_AUTOFS_PELICAN = MOUNTINFO_WITH_TOSHIBA + """\
 38 24 0:61 / /mnt/storage/pelican_backup rw,relatime shared:4 - autofs systemd-1 rw
 """
 
+MOUNTINFO_STALE_ROOST = MOUNTINFO_WITH_TOSHIBA + """\
+39 24 8:65 / /mnt/storage/roost_spinning_0 rw,relatime shared:5 - ext4 /dev/sde1 rw
+40 24 0:62 / /mnt/storage/roost_spinning_0 rw,relatime shared:6 - autofs systemd-1 rw
+"""
+
 
 def _mountinfo_patch(text: str):
     mountinfo = DASHBOARD_DIR.parent / "dashboard" / "storage_probe.py"
@@ -105,6 +110,7 @@ def _mock_findmnt(args, **_kwargs):
         "/mnt/storage/microsd": ("/dev/mmcblk0p1", "ext4", "ff481ad2-e9bd-4868-8c8c-6729a461e4b4"),
         "/mnt/storage/toshiba_ext": ("/dev/sdb1", "ntfs3", "0846863B46862A10"),
         "/mnt/storage/pelican_backup": ("systemd-1", "autofs", None),
+        "/mnt/storage/roost_spinning_0": ("systemd-1", "autofs", None),
     }
     if host_path not in mapping:
         return False, ""
@@ -145,6 +151,10 @@ def _mock_systemctl(unit, **_kwargs):
     return True, states.get(unit, "unknown")
 
 
+def _path_access_ok(*_args, **_kwargs):
+    return True, None
+
+
 class TestStorageProbeScenarios:
     def test_mounted_microsd_ok(self):
         drive = ExpectedDrive(
@@ -158,10 +168,11 @@ class TestStorageProbeScenarios:
             with patch("storage_probe.run_command", side_effect=_mock_df):
                 with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
                     with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
-                        with patch("storage_probe._lookup_uuid", return_value=("ff481ad2-e9bd-4868-8c8c-6729a461e4b4", None)):
-                            with patch("storage_probe._lookup_label", return_value="SK256"):
-                                with patch.object(Path, "exists", return_value=True):
-                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch("storage_probe._lookup_uuid", return_value=("ff481ad2-e9bd-4868-8c8c-6729a461e4b4", None)):
+                                with patch("storage_probe._lookup_label", return_value="SK256"):
+                                    with patch.object(Path, "exists", return_value=True):
+                                        result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status in ("OK", "OK_AUTOMOUNTED")
         assert result.actual_source == "/dev/mmcblk0p1"
         assert result.mounted is True
@@ -179,10 +190,11 @@ class TestStorageProbeScenarios:
             with patch("storage_probe.run_command", side_effect=_mock_df):
                 with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
                     with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
-                        with patch("storage_probe._lookup_uuid", return_value=("0846863B46862A10", None)):
-                            with patch("storage_probe._lookup_label", return_value="TOSHIBA EXT"):
-                                with patch.object(Path, "exists", return_value=True):
-                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch("storage_probe._lookup_uuid", return_value=("0846863B46862A10", None)):
+                                with patch("storage_probe._lookup_label", return_value="TOSHIBA EXT"):
+                                    with patch.object(Path, "exists", return_value=True):
+                                        result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status in ("OK", "OK_AUTOMOUNTED")
         assert result.actual_source == "/dev/sdb1"
         assert result.mounted is True
@@ -252,10 +264,11 @@ class TestStorageProbeScenarios:
             with patch("storage_probe.run_command", side_effect=_mock_df):
                 with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
                     with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
-                        with patch("storage_probe._lookup_uuid", return_value=("ff481ad2-e9bd-4868-8c8c-6729a461e4b4", None)):
-                            with patch("storage_probe._lookup_label", return_value="SK256"):
-                                with patch.object(Path, "exists", return_value=True):
-                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch("storage_probe._lookup_uuid", return_value=("ff481ad2-e9bd-4868-8c8c-6729a461e4b4", None)):
+                                with patch("storage_probe._lookup_label", return_value="SK256"):
+                                    with patch.object(Path, "exists", return_value=True):
+                                        result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status == "UUID_MISMATCH"
         assert result.mounted is False
 
@@ -304,6 +317,105 @@ class TestStorageProbeScenarios:
                             result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status == "STALE_MOUNT"
 
+    def test_roost_spinning_stale_automount_enodev(self):
+        """Broken automount: proc may still list /dev/sde1 but findmnt shows autofs only."""
+        drive = ExpectedDrive(
+            name="Roost Spinning 0",
+            path="/mnt/storage/roost_spinning_0",
+            expected_uuid="13dc60fa-ba57-4c18-ac03-22e0ab8d6828",
+            expected_fstype="ext4",
+            required=False,
+        )
+
+        def roost_df(args, **_kwargs):
+            if _command_path(args) == drive.path:
+                return False, "df: /mnt/storage/roost_spinning_0: No such device"
+            return _mock_df(args, **_kwargs)
+
+        def roost_access(_path):
+            return False, "no such device"
+
+        with _mountinfo_patch(MOUNTINFO_STALE_ROOST):
+            with patch("storage_probe.run_command", side_effect=roost_df):
+                with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
+                    with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
+                        with patch("storage_probe._path_access_check", side_effect=roost_access):
+                            with patch.object(Path, "exists", return_value=True):
+                                result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status == "STALE_AUTOMOUNT"
+        assert result.mounted is False
+        assert result.actual_source is None
+        assert "backing device is unavailable" in result.message.lower()
+        assert "/dev/sde1" not in (result.message or "")
+
+    def test_roost_autofs_only_waiting(self):
+        drive = ExpectedDrive(
+            name="Roost Spinning 0",
+            path="/mnt/storage/roost_spinning_0",
+            required=False,
+        )
+        mountinfo = MOUNTINFO_WITH_TOSHIBA + """\
+41 24 0:63 / /mnt/storage/roost_spinning_0 rw,relatime shared:7 - autofs systemd-1 rw
+"""
+
+        def roost_df(args, **_kwargs):
+            if _command_path(args) == drive.path:
+                return False, "no such file or directory"
+            return _mock_df(args, **_kwargs)
+
+        with _mountinfo_patch(mountinfo):
+            with patch("storage_probe.run_command", side_effect=roost_df):
+                with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
+                    with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch.object(Path, "exists", return_value=True):
+                                result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status == "AUTOMOUNT_WAITING"
+        assert result.mounted is False
+        assert result.actual_source is None
+
+    def test_optional_missing_path_warning(self):
+        drive = ExpectedDrive(
+            name="Raven NVME",
+            path="/mnt/storage/raven_nvme",
+            required=False,
+        )
+        with _mountinfo_patch(MOUNTINFO_ROOT):
+            with patch("storage_probe.run_command", return_value=(False, "no such file")):
+                with patch("storage_probe.run_host_command", return_value=(False, "")):
+                    with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
+                        with patch.object(Path, "exists", return_value=False):
+                            result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status == "PATH_MISSING"
+        assert status_display_class(result.status, required=False) == "bad"
+
+    def test_ordinary_directory_not_mounted(self):
+        drive = ExpectedDrive(
+            name="Ordinary dir",
+            path="/mnt/storage/not_a_mount",
+            required=False,
+        )
+
+        def root_only_df(args, **_kwargs):
+            path = _command_path(args)
+            if path == drive.path:
+                return (
+                    True,
+                    "Filesystem      Size  Used Avail Use% Mounted on\n"
+                    "/dev/sda2        29G   12G   15G  45% /mnt/storage/not_a_mount\n",
+                )
+            return _mock_df(args, **_kwargs)
+
+        with _mountinfo_patch(MOUNTINFO_ROOT):
+            with patch("storage_probe.run_command", side_effect=root_only_df):
+                with patch("storage_probe.run_host_command", return_value=(False, "")):
+                    with patch("storage_probe.systemctl_is_active", return_value=(True, "unknown")):
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch.object(Path, "exists", return_value=True):
+                                result = probe_expected_drive(drive, root_source="/dev/sda2")
+        assert result.status == "NOT_MOUNTED_PARENT_ROOT"
+        assert result.mounted is False
+
     def test_not_mounted_parent_root_for_active_path(self):
         drive = ExpectedDrive(
             name="Pelican Backup",
@@ -337,6 +449,9 @@ class TestStorageDisplayClass:
 
     def test_yellow_for_optional_waiting(self):
         assert status_display_class("AUTOMOUNT_WAITING", required=False) == "warn"
+
+    def test_yellow_for_stale_automount_optional(self):
+        assert status_display_class("STALE_AUTOMOUNT", required=False) == "warn"
 
     def test_red_for_parent_root(self):
         assert status_display_class("NOT_MOUNTED_PARENT_ROOT", required=False) == "bad"
@@ -422,10 +537,11 @@ class TestDashboardWarningFixes:
             with patch("storage_probe.run_command", side_effect=df_90pct):
                 with patch("storage_probe.run_host_command", side_effect=_mock_findmnt):
                     with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
-                        with patch("storage_probe._lookup_uuid", return_value=("0846863B46862A10", None)):
-                            with patch("storage_probe._lookup_label", return_value="TOSHIBA EXT"):
-                                with patch.object(Path, "exists", return_value=True):
-                                    result = probe_expected_drive(drive, root_source="/dev/sda2")
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch("storage_probe._lookup_uuid", return_value=("0846863B46862A10", None)):
+                                with patch("storage_probe._lookup_label", return_value="TOSHIBA EXT"):
+                                    with patch.object(Path, "exists", return_value=True):
+                                        result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status in ("OK", "OK_AUTOMOUNTED")
         assert result.percent_used == 90.0
         assert result.warning is not None

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,12 +21,19 @@ from subprocess_util import run_command
 
 HOST_PROC = Path(os.environ.get("DASHBOARD_HOST_PROC", "/host/proc"))
 STORAGE_CMD_TIMEOUT = 2.0
+PATH_ACCESS_TIMEOUT = 2.0
 
 AUTOFS_SOURCES = frozenset({"systemd-1", "autofs", "none"})
 STALE_MARKERS = (
     "transport endpoint is not connected",
     "stale file handle",
     "input/output error",
+    "no such device",
+    "unknown error",
+)
+ENODEV_MARKERS = (
+    "no such device",
+    "ENODEV",
 )
 
 GREEN_STATUSES = frozenset({"OK", "OK_AUTOMOUNTED"})
@@ -34,8 +43,11 @@ YELLOW_STATUSES = frozenset(
         "NOT_MOUNTED",
         "DEVICE_MISSING",
         "LEGACY_PATH",
+        "STALE_AUTOMOUNT",
     }
 )
+
+_path_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-storage")
 
 
 @dataclass
@@ -103,6 +115,53 @@ def _is_autofs_placeholder(source: str | None, fstype: str | None) -> bool:
     return source_l in AUTOFS_SOURCES or fstype_l == "autofs"
 
 
+def _text_indicates_enodev(text: str | None) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    return any(marker in lower for marker in ENODEV_MARKERS)
+
+
+def _classify_io_failure(text: str | None) -> str:
+    lower = (text or "").lower()
+    if "timed out" in lower:
+        return "DF_TIMEOUT"
+    if _text_indicates_enodev(text):
+        return "STALE_AUTOMOUNT"
+    for marker in STALE_MARKERS:
+        if marker in lower:
+            return "STALE_MOUNT"
+    return "ERROR"
+
+
+def _path_access_check(path: str) -> tuple[bool, str | None]:
+    """Verify a mount path is reachable; stale automounts often raise ENODEV."""
+
+    def _probe() -> tuple[bool, str | None]:
+        target = Path(path)
+        try:
+            if not target.exists():
+                return False, "path not found"
+            if target.is_dir():
+                next(target.iterdir(), None)
+            else:
+                target.stat()
+        except OSError as exc:
+            if exc.errno == errno.ENODEV:
+                return False, "no such device"
+            return False, str(exc)
+        return True, None
+
+    future = _path_executor.submit(_probe)
+    try:
+        return future.result(timeout=PATH_ACCESS_TIMEOUT)
+    except FuturesTimeoutError:
+        future.cancel()
+        return False, "path access timed out"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
 def _read_mountinfo() -> dict[str, tuple[str, str]]:
     for candidate in (HOST_PROC / "self/mountinfo", HOST_PROC / "1/mountinfo"):
         if candidate.is_file():
@@ -129,25 +188,76 @@ def _run_findmnt_mountpoint(host_path: str) -> tuple[str | None, str | None, str
     )
     if not ok or not out.strip():
         return None, None, None
-    return parse_findmnt_line(out)
+    return _pick_best_findmnt_entry(out)
+
+
+def _pick_best_findmnt_entry(text: str) -> tuple[str | None, str | None, str | None]:
+    """Prefer a real backing filesystem over an autofs placeholder."""
+    entries = [parse_findmnt_line(line) for line in text.splitlines() if line.strip()]
+    if not entries:
+        return None, None, None
+    for source, fstype, uuid in entries:
+        if not _is_autofs_placeholder(source, fstype):
+            return source, fstype, uuid
+    return entries[0]
 
 
 def _df_for_path(path: str) -> tuple[DiskEntry | None, str | None]:
     ok, out = run_command(["df", "-h", path], timeout=STORAGE_CMD_TIMEOUT)
     if not ok:
-        lower = (out or "").lower()
-        if "timed out" in lower:
-            return None, "DF_TIMEOUT"
-        for marker in STALE_MARKERS:
-            if marker in lower:
-                return None, "STALE_MOUNT"
-        return None, "ERROR"
+        return None, _classify_io_failure(out)
     entries = parse_df_human(out)
     normalized = path.rstrip("/") or "/"
     for entry in entries:
         if entry.mount.rstrip("/") == normalized:
             return entry, None
-    return entries[-1] if entries else None, None
+    if entries:
+        return None, "MOUNTPOINT_MISMATCH"
+    return None, "ERROR"
+
+
+def _resolve_backing_mount(
+    host_path: str,
+) -> tuple[bool, bool, str | None, str | None, str | None]:
+    """
+    Return (is_mountpoint, autofs_present, backing_source, backing_fstype, backing_uuid).
+
+    Host findmnt is preferred over /proc mountinfo so stale kernel entries cannot
+    masquerade as a healthy block-device mount.
+    """
+    proc_is_mp, proc_source, proc_fstype = _mountpoint_from_proc(host_path)
+    findmnt_source, findmnt_fstype, findmnt_uuid = _run_findmnt_mountpoint(host_path)
+
+    proc_autofs = proc_is_mp and _is_autofs_placeholder(proc_source, proc_fstype)
+    findmnt_autofs = findmnt_source is not None and _is_autofs_placeholder(
+        findmnt_source, findmnt_fstype
+    )
+    autofs_present = proc_autofs or findmnt_autofs
+
+    backing_source: str | None = None
+    backing_fstype: str | None = None
+    backing_uuid: str | None = None
+
+    if findmnt_source is not None and not findmnt_autofs:
+        backing_source, backing_fstype, backing_uuid = (
+            findmnt_source,
+            findmnt_fstype,
+            findmnt_uuid,
+        )
+    elif findmnt_source is None and proc_is_mp and not proc_autofs:
+        backing_source, backing_fstype = proc_source, proc_fstype
+
+    is_mountpoint = proc_is_mp or findmnt_source is not None
+    return is_mountpoint, autofs_present, backing_source, backing_fstype, backing_uuid
+
+
+def _stale_automount_message(*, automount_state: str | None, detail: str | None = None) -> str:
+    base = "Automount exists, but backing device is unavailable."
+    if detail and detail not in base:
+        return f"{base} ({detail})"
+    if automount_state in ("active", "waiting"):
+        return base
+    return base
 
 
 def _root_source() -> str | None:
@@ -212,6 +322,8 @@ def status_display_class(status: str, *, required: bool, legacy: bool = False) -
         return "warn"
     if status == "AUTOMOUNT_WAITING":
         return "warn"
+    if status == "STALE_AUTOMOUNT" and not required:
+        return "warn"
     return "bad"
 
 
@@ -220,30 +332,38 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
     path_obj = Path(drive.path)
     path_exists = path_obj.exists()
 
-    proc_is_mp, proc_source, proc_fstype = _mountpoint_from_proc(host_path)
-    findmnt_source, findmnt_fstype, findmnt_uuid = _run_findmnt_mountpoint(host_path)
-
-    is_mountpoint = proc_is_mp or findmnt_source is not None
-
-    actual_source = proc_source or findmnt_source
-    actual_fstype = proc_fstype or findmnt_fstype
-    actual_uuid = findmnt_uuid
+    is_mountpoint, autofs_present, actual_source, actual_fstype, actual_uuid = (
+        _resolve_backing_mount(host_path)
+    )
 
     automount_state, mount_state = _systemd_unit_state(drive.path)
 
-    autofs_only = is_mountpoint and _is_autofs_placeholder(actual_source, actual_fstype)
-    real_mount = is_mountpoint and not autofs_only
+    autofs_only = autofs_present and actual_source is None
+    real_mount = actual_source is not None and not _is_autofs_placeholder(
+        actual_source, actual_fstype
+    )
 
     df_entry: DiskEntry | None = None
     df_error: str | None = None
     df_source: str | None = None
+    access_ok = False
+    access_error: str | None = None
 
     if path_exists:
+        access_ok, access_error = _path_access_check(drive.path)
         df_entry, df_error = _df_for_path(drive.path)
         if df_entry:
             df_source = df_entry.filesystem
 
-    if df_error == "STALE_MOUNT":
+    io_failure = None
+    if df_error in ("STALE_MOUNT", "STALE_AUTOMOUNT", "DF_TIMEOUT"):
+        io_failure = df_error
+    elif access_error:
+        io_failure = _classify_io_failure(access_error)
+    elif df_error:
+        io_failure = df_error
+
+    if io_failure == "STALE_MOUNT":
         return StorageStatus(
             name=drive.name,
             path=drive.path,
@@ -261,6 +381,51 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
             actual_fstype=actual_fstype,
             status="STALE_MOUNT",
             message="Mount appears stale (transport endpoint not connected or I/O error).",
+        )
+
+    if io_failure == "STALE_AUTOMOUNT" or (
+        autofs_present and not real_mount and _text_indicates_enodev(access_error or df_error or "")
+    ):
+        return StorageStatus(
+            name=drive.name,
+            path=drive.path,
+            expected_uuid=drive.expected_uuid,
+            expected_fstype=drive.expected_fstype,
+            expected_label=drive.expected_label,
+            role=drive.role,
+            required=drive.required,
+            legacy=drive.legacy,
+            path_exists=path_exists,
+            is_mountpoint=is_mountpoint,
+            automount_unit_state=automount_state,
+            mount_unit_state=mount_state,
+            actual_source=None,
+            actual_fstype="autofs" if autofs_present else actual_fstype,
+            status="STALE_AUTOMOUNT",
+            message=_stale_automount_message(
+                automount_state=automount_state,
+                detail=access_error or df_error,
+            ),
+        )
+
+    if io_failure == "DF_TIMEOUT":
+        return StorageStatus(
+            name=drive.name,
+            path=drive.path,
+            expected_uuid=drive.expected_uuid,
+            expected_fstype=drive.expected_fstype,
+            expected_label=drive.expected_label,
+            role=drive.role,
+            required=drive.required,
+            legacy=drive.legacy,
+            path_exists=path_exists,
+            is_mountpoint=is_mountpoint,
+            automount_unit_state=automount_state,
+            mount_unit_state=mount_state,
+            actual_source=actual_source,
+            actual_fstype=actual_fstype,
+            status="ERROR",
+            message="Timed out reading disk usage (df).",
         )
 
     if not path_exists:
@@ -327,8 +492,8 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
             is_mountpoint=is_mountpoint,
             automount_unit_state=automount_state,
             mount_unit_state=mount_state,
-            actual_source=actual_source,
-            actual_fstype=actual_fstype,
+            actual_source=None,
+            actual_fstype="autofs",
             status=status,
             message=message,
         )
@@ -403,6 +568,56 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
             message=message,
         )
 
+    if real_mount and not access_ok:
+        return StorageStatus(
+            name=drive.name,
+            path=drive.path,
+            expected_uuid=drive.expected_uuid,
+            expected_fstype=drive.expected_fstype,
+            expected_label=drive.expected_label,
+            role=drive.role,
+            required=drive.required,
+            legacy=drive.legacy,
+            path_exists=True,
+            is_mountpoint=is_mountpoint,
+            automount_unit_state=automount_state,
+            mount_unit_state=mount_state,
+            actual_source=None if autofs_present else actual_source,
+            actual_fstype=actual_fstype,
+            status="STALE_AUTOMOUNT" if autofs_present else "ERROR",
+            message=_stale_automount_message(
+                automount_state=automount_state,
+                detail=access_error,
+            )
+            if autofs_present
+            else (access_error or "Mount path is not accessible."),
+        )
+
+    if df_error == "MOUNTPOINT_MISMATCH" or (
+        df_source and root_source and df_source == root_source and drive.role != "root"
+    ):
+        return StorageStatus(
+            name=drive.name,
+            path=drive.path,
+            expected_uuid=drive.expected_uuid,
+            expected_fstype=drive.expected_fstype,
+            expected_label=drive.expected_label,
+            role=drive.role,
+            required=drive.required,
+            legacy=drive.legacy,
+            path_exists=True,
+            is_mountpoint=False,
+            automount_unit_state=automount_state,
+            mount_unit_state=mount_state,
+            actual_source=df_source,
+            actual_fstype=actual_fstype,
+            status="NOT_MOUNTED_PARENT_ROOT",
+            message=(
+                f"Path exists but is not mounted; df resolves to root filesystem {root_source}. "
+                "Drive is unplugged or automount has not mounted it."
+            ),
+        )
+
     if actual_source and root_source and actual_source == root_source and drive.role != "root":
         return StorageStatus(
             name=drive.name,
@@ -424,26 +639,6 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
                 f"Mount source matches root filesystem {root_source}; "
                 "this path is not backed by its own storage device."
             ),
-        )
-
-    if df_error == "DF_TIMEOUT":
-        return StorageStatus(
-            name=drive.name,
-            path=drive.path,
-            expected_uuid=drive.expected_uuid,
-            expected_fstype=drive.expected_fstype,
-            expected_label=drive.expected_label,
-            role=drive.role,
-            required=drive.required,
-            legacy=drive.legacy,
-            path_exists=True,
-            is_mountpoint=True,
-            automount_unit_state=automount_state,
-            mount_unit_state=mount_state,
-            actual_source=actual_source,
-            actual_fstype=actual_fstype,
-            status="ERROR",
-            message="Timed out reading disk usage (df).",
         )
 
     blkid_uuid, blkid_err = _lookup_uuid(actual_source)
@@ -558,9 +753,30 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
     if real_mount:
         if df_entry is None:
             df_entry, df_error = _df_for_path(drive.path)
+            if df_entry:
+                df_source = df_entry.filesystem
         if df_entry:
             size, used, available = df_entry.size, df_entry.used, df_entry.available
             percent_used = df_entry.percent_used
+        elif df_error == "STALE_AUTOMOUNT":
+            return StorageStatus(
+                name=drive.name,
+                path=drive.path,
+                expected_uuid=drive.expected_uuid,
+                expected_fstype=drive.expected_fstype,
+                expected_label=drive.expected_label,
+                role=drive.role,
+                required=drive.required,
+                legacy=drive.legacy,
+                path_exists=True,
+                is_mountpoint=is_mountpoint,
+                automount_unit_state=automount_state,
+                mount_unit_state=mount_state,
+                actual_source=None,
+                actual_fstype=actual_fstype,
+                status="STALE_AUTOMOUNT",
+                message=_stale_automount_message(automount_state=automount_state),
+            )
         elif df_error:
             return StorageStatus(
                 name=drive.name,
@@ -572,7 +788,7 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
                 required=drive.required,
                 legacy=drive.legacy,
                 path_exists=True,
-                is_mountpoint=True,
+                is_mountpoint=is_mountpoint,
                 automount_unit_state=automount_state,
                 mount_unit_state=mount_state,
                 actual_source=actual_source,
