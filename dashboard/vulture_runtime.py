@@ -26,8 +26,16 @@ ACTIVITY_KEYWORDS = (
     "starting hunt",
     "done hunt",
     "hunt cycle",
-    "scheduler",
     "starting vulture hunt cycle",
+)
+JOURNAL_TIMESTAMP_RE = re.compile(
+    r"(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))"
+)
+APP_TIMESTAMP_RE = re.compile(
+    r"(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?)"
+)
+TIMER_TIMESTAMP_BLOCK = (
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\S+"
 )
 
 
@@ -140,14 +148,36 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
     return []
 
 
+def _normalize_iso_offset(stamp: str) -> str:
+    if stamp.endswith("Z"):
+        return f"{stamp[:-1]}+00:00"
+    if re.search(r"[+-]\d{4}$", stamp):
+        return f"{stamp[:-5]}{stamp[-5:-2]}:{stamp[-2:]}"
+    return stamp
+
+
+def _format_utc_timestamp(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
-    if m:
-        raw = f"{m.group(1)} {m.group(2)}"
+    journal_match = JOURNAL_TIMESTAMP_RE.search(line)
+    if journal_match:
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return datetime.fromisoformat(
+                _normalize_iso_offset(journal_match.group("stamp"))
+            ).astimezone(timezone.utc)
         except ValueError:
             pass
+
+    app_match = APP_TIMESTAMP_RE.search(line)
+    if app_match:
+        raw = app_match.group("stamp")
+        for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
     return None
 
 
@@ -158,6 +188,7 @@ def _freshness_from_lines(
     success_only: bool = False,
 ) -> dict[str, Any] | None:
     keywords = SUCCESS_KEYWORDS if success_only else ACTIVITY_KEYWORDS
+    kind = "success" if success_only else "activity"
     for line in reversed(lines):
         lower = line.lower()
         if not any(k in lower for k in keywords):
@@ -169,36 +200,62 @@ def _freshness_from_lines(
         if age_min <= SCHEDULER_FRESH_MINUTES:
             return {
                 "status": "fresh",
-                "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
+                "detail": f"Last scheduler {kind} ~{int(age_min)} min ago ({source})",
                 "warning": None,
-                "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "last_success_age_min": int(age_min),
+                "timestamp": _format_utc_timestamp(ts),
+                "age_min": int(age_min),
             }
         return {
             "status": "stale",
-            "detail": f"Last scheduler activity ~{int(age_min)} min ago ({source})",
-            "warning": f"No scheduler activity within {SCHEDULER_FRESH_MINUTES} min",
-            "last_success": ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "last_success_age_min": int(age_min),
+            "detail": f"Last scheduler {kind} ~{int(age_min)} min ago ({source})",
+            "warning": f"No scheduler {kind} within {SCHEDULER_FRESH_MINUTES} min",
+            "timestamp": _format_utc_timestamp(ts),
+            "age_min": int(age_min),
         }
     return None
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    timer_line_re = re.compile(
+        rf"^(?P<next>{TIMER_TIMESTAMP_BLOCK}|n/a)\s+"
+        rf"(?P<left>.+?)\s+"
+        rf"(?P<last>{TIMER_TIMESTAMP_BLOCK}|n/a)\s+"
+        rf"(?P<passed>.+?)\s+"
+        rf"{re.escape(unit)}(?:\s+\S+)?$"
+    )
     for line in output.splitlines():
-        if unit not in line:
+        normalized = " ".join(line.split())
+        if unit not in normalized or normalized.startswith("NEXT "):
             continue
-        parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        match = timer_line_re.match(normalized)
+        if not match:
+            continue
+        next_run = match.group("next")
+        if next_run == "n/a":
+            return None
+        left = match.group("left").strip()
+        if left and left != "n/a":
+            relative = left[:-5].strip() if left.endswith(" left") else left
+            if relative:
+                return f"{next_run} (in {relative})"
+        return next_run
     return None
 
 
 def _list_timer_next_run(unit: str = SCHEDULER_TIMER_UNIT) -> str | None:
-    ok, out = run_systemctl(["list-timers", "--all", "--no-pager"], timeout=10.0)
-    if not ok or not out.strip():
-        return None
-    return _parse_timer_next_run(out, unit)
+    commands = (
+        ["list-timers", "--all", "--no-pager", "--plain", "--no-legend", "--utc"],
+        ["list-timers", "--all", "--no-pager", "--plain", "--no-legend"],
+        ["list-timers", "--all", "--no-pager"],
+    )
+    for command in commands:
+        ok, out = run_systemctl(command, timeout=10.0)
+        if not ok or not out.strip():
+            continue
+        parsed = _parse_timer_next_run(out, unit)
+        if parsed:
+            return parsed
+    return None
 
 
 def _check_scheduler_service() -> ServiceStatus:
@@ -256,19 +313,21 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     service_svc = _check_scheduler_service()
     next_run = _list_timer_next_run()
 
-    journal = _journal_lines(SCHEDULER_SERVICE_UNIT.replace(".service", ""))
-    from_journal = _freshness_from_lines(journal, source="journal")
-    from_log = _freshness_from_lines(log_lines, source="vulture.log")
-    activity = from_journal or from_log
+    journal = _journal_lines(SCHEDULER_SERVICE_UNIT)
+    journal_activity = _freshness_from_lines(journal, source="scheduler journal")
+    log_activity = _freshness_from_lines(log_lines, source="vulture.log")
+    activity = journal_activity or log_activity
 
     last_success = None
     last_success_age_min = None
-    success_journal = _freshness_from_lines(journal, source="journal", success_only=True)
+    success_journal = _freshness_from_lines(
+        journal, source="scheduler journal", success_only=True
+    )
     success_log = _freshness_from_lines(log_lines, source="vulture.log", success_only=True)
     success = success_journal or success_log
     if success:
-        last_success = success.get("last_success")
-        last_success_age_min = success.get("last_success_age_min")
+        last_success = success.get("timestamp")
+        last_success_age_min = success.get("age_min")
 
     timer_healthy = _timer_is_healthy(timer_svc)
     service_running = service_svc.active == "active"
@@ -293,19 +352,28 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
     elif service_running:
         status = "running"
         detail_parts.append("hunt cycle in progress")
-    elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
-        detail_parts.append(activity["detail"])
-    elif activity and activity.get("status") == "fresh":
-        status = "fresh"
-        detail_parts.append(activity["detail"])
-    elif journal:
-        status = "seen"
-        detail_parts.append("scheduler journal entries present")
     else:
-        detail_parts.append("no recent scheduler lines in journal or log tail")
+        recent_signal = success or activity
+
+        if not next_run:
+            status = "stale"
+            warning = "Scheduler timer has no upcoming run"
+            detail_parts.append("scheduler timer active but no upcoming run is scheduled")
+        elif recent_signal and recent_signal.get("status") == "fresh":
+            status = "fresh"
+            detail_parts.append(recent_signal["detail"])
+        else:
+            status = "seen"
+            detail_parts.append("scheduler timer active")
+
+        if recent_signal and recent_signal.get("status") == "stale":
+            detail_parts.append(recent_signal["detail"])
+        elif journal and not recent_signal:
+            detail_parts.append("scheduler service journal entries present")
+        elif log_lines and not recent_signal:
+            detail_parts.append("no recent scheduler markers in vulture.log tail")
+        elif not recent_signal:
+            detail_parts.append("no recent scheduler service journal or log markers")
 
     if next_run:
         detail_parts.append(f"next run {next_run}")
