@@ -8,11 +8,8 @@
 #   cd ~/projects/vulture
 #   ./scripts/rebuild_docker.sh
 #
-#   ./scripts/rebuild_docker.sh --dashboard
-#   ./scripts/rebuild_docker.sh --dashboard --no-cache
-#   ./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
-#   ./scripts/rebuild_docker.sh --no-build
-#   ./scripts/rebuild_docker.sh --help
+# Rebuilds every compose stack (dashboard is always built + force-recreated).
+# Advanced: --file, --no-build, --no-cache, --dashboard (dashboard only)
 #
 # Environment overrides (optional):
 #   APP_DIR — repo root (default: $HOME/projects/vulture)
@@ -39,23 +36,21 @@ usage() {
     cat <<'EOF'
 Usage: rebuild_docker.sh [OPTIONS]
 
-Rebuild/restart Docker compose stacks defined in this repo.
+Rebuild/restart every Docker compose stack in this repo.
 
-By default, rebuilds every docker-compose*.yml file in the repo root.
+The dashboard (vulture-dashboard) is always explicitly built and
+force-recreated so code changes reach the running container.
 
 Options:
-  --dashboard    Rebuild only the dashboard stack (docker-compose.dashboard.yml)
-  --no-cache     Build images without Docker layer cache
   --file FILE    Rebuild only this compose file (repeatable)
   --no-build     Restart without rebuilding images
+  --no-cache     Build images without Docker layer cache
+  --dashboard    Rebuild dashboard only (advanced; skips canary)
   --help         Show this help and exit
 
 Examples:
   ./scripts/rebuild_docker.sh
-  ./scripts/rebuild_docker.sh --dashboard
-  ./scripts/rebuild_docker.sh --dashboard --no-cache
-  ./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
-  ./scripts/rebuild_docker.sh --no-build --file docker-compose.dashboard.yml
+  ./scripts/rebuild_docker.sh --file docker-compose.canary.yml
 
 Environment:
   APP_DIR        Repo root (default: $HOME/projects/vulture)

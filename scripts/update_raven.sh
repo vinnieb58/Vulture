@@ -138,20 +138,20 @@ ensure_storage_mountpoints() {
 
 REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
 
-restart_dashboard() {
-    section "Vulture Dashboard (Docker)"
+restart_docker_stacks() {
+    section "Docker stacks (dashboard + canary)"
 
     if [[ ! -x "$REBUILD_DOCKER_SCRIPT" ]]; then
         echo "  ERROR: rebuild helper not found or not executable: ${REBUILD_DOCKER_SCRIPT}"
         exit 1
     fi
 
-    if ! "$REBUILD_DOCKER_SCRIPT" --dashboard; then
-        echo "  ERROR: failed to rebuild vulture-dashboard"
+    if ! "$REBUILD_DOCKER_SCRIPT"; then
+        echo "  ERROR: failed to rebuild Docker stacks"
         exit 1
     fi
 
-    echo "  Dashboard started: http://raven:8088"
+    echo "  Dashboard: http://raven:8088"
 }
 
 show_runtime_status() {
@@ -296,9 +296,9 @@ else
 fi
 
 if [[ "${SKIP_DASHBOARD_RESTART:-0}" == "1" ]]; then
-    section "Skipping dashboard restart (SKIP_DASHBOARD_RESTART=1)"
+    section "Skipping Docker stack rebuild (SKIP_DASHBOARD_RESTART=1)"
 else
-    restart_dashboard
+    restart_docker_stacks
 fi
 
 echo ""
@@ -316,9 +316,8 @@ echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
 echo "    docker ps"
 echo "    curl -I http://localhost:8088"
 echo ""
-echo "  Dashboard recovery (if needed):"
-echo "    ./scripts/rebuild_docker.sh --dashboard"
-echo "    ./scripts/rebuild_docker.sh --dashboard --no-cache"
+echo "  Docker recovery (if needed):"
+echo "    ./scripts/rebuild_docker.sh"
 echo ""
 echo "  tmux is deprecated for normal production runtime."
 echo "  Use it only for optional manual debugging if needed."
