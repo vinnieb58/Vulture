@@ -141,6 +141,9 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
 
 
 def _parse_log_timestamp(line: str) -> datetime | None:
+    # Assumes log timestamps are in UTC. If the host runs in a non-UTC timezone
+    # the embedded HH:MM:SS is interpreted as UTC, which may cause a fixed offset
+    # in stale-age math. As long as the host clock is UTC this is exact.
     m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
     if m:
         raw = f"{m.group(1)} {m.group(2)}"
@@ -189,8 +192,14 @@ def _parse_timer_next_run(output: str, unit: str) -> str | None:
         if unit not in line:
             continue
         parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        if not parts or parts[0] in ("NEXT", "n/a"):
+            return None
+        # systemctl list-timers NEXT column: "DayOfWeek YYYY-MM-DD HH:MM:SS TZ"
+        # Grab all four words when parts[1] looks like a date to avoid returning
+        # only the weekday abbreviation (which is what parts[0] alone would give).
+        if len(parts) >= 4 and re.match(r"\d{4}-\d{2}-\d{2}$", parts[1]):
+            return " ".join(parts[0:4])
+        return parts[0]
     return None
 
 
@@ -294,13 +303,20 @@ def _evaluate_scheduler_health(log_lines: list[str]) -> dict[str, Any]:
         status = "running"
         detail_parts.append("hunt cycle in progress")
     elif activity and activity.get("status") == "stale":
-        # Timer is active; log staleness is informational only, not a warning.
-        # Only the timer state (missing/inactive/no next run) should produce a warning.
-        status = "stale"
+        # Timer is healthy; the systemd timer is the authoritative health source.
+        # Stale log activity is informational only — downgrade to "seen" (OK) when a
+        # next run is scheduled so the card does not show a false WARN.  Only emit
+        # "stale" when no next run is visible (timer may be stuck).
+        status = "seen" if next_run else "stale"
         detail_parts.append(activity["detail"])
     elif activity and activity.get("status") == "fresh":
         status = "fresh"
         detail_parts.append(activity["detail"])
+    elif next_run:
+        # Timer healthy with a scheduled next run; absence of recent log activity
+        # is normal between runs — report "seen" so the card shows OK.
+        status = "seen"
+        detail_parts.append("timer scheduled; no recent log activity")
     elif journal:
         status = "seen"
         detail_parts.append("scheduler journal entries present")
