@@ -141,12 +141,24 @@ def _journal_lines(unit: str, limit: int = 40) -> list[str]:
 
 
 def _parse_log_timestamp(line: str) -> datetime | None:
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", line)
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})([+-]\d{2}:?\d{2})?", line)
     if m:
         raw = f"{m.group(1)} {m.group(2)}"
         try:
-            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
+            dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+            offset_str = m.group(3)
+            if offset_str:
+                offset_str = offset_str.replace(":", "")
+                sign = 1 if offset_str[0] == "+" else -1
+                hours = int(offset_str[1:3])
+                minutes = int(offset_str[3:5])
+                from datetime import timedelta
+                tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+                dt = dt.replace(tzinfo=tz)
+            else:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (ValueError, IndexError):
             pass
     return None
 
@@ -185,12 +197,24 @@ def _freshness_from_lines(
 
 
 def _parse_timer_next_run(output: str, unit: str) -> str | None:
+    """Extract full next-run timestamp from ``systemctl list-timers`` output.
+
+    The NEXT column format is typically ``Day YYYY-MM-DD HH:MM:SS TZ``.
+    Previous implementation only returned the weekday (e.g. "Thu").
+    """
     for line in output.splitlines():
         if unit not in line:
             continue
         parts = line.split()
-        if len(parts) >= 1 and parts[0] not in ("NEXT", "n/a"):
-            return parts[0]
+        if not parts or parts[0] in ("NEXT", "n/a"):
+            continue
+        # Full format: Day YYYY-MM-DD HH:MM:SS [TZ]  (3-4 tokens)
+        if len(parts) >= 3 and re.match(r"\d{4}-\d{2}-\d{2}$", parts[1]):
+            # Check if 4th token looks like a timezone identifier
+            if len(parts) >= 4 and re.match(r"[A-Z]{2,5}$|[+-]\d{2,4}$", parts[3]):
+                return " ".join(parts[:4])
+            return " ".join(parts[:3])
+        return parts[0]
     return None
 
 

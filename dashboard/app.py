@@ -177,6 +177,8 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     sched_status = freshness.get("status", "unknown")
     next_run = freshness.get("next_run")
 
+    timer_active = freshness.get("timer_active")
+
     if sched_status in ("fresh", "running", "seen"):
         status = "OK"
         if sched_status == "running":
@@ -186,8 +188,15 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
         else:
             headline = "Vulture scheduler active"
     elif sched_status == "stale":
-        status = "WARN"
-        headline = "Vulture scheduler may be stale"
+        if timer_active == "active":
+            status = "OK"
+            if next_run:
+                headline = f"Vulture scheduler active; next run {next_run}"
+            else:
+                headline = "Vulture scheduler active (awaiting next cycle)"
+        else:
+            status = "WARN"
+            headline = "Vulture scheduler may be stale"
     elif sched_status == "unhealthy":
         status = "FAIL"
         headline = "Vulture scheduler unhealthy"
