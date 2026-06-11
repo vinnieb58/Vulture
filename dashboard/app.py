@@ -177,7 +177,7 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     sched_status = freshness.get("status", "unknown")
     next_run = freshness.get("next_run")
 
-    if sched_status in ("fresh", "running", "seen"):
+    if sched_status in ("fresh", "running", "scheduled", "seen"):
         status = "OK"
         if sched_status == "running":
             headline = "Vulture hunt cycle in progress"
