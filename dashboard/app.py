@@ -1,15 +1,17 @@
 """
 Nest v1 Dashboard — tablet-first household/Raven overview.
 
-Observability only: no hunt mutations, scheduler controls, service restarts,
-or other write/admin actions. Intended for local / Tailscale access on Raven.
+Read-only observability pages plus a whitelisted Action Center for safe
+operational controls. Intended for local / Tailscale access on Raven.
 
 Routes
 ------
 /          Nest Overview    tablet-friendly summary cards (default)
 /storage   Storage detail   per-drive status and usage
 /vulture   Vulture detail   scheduler / bot / hunts
+/actions   Action Center    whitelisted operational actions (v1)
 /advanced  Raven Ops        original dense operational view (v0.2)
+/api/actions/*             Action Center JSON API (async execution)
 """
 
 from __future__ import annotations
@@ -19,10 +21,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
+from action_runner import (
+    get_action_definition,
+    get_run,
+    list_action_definitions,
+    start_action,
+)
 from db_readers import DB_PATH, read_db_snapshot
 from host_status import (
     DockerSnapshot,
@@ -443,6 +452,73 @@ async def vulture_detail(request: Request) -> HTMLResponse:
         "vulture_card": vulture_card,
     }
     return templates.TemplateResponse(request, "vulture.html", context)
+
+
+class ActionRunRequest(BaseModel):
+    confirm: bool = Field(default=False, description="Must be true to execute the action.")
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+@app.get("/actions", response_class=HTMLResponse)
+async def action_center(request: Request) -> HTMLResponse:
+    """Action Center — whitelisted operational controls with async execution."""
+    refreshed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    context = {
+        "title": "Action Center",
+        "version": "1.0",
+        "page": "actions",
+        "refreshed_at": refreshed_at,
+        "actions": list_action_definitions(),
+    }
+    return templates.TemplateResponse(request, "actions.html", context)
+
+
+@app.get("/api/actions")
+async def api_list_actions() -> JSONResponse:
+    """List all registered actions and their last-run status."""
+    return JSONResponse({"actions": list_action_definitions()})
+
+
+@app.get("/api/actions/{action_id}")
+async def api_get_action(action_id: str) -> JSONResponse:
+    """Return metadata and last-run status for one action."""
+    definition = get_action_definition(action_id)
+    if definition is None:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action_id}")
+
+    actions = list_action_definitions()
+    match = next((a for a in actions if a["action_id"] == action_id), None)
+    return JSONResponse(match or {"action_id": action_id})
+
+
+@app.post("/api/actions/{action_id}/run")
+async def api_run_action(action_id: str, body: ActionRunRequest, request: Request) -> JSONResponse:
+    """Start an allowlisted action asynchronously."""
+    if get_action_definition(action_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action_id}")
+
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Confirmation required (confirm: true).")
+
+    run = start_action(action_id, user_ip=_client_ip(request))
+    return JSONResponse(run.to_dict(include_output=True))
+
+
+@app.get("/api/actions/runs/{run_id}")
+async def api_get_run(run_id: str) -> JSONResponse:
+    """Poll action run status and streamed output."""
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}")
+    return JSONResponse(run.to_dict(include_output=True))
 
 
 @app.get("/advanced", response_class=HTMLResponse)

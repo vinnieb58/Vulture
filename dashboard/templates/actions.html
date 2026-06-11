@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Nest — Action Center</title>
+  <style>
+    :root {
+      --bg:           #0f1419;
+      --surface:      #1a2332;
+      --surface-2:    #151d29;
+      --border:       #2d3a4f;
+      --text:         #e6edf3;
+      --muted:        #8b949e;
+      --accent:       #58a6ff;
+
+      --ok:           #3fb950;
+      --ok-bg:        #0d2318;
+      --warn:         #d29922;
+      --warn-bg:      #2a1f00;
+      --fail:         #f85149;
+      --fail-bg:      #2a0a0a;
+      --unknown:      #8b949e;
+      --running:      #58a6ff;
+      --running-bg:   #0d2137;
+
+      --nav-h:        64px;
+      --card-radius:  14px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    .page {
+      min-height: 100%;
+      padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom, 0px));
+    }
+
+    .top-bar {
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      padding: 0.85rem 1.25rem 0.7rem;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
+
+    .top-bar-title { font-size: 1.4rem; font-weight: 700; }
+    .top-bar-title span { color: var(--accent); }
+    .refresh-info { font-size: 0.82rem; color: var(--muted); }
+
+    .content {
+      padding: 1rem;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .intro {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1rem 1.1rem;
+      margin-bottom: 1rem;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+
+    .intro strong { color: var(--text); }
+
+    .action-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1rem 1.1rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .action-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .action-name { font-size: 1.05rem; font-weight: 600; }
+    .action-desc { font-size: 0.88rem; color: var(--muted); margin-bottom: 0.65rem; }
+
+    .status-badge {
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .status-badge.idle { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+    .status-badge.running { background: var(--running-bg); color: var(--running); border: 1px solid var(--running); }
+    .status-badge.success { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok); }
+    .status-badge.failed { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail); }
+
+    .meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.65rem;
+    }
+
+    .meta div { margin-bottom: 0.15rem; }
+
+    .result-summary {
+      font-size: 0.85rem;
+      padding: 0.55rem 0.7rem;
+      background: var(--surface-2);
+      border-radius: 8px;
+      margin-bottom: 0.65rem;
+      word-break: break-word;
+    }
+
+    .output-box {
+      display: none;
+      background: #0a0e14;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem 0.75rem;
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.75rem;
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin-bottom: 0.65rem;
+      color: #c9d1d9;
+    }
+
+    .output-box.visible { display: block; }
+
+    .running-indicator {
+      display: none;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.82rem;
+      color: var(--running);
+      margin-bottom: 0.5rem;
+    }
+
+    .running-indicator.visible { display: flex; }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--running);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+    button {
+      font: inherit;
+      cursor: pointer;
+      border-radius: 8px;
+      padding: 0.45rem 0.9rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+
+    button.primary {
+      background: #1f3a5f;
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .bottom-nav {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: var(--nav-h);
+      background: var(--surface-2);
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      z-index: 100;
+    }
+
+    .nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.15rem;
+      text-decoration: none;
+      color: var(--muted);
+      font-size: 0.68rem;
+      padding: 0.35rem 0.5rem;
+      min-width: 56px;
+    }
+
+    .nav-item.active { color: var(--accent); }
+    .nav-icon { font-size: 1.25rem; }
+
+    /* Confirmation dialog */
+    .dialog-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+
+    .dialog-backdrop.open { display: flex; }
+
+    .dialog {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1.25rem;
+      max-width: 420px;
+      width: 100%;
+    }
+
+    .dialog h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .dialog p { font-size: 0.9rem; color: var(--muted); margin-bottom: 1rem; }
+    .dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+
+<div class="page">
+  <header class="top-bar">
+    <div class="top-bar-title">Nest <span>Action Center</span></div>
+    <div class="refresh-info">LAN / Tailscale only · whitelisted actions</div>
+  </header>
+
+  <main class="content">
+    <div class="intro">
+      <strong>Controlled operational actions</strong> for Raven.
+      Each action is logged, runs asynchronously, and shows live status.
+      No arbitrary shell commands — only pre-approved workflows.
+    </div>
+
+    <div id="action-list">
+      {% for action in actions %}
+      <article class="action-card" data-action-id="{{ action.action_id }}">
+        <div class="action-header">
+          <div class="action-name">{{ action.name }}</div>
+          <span class="status-badge idle" data-status-badge>Idle</span>
+        </div>
+        <p class="action-desc">{{ action.description }}</p>
+        <div class="meta" data-meta>
+          <div data-last-run>Last run: never</div>
+          <div data-last-result style="display:none;"></div>
+        </div>
+        <div class="running-indicator" data-running>
+          <span class="spinner"></span>
+          <span>Running…</span>
+        </div>
+        <div class="result-summary" data-result style="display:none;"></div>
+        <pre class="output-box" data-output></pre>
+        <div class="btn-row">
+          <button type="button" class="primary" data-run-btn
+                  data-confirm="{{ action.confirm_message }}">
+            Run action
+          </button>
+          <button type="button" data-toggle-output style="display:none;">Show output</button>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </main>
+</div>
+
+<div class="dialog-backdrop" id="confirm-dialog" role="dialog" aria-modal="true">
+  <div class="dialog">
+    <h2 id="dialog-title">Confirm action</h2>
+    <p id="dialog-message"></p>
+    <div class="dialog-actions">
+      <button type="button" id="dialog-cancel">Cancel</button>
+      <button type="button" class="primary" id="dialog-confirm">Confirm &amp; run</button>
+    </div>
+  </div>
+</div>
+
+<nav class="bottom-nav" role="navigation" aria-label="Main navigation">
+  <a href="/" class="nav-item">
+    <span class="nav-icon">⌂</span>
+    <span class="nav-label">Home</span>
+  </a>
+  <a href="/storage" class="nav-item">
+    <span class="nav-icon">💾</span>
+    <span class="nav-label">Storage</span>
+  </a>
+  <a href="/vulture" class="nav-item">
+    <span class="nav-icon">🦅</span>
+    <span class="nav-label">Vulture</span>
+  </a>
+  <a href="/actions" class="nav-item active" aria-current="page">
+    <span class="nav-icon">⚡</span>
+    <span class="nav-label">Actions</span>
+  </a>
+  <a href="/advanced" class="nav-item">
+    <span class="nav-icon">⚙</span>
+    <span class="nav-label">Advanced</span>
+  </a>
+</nav>
+
+<script>
+(function () {
+  const pollIntervalMs = 1500;
+  const activePolls = new Map();
+  let pendingActionId = null;
+
+  const dialog = document.getElementById('confirm-dialog');
+  const dialogMessage = document.getElementById('dialog-message');
+  const dialogCancel = document.getElementById('dialog-cancel');
+  const dialogConfirm = document.getElementById('dialog-confirm');
+
+  function statusLabel(status) {
+    const map = { idle: 'Idle', running: 'Running', success: 'Success', failed: 'Failed' };
+    return map[status] || status;
+  }
+
+  function updateCard(card, data) {
+    const badge = card.querySelector('[data-status-badge]');
+    const status = data.status || 'idle';
+    badge.textContent = statusLabel(status);
+    badge.className = 'status-badge ' + status;
+
+    const running = card.querySelector('[data-running]');
+    running.classList.toggle('visible', status === 'running');
+
+    const runBtn = card.querySelector('[data-run-btn]');
+    runBtn.disabled = status === 'running';
+
+    const lastRun = card.querySelector('[data-last-run]');
+    if (data.finished_at) {
+      lastRun.textContent = 'Last run: ' + data.finished_at;
+    } else if (data.started_at && status === 'running') {
+      lastRun.textContent = 'Started: ' + data.started_at;
+    }
+
+    const resultEl = card.querySelector('[data-result]');
+    const summary = data.result && data.result.summary;
+    if (summary && status !== 'running') {
+      resultEl.textContent = summary;
+      resultEl.style.display = 'block';
+    }
+
+    const lastResult = card.querySelector('[data-last-result]');
+    if (data.exit_code !== null && data.exit_code !== undefined && status !== 'running') {
+      lastResult.textContent = 'Exit code: ' + data.exit_code +
+        (data.duration_seconds != null ? ' · ' + data.duration_seconds + 's' : '');
+      lastResult.style.display = 'block';
+    }
+
+    const outputBox = card.querySelector('[data-output]');
+    const toggleBtn = card.querySelector('[data-toggle-output]');
+    if (data.output && data.output.length) {
+      outputBox.textContent = data.output.join('\n');
+      toggleBtn.style.display = 'inline-block';
+      if (status === 'running') {
+        outputBox.classList.add('visible');
+        outputBox.scrollTop = outputBox.scrollHeight;
+      }
+    }
+  }
+
+  async function pollRun(card, runId) {
+    try {
+      const resp = await fetch('/api/actions/runs/' + runId);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      updateCard(card, data);
+      if (data.status === 'running') {
+        return;
+      }
+      const actionId = card.dataset.actionId;
+      activePolls.delete(actionId);
+    } catch (e) {
+      console.error('poll failed', e);
+    }
+  }
+
+  function startPolling(card, runId) {
+    const actionId = card.dataset.actionId;
+    if (activePolls.has(actionId)) {
+      clearInterval(activePolls.get(actionId));
+    }
+    pollRun(card, runId);
+    const handle = setInterval(() => pollRun(card, runId), pollIntervalMs);
+    activePolls.set(actionId, handle);
+  }
+
+  async function runAction(actionId, card) {
+    const resp = await fetch('/api/actions/' + actionId + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    if (resp.status === 404) {
+      alert('Unknown action rejected.');
+      return;
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || 'Action failed to start.');
+      return;
+    }
+    const data = await resp.json();
+    updateCard(card, data);
+    startPolling(card, data.run_id);
+  }
+
+  document.querySelectorAll('.action-card').forEach(card => {
+    const runBtn = card.querySelector('[data-run-btn]');
+    const toggleBtn = card.querySelector('[data-toggle-output]');
+    const outputBox = card.querySelector('[data-output]');
+
+    runBtn.addEventListener('click', () => {
+      pendingActionId = card.dataset.actionId;
+      dialogMessage.textContent = runBtn.dataset.confirm || 'Run this action?';
+      dialog.classList.add('open');
+    });
+
+    toggleBtn.addEventListener('click', () => {
+      outputBox.classList.toggle('visible');
+      toggleBtn.textContent = outputBox.classList.contains('visible') ? 'Hide output' : 'Show output';
+    });
+
+    const actionId = card.dataset.actionId;
+    fetch('/api/actions/' + actionId)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        if (data.last_run) {
+          updateCard(card, {
+            status: data.last_run.status,
+            started_at: data.last_run.started_at,
+            finished_at: data.last_run.finished_at,
+            exit_code: data.last_run.exit_code,
+            duration_seconds: data.last_run.duration_seconds,
+            result: data.last_run.result || {},
+          });
+          if (data.last_run.status === 'running' && data.last_run.run_id) {
+            startPolling(card, data.last_run.run_id);
+          }
+        }
+      });
+  });
+
+  dialogCancel.addEventListener('click', () => {
+    dialog.classList.remove('open');
+    pendingActionId = null;
+  });
+
+  dialogConfirm.addEventListener('click', async () => {
+    dialog.classList.remove('open');
+    if (!pendingActionId) return;
+    const card = document.querySelector('[data-action-id="' + pendingActionId + '"]');
+    pendingActionId = null;
+    if (card) await runAction(card.dataset.actionId, card);
+  });
+})();
+</script>
+
+</body>
+</html>
