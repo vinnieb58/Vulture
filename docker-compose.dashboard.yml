@@ -9,6 +9,9 @@ services:
   vulture-dashboard:
     build:
       context: ./dashboard
+      args:
+        BUILD_GIT_COMMIT: ${BUILD_GIT_COMMIT:-unknown}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
     ports:
       - "8088:8088"
     pid: host

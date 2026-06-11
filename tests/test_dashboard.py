@@ -269,6 +269,8 @@ class TestDashboardHTTP:
         data = response.json()
         assert data["status"] == "ok"
         assert "server_time" in data
+        assert "build_git_commit" in data
+        assert "build_timestamp" in data
 
     def test_health_does_not_require_db_or_log(self, client):
         """Health probe must succeed even when all host data sources are missing."""

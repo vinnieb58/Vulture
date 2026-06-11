@@ -15,8 +15,9 @@
 #   ./scripts/update_raven_quick.sh
 #
 #   ./scripts/update_raven_quick.sh --run-once    # quick deploy + one scheduler cycle
-#   ./scripts/update_raven_quick.sh --no-docker   # skip Docker stack rebuild/restart
-#   ./scripts/update_raven_quick.sh --no-services # skip systemd restarts
+#   ./scripts/update_raven_quick.sh --no-docker        # skip Docker stack rebuild/restart
+#   ./scripts/update_raven_quick.sh --no-services      # skip systemd restarts
+#   ./scripts/update_raven_quick.sh --rebuild-dashboard # force dashboard image rebuild
 #   ./scripts/update_raven_quick.sh --help
 #
 # Environment overrides (optional):
@@ -37,11 +38,21 @@ VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
 SKIP_DOCKER=0
 SKIP_SERVICES=0
 RUN_ONCE=0
+FORCE_REBUILD_DASHBOARD=0
+PRE_UPDATE_HEAD=""
 
 PIP="${APP_DIR}/.venv/bin/pip"
 PYTHON_BIN="${APP_DIR}/${PYTHON}"
 REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
 DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
+CANARY_COMPOSE_FILE="${APP_DIR}/docker-compose.canary.yml"
+
+DASHBOARD_CHANGE_PATHS=(
+    dashboard/
+    docker-compose.dashboard.yml
+    dashboard/Dockerfile
+    dashboard/requirements.txt
+)
 
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
@@ -54,11 +65,12 @@ Usage: update_raven_quick.sh [OPTIONS]
 Fast Raven deploy without an immediate full hunt cycle.
 
 Options:
-  --no-docker    Skip Docker stack rebuild/restart
-  --no-services  Skip systemd unit install and service restarts
-  --run-once     After deploy, run one scheduler cycle via:
-                 systemctl start vulture-scheduler.service
-  --help         Show this help and exit
+  --no-docker          Skip Docker stack rebuild/restart
+  --no-services        Skip systemd unit install and service restarts
+  --rebuild-dashboard  Force dashboard image rebuild/recreate
+  --run-once           After deploy, run one scheduler cycle via:
+                       systemctl start vulture-scheduler.service
+  --help               Show this help and exit
 
 Examples:
   ./scripts/update_raven_quick.sh
@@ -191,6 +203,28 @@ run_scheduler_once() {
     echo "  Started: ${VULTURE_SCHEDULER_SERVICE}"
 }
 
+dashboard_files_changed() {
+    local path
+    local changed_files
+
+    if [[ -z "$PRE_UPDATE_HEAD" ]]; then
+        return 1
+    fi
+
+    changed_files="$(git diff --name-only "$PRE_UPDATE_HEAD" HEAD 2>/dev/null || true)"
+    if [[ -z "$changed_files" ]]; then
+        return 1
+    fi
+
+    for path in "${DASHBOARD_CHANGE_PATHS[@]}"; do
+        if printf '%s\n' "$changed_files" | grep -q "^${path}"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 rebuild_docker_stacks() {
     section "Rebuilding Docker stacks"
 
@@ -204,7 +238,27 @@ rebuild_docker_stacks() {
         exit 1
     fi
 
-    "$REBUILD_DOCKER_SCRIPT"
+    local rebuild_dashboard=0
+    if [[ $FORCE_REBUILD_DASHBOARD -eq 1 ]]; then
+        rebuild_dashboard=1
+        echo "  Dashboard rebuild: forced (--rebuild-dashboard)"
+    elif dashboard_files_changed; then
+        rebuild_dashboard=1
+        echo "  Dashboard rebuild: performed (dashboard files changed since pre-update HEAD)"
+    else
+        echo "  Dashboard rebuild: skipped (no dashboard file changes detected)"
+    fi
+
+    if [[ $rebuild_dashboard -eq 1 ]]; then
+        "$REBUILD_DOCKER_SCRIPT" --dashboard
+    fi
+
+    if [[ -f "$CANARY_COMPOSE_FILE" ]]; then
+        echo "  Rebuilding Canary stack"
+        "$REBUILD_DOCKER_SCRIPT" --file docker-compose.canary.yml
+    else
+        echo "  Canary stack: skipped (compose file not found)"
+    fi
 }
 
 show_final_status() {
@@ -235,10 +289,10 @@ show_final_status() {
     echo ""
     echo "  dashboard HTTP:"
     if command -v curl &>/dev/null; then
-        if curl -fsS -o /dev/null -I --max-time 5 http://localhost:8088 2>/dev/null; then
-            curl -I --max-time 5 http://localhost:8088 2>&1 || true
+        if curl -fsS --max-time 10 http://localhost:8088/health 2>/dev/null; then
+            echo ""
         else
-            echo "  Dashboard not reachable at http://localhost:8088"
+            echo "  Dashboard health check failed at http://localhost:8088/health"
         fi
     else
         echo "  Skipped (curl not available)"
@@ -256,6 +310,9 @@ parse_args() {
                 ;;
             --run-once)
                 RUN_ONCE=1
+                ;;
+            --rebuild-dashboard)
+                FORCE_REBUILD_DASHBOARD=1
                 ;;
             --help|-h)
                 usage
@@ -279,6 +336,7 @@ main() {
 
     section "Git state (before update)"
     print_git_state "current"
+    PRE_UPDATE_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
 
     section "Fetching origin"
     git fetch origin

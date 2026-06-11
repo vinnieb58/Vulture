@@ -321,11 +321,16 @@ async def health() -> JSONResponse:
 
     Returns HTTP 200 with JSON payload if the dashboard process is running.
     Does NOT collect host data — this is a liveness check only.
+
+    ``build_git_commit`` and ``build_timestamp`` are baked in at image build time
+    so deploy scripts can confirm the running container matches the expected code.
     """
     return JSONResponse(
         {
             "status": "ok",
             "server_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "build_git_commit": os.environ.get("DASHBOARD_BUILD_GIT_COMMIT", "unknown"),
+            "build_timestamp": os.environ.get("DASHBOARD_BUILD_TIMESTAMP", "unknown"),
         }
     )
 
