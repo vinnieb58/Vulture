@@ -409,3 +409,157 @@ class TestSearch:
         entry = get_alias("eggs", alias_db)
         assert entry.display_name == "New Eggs"
         assert entry.upc == "999"
+
+
+SAMPLE_LOCATIONS_PAYLOAD = {
+    "data": [
+        {
+            "locationId": "01400441",
+            "chain": "KROGER",
+            "name": "Kroger",
+            "phone": "2815551234",
+            "address": {
+                "addressLine1": "123 Main St",
+                "city": "Richmond",
+                "state": "TX",
+                "zipCode": "77406",
+            },
+            "departments": [
+                {"departmentId": "94", "name": "Pickup"},
+                {"departmentId": "01", "name": "Deli"},
+            ],
+        },
+        {
+            "locationId": "01400442",
+            "chain": "KROGER",
+            "name": "Kroger Marketplace",
+            "phone": "2815559999",
+            "address": {
+                "addressLine1": "456 FM 1092",
+                "city": "Missouri City",
+                "state": "TX",
+                "zipCode": "77459",
+            },
+            "departments": [{"departmentId": "01", "name": "Deli"}],
+        },
+    ]
+}
+
+
+class TestLocations:
+    def test_has_pickup_department(self):
+        from finch.kroger_client import has_pickup_department
+
+        assert has_pickup_department([{"departmentId": "94", "name": "Pickup"}])
+        assert not has_pickup_department([{"departmentId": "01", "name": "Deli"}])
+        assert not has_pickup_department(None)
+
+    def test_parse_locations_payload(self):
+        from finch.kroger_client import _parse_locations_payload
+
+        locations = _parse_locations_payload(SAMPLE_LOCATIONS_PAYLOAD)
+        assert len(locations) == 2
+        assert locations[0].location_id == "01400441"
+        assert locations[0].has_pickup is True
+        assert locations[0].phone == "(281) 555-1234"
+        assert locations[1].has_pickup is False
+
+    def test_run_location_search_mocked(self):
+        from finch.locations import run_location_search
+
+        session = _FakeSession(
+            [
+                _FakeResponse(200, {"access_token": "tok"}, url="https://api.kroger.com/v1/connect/oauth2/token"),
+                _FakeResponse(200, SAMPLE_LOCATIONS_PAYLOAD, url="https://api.kroger.com/v1/locations"),
+            ]
+        )
+        oauth = KrogerOAuthConfig(client_id="c", client_secret="s")
+        client = KrogerClient(oauth, session=session)
+        locations = run_location_search("77406", client=client)
+        assert len(locations) == 2
+        assert locations[0].city_state_zip == "Richmond, TX 77406"
+
+    def test_format_location_line_shows_pickup(self):
+        from finch.kroger_client import _parse_locations_payload
+        from finch.locations import format_location_line
+
+        loc = _parse_locations_payload(SAMPLE_LOCATIONS_PAYLOAD)[0]
+        line = format_location_line(1, loc)
+        assert "pickup (dept 94): yes" in line
+        assert "01400441" in line
+
+    def test_save_location_config(self, monkeypatch, tmp_path: Path):
+        from finch.local_config import load_finch_config, resolve_location_id, save_location_config
+
+        monkeypatch.delenv("FINCH_KROGER_LOCATION_ID", raising=False)
+        cfg_path = tmp_path / "finch_config.json"
+        save_location_config(
+            "01400441",
+            store_name="Kroger",
+            store_address="123 Main St, Richmond, TX 77406",
+            saved_from_zip="77406",
+            config_path=cfg_path,
+        )
+        data = load_finch_config(cfg_path)
+        assert data["kroger_location_id"] == "01400441"
+        assert data["saved_from_zip"] == "77406"
+        assert resolve_location_id(cfg_path) == "01400441"
+
+    def test_resolve_location_id_env_wins(self, monkeypatch, tmp_path: Path):
+        from finch.local_config import resolve_location_id, save_location_config
+
+        cfg_path = tmp_path / "finch_config.json"
+        save_location_config("from-file", config_path=cfg_path)
+        monkeypatch.setenv("FINCH_KROGER_LOCATION_ID", "from-env")
+        assert resolve_location_id(cfg_path) == "from-env"
+
+    def test_save_location_requires_confirmation(self, tmp_path: Path):
+        from finch.kroger_client import _parse_locations_payload
+        from finch.locations import save_selected_location
+
+        loc = _parse_locations_payload(SAMPLE_LOCATIONS_PAYLOAD)[0]
+        cfg_path = tmp_path / "finch_config.json"
+        result = save_selected_location(
+            loc,
+            "77406",
+            confirm=False,
+            input_fn=lambda _: "n",
+            config_path=cfg_path,
+        )
+        assert result is None
+        assert not cfg_path.exists()
+
+    def test_save_location_with_confirm(self, tmp_path: Path):
+        from finch.kroger_client import _parse_locations_payload
+        from finch.locations import save_selected_location
+
+        loc = _parse_locations_payload(SAMPLE_LOCATIONS_PAYLOAD)[0]
+        cfg_path = tmp_path / "finch_config.json"
+        result = save_selected_location(
+            loc,
+            "77406",
+            confirm=True,
+            config_path=cfg_path,
+        )
+        assert result is not None
+        assert result["kroger_location_id"] == "01400441"
+
+
+class TestSetupLocationWarning:
+    def test_setup_shows_locations_hint_when_missing(self, monkeypatch, capsys):
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_ID", "cid")
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_SECRET", "secret")
+        monkeypatch.delenv("FINCH_KROGER_LOCATION_ID", raising=False)
+        with patch("finch.env_check.resolve_location_id", return_value=None):
+            print_setup_report()
+        out = capsys.readouterr().out
+        assert "finch.locations" in out
+        assert "--save" in out
+
+    def test_env_check_location_missing_message(self, monkeypatch):
+        monkeypatch.delenv("FINCH_KROGER_LOCATION_ID", raising=False)
+        with patch("finch.env_check.resolve_location_id", return_value=None):
+            checks = run_env_checks()
+        loc = next(c for c in checks if c.name == "FINCH_KROGER_LOCATION_ID")
+        assert loc.status == CheckStatus.MISSING
+        assert "finch.locations" in loc.message

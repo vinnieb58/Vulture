@@ -24,15 +24,19 @@ from finch.config import (
     FINCH_LIVE_CART,
     KROGER_BASE_URL,
     KROGER_CART_MODALITY,
-    KROGER_LOCATION_ID,
 )
+from finch.local_config import resolve_location_id
 
 logger = logging.getLogger(__name__)
 
 OAUTH_TOKEN_PATH = "/v1/connect/oauth2/token"
 OAUTH_AUTHORIZE_PATH = "/v1/connect/oauth2/authorize"
 PRODUCTS_PATH = "/v1/products"
+LOCATIONS_PATH = "/v1/locations"
 CART_ADD_PATH = "/v1/cart/add"
+
+# Kroger department ID for in-store / curbside pickup.
+PICKUP_DEPARTMENT_ID = "94"
 
 
 class KrogerError(Exception):
@@ -45,6 +49,23 @@ class KrogerAuthError(KrogerError):
 
 class KrogerCartDisabledError(KrogerError):
     """Cart mutation blocked by Finch guardrails."""
+
+
+@dataclass(frozen=True)
+class KrogerLocation:
+    location_id: str
+    name: str
+    address_line1: str
+    city: str
+    state: str
+    zip_code: str
+    has_pickup: bool
+    phone: str | None = None
+    chain: str | None = None
+
+    @property
+    def city_state_zip(self) -> str:
+        return f"{self.city}, {self.state} {self.zip_code}".strip()
 
 
 @dataclass(frozen=True)
@@ -85,7 +106,7 @@ class KrogerOAuthConfig:
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=os.getenv("FINCH_KROGER_REDIRECT_URI", "").strip() or None,
-            location_id=os.getenv("FINCH_KROGER_LOCATION_ID", KROGER_LOCATION_ID).strip() or None,
+            location_id=resolve_location_id() or None,
         )
 
 
@@ -129,6 +150,44 @@ def _parse_products_payload(data: dict[str, Any]) -> list[KrogerProduct]:
             )
         )
     return products
+
+
+def has_pickup_department(departments: list[dict[str, Any]] | None) -> bool:
+    if not departments:
+        return False
+    return any(str(dept.get("departmentId", "")) == PICKUP_DEPARTMENT_ID for dept in departments)
+
+
+def _format_phone(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return str(raw)
+
+
+def _parse_locations_payload(data: dict[str, Any]) -> list[KrogerLocation]:
+    locations: list[KrogerLocation] = []
+    for item in data.get("data", []):
+        location_id = str(item.get("locationId", "")).strip()
+        if not location_id:
+            continue
+        address = item.get("address") or {}
+        locations.append(
+            KrogerLocation(
+                location_id=location_id,
+                name=str(item.get("name") or item.get("chain") or "Kroger"),
+                address_line1=str(address.get("addressLine1", "")),
+                city=str(address.get("city", "")),
+                state=str(address.get("state", "")),
+                zip_code=str(address.get("zipCode", "")),
+                has_pickup=has_pickup_department(item.get("departments")),
+                phone=_format_phone(item.get("phone")),
+                chain=item.get("chain"),
+            )
+        )
+    return locations
 
 
 class KrogerClient:
@@ -252,6 +311,34 @@ class KrogerClient:
             logger.warning("%s (product search)", _safe_log_response(resp))
             raise KrogerError(f"Product search failed: HTTP {resp.status_code}")
         return _parse_products_payload(resp.json())
+
+    def search_locations(
+        self,
+        zip_code: str,
+        *,
+        radius_miles: int = 20,
+        limit: int = 10,
+    ) -> list[KrogerLocation]:
+        params: dict[str, str | int] = {
+            "filter.zipCode.near": zip_code,
+            "filter.radiusInMiles": radius_miles,
+            "filter.limit": limit,
+        }
+        url = f"{self.base_url}{LOCATIONS_PATH}"
+        resp = self.session.request(
+            "GET",
+            url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self._product_token()}",
+            },
+            params=params,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            logger.warning("%s (location search)", _safe_log_response(resp))
+            raise KrogerError(f"Location search failed: HTTP {resp.status_code}")
+        return _parse_locations_payload(resp.json())
 
     def add_to_cart(
         self,

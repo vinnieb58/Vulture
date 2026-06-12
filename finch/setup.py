@@ -26,8 +26,8 @@ def print_setup_report() -> int:
     if search_with_prices_ready(checks):
         print("Ready for: preview (local), live product search with prices")
     elif search_ready(checks):
-        print("Ready for: preview (local), live product search (no location — prices may be missing)")
-        print("Tip: set FINCH_KROGER_LOCATION_ID for store-specific prices.")
+        print("Ready for: preview (local), live product search (no store selected — prices may be missing)")
+        print("Run: python -m finch.locations <your_zip> --save")
     else:
         print("Ready for: preview (local) only")
         print("Missing: FINCH_KROGER_CLIENT_ID and/or FINCH_KROGER_CLIENT_SECRET in .env")
@@ -44,13 +44,18 @@ def print_setup_report() -> int:
 
     print()
     print("Operator flow:")
-    print("  1. python -m finch.preview \"eggs, milk\"")
+    print("  1. Add FINCH_KROGER_CLIENT_ID/SECRET to .env")
     if search_ready(checks):
-        print("  2. python -m finch.search \"eggs\"")
-        print("  3. python -m finch.search \"eggs\" --save-alias eggs --pick 1 --confirm")
+        if not search_with_prices_ready(checks):
+            print("  2. python -m finch.locations <your_zip> --save --pick 1 --confirm")
+        else:
+            print("  2. python -m finch.locations <your_zip>  (already have a saved store)")
+        print("  3. python -m finch.preview \"eggs, milk\"")
+        print("  4. python -m finch.search \"eggs\" --save-alias eggs --pick 1 --confirm")
     else:
-        print("  2. Add Kroger credentials to .env, then: python -m finch.search \"eggs\"")
-    print("  4. (Later) OAuth + FINCH_LIVE_CART for cart add")
+        print("  2. python -m finch.locations <your_zip> --save  (after credentials)")
+        print("  3. python -m finch.preview \"eggs, milk\"")
+    print("  (Later) OAuth + FINCH_LIVE_CART for cart add")
 
     missing_required = [c for c in checks if c.status == CheckStatus.MISSING]
     if missing_required and not search_ready(checks):

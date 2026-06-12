@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
+from finch.local_config import resolve_location_id
+
 
 class CheckStatus(str, Enum):
     OK = "ok"
@@ -36,7 +38,6 @@ def run_env_checks() -> list[EnvCheck]:
     for var, purpose in (
         ("FINCH_KROGER_CLIENT_ID", "live Kroger API (search)"),
         ("FINCH_KROGER_CLIENT_SECRET", "live Kroger API (search)"),
-        ("FINCH_KROGER_LOCATION_ID", "priced product search at your store"),
         ("FINCH_KROGER_REDIRECT_URI", "future cart add (OAuth — not needed for search)"),
     ):
         if _is_set(var):
@@ -45,6 +46,27 @@ def run_env_checks() -> list[EnvCheck]:
             checks.append(
                 EnvCheck(var, CheckStatus.MISSING, "not set", purpose)
             )
+
+    location_id = resolve_location_id()
+    if location_id:
+        source = "is set" if _is_set("FINCH_KROGER_LOCATION_ID") else "is set (data/finch_config.json)"
+        checks.append(
+            EnvCheck(
+                "FINCH_KROGER_LOCATION_ID",
+                CheckStatus.OK,
+                source,
+                "priced product search at your store",
+            )
+        )
+    else:
+        checks.append(
+            EnvCheck(
+                "FINCH_KROGER_LOCATION_ID",
+                CheckStatus.MISSING,
+                "not set — Run: python -m finch.locations <your_zip> --save",
+                "priced product search at your store",
+            )
+        )
 
     if _live_cart_enabled():
         checks.append(
@@ -77,9 +99,7 @@ def search_ready(checks: list[EnvCheck] | None = None) -> bool:
 
 def search_with_prices_ready(checks: list[EnvCheck] | None = None) -> bool:
     checks = checks or run_env_checks()
-    return search_ready(checks) and any(
-        c.name == "FINCH_KROGER_LOCATION_ID" and c.status == CheckStatus.OK for c in checks
-    )
+    return search_ready(checks) and resolve_location_id() is not None
 
 
 def format_check_line(check: EnvCheck) -> str:
