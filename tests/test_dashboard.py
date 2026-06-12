@@ -187,6 +187,7 @@ class TestDashboardHTTP:
         assert response.status_code == 200
         assert "/storage" in response.text
         assert "/vulture" in response.text
+        assert "/actions" in response.text
         assert "/advanced" in response.text
 
     # ── Advanced Ops (/advanced) ──────────────────────────────────
