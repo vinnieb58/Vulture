@@ -21,6 +21,8 @@ APP_DIR="${APP_DIR:-$HOME/projects/vulture}"
 DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
 DASHBOARD_SERVICE="vulture-dashboard"
 DASHBOARD_HEALTH_URL="http://localhost:8088/health"
+DASHBOARD_HEALTH_WAIT_SECONDS="${DASHBOARD_HEALTH_WAIT_SECONDS:-45}"
+DASHBOARD_HEALTH_POLL_INTERVAL="${DASHBOARD_HEALTH_POLL_INTERVAL:-2}"
 
 NO_BUILD=0
 NO_CACHE=0
@@ -342,13 +344,27 @@ verify_dashboard_health() {
 
     echo ""
     echo "  HTTP check: ${DASHBOARD_HEALTH_URL}"
-    if curl -fsS --max-time 10 "$DASHBOARD_HEALTH_URL"; then
-        echo ""
-    else
-        echo "  ERROR: dashboard health check failed: ${DASHBOARD_HEALTH_URL}" >&2
-        docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
-        exit 1
-    fi
+    echo "  Waiting up to ${DASHBOARD_HEALTH_WAIT_SECONDS}s for dashboard startup (Docker HEALTHCHECK start-period is 20s)"
+
+    local waited=0
+    while [[ $waited -lt $DASHBOARD_HEALTH_WAIT_SECONDS ]]; do
+        if curl -fsS --max-time 5 "$DASHBOARD_HEALTH_URL" 2>/dev/null; then
+            echo ""
+            return 0
+        fi
+
+        if (( waited == 0 )); then
+            echo "  Dashboard not ready yet; retrying every ${DASHBOARD_HEALTH_POLL_INTERVAL}s..."
+        fi
+
+        sleep "$DASHBOARD_HEALTH_POLL_INTERVAL"
+        waited=$((waited + DASHBOARD_HEALTH_POLL_INTERVAL))
+        echo "  Still waiting... (${waited}s / ${DASHBOARD_HEALTH_WAIT_SECONDS}s)"
+    done
+
+    echo "  ERROR: dashboard health check failed after ${DASHBOARD_HEALTH_WAIT_SECONDS}s: ${DASHBOARD_HEALTH_URL}" >&2
+    docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+    exit 1
 }
 
 check_stack_health() {
