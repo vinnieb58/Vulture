@@ -204,7 +204,10 @@ rebuild_docker_stacks() {
         exit 1
     fi
 
-    "$REBUILD_DOCKER_SCRIPT"
+    if ! "$REBUILD_DOCKER_SCRIPT"; then
+        echo "  ERROR: Docker stack rebuild failed; dashboard may not have been rebuilt" >&2
+        exit 1
+    fi
 }
 
 show_final_status() {
