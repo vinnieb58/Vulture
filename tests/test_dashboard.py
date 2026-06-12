@@ -364,6 +364,36 @@ class TestDockerComposeStorageMounts:
         assert "/mnt/storage:/mnt/storage:ro" in text
 
 
+class TestDashboardDockerfile:
+    DOCKERFILE_PATH = DASHBOARD_DIR / "Dockerfile"
+    APP_PATH = DASHBOARD_DIR / "app.py"
+
+    def test_dockerfile_copies_all_app_local_imports(self):
+        app_source = self.APP_PATH.read_text(encoding="utf-8")
+        dockerfile = self.DOCKERFILE_PATH.read_text(encoding="utf-8")
+
+        local_modules = {
+            path.stem
+            for path in DASHBOARD_DIR.glob("*.py")
+            if path.name != "app.py"
+        }
+        imported = set(re.findall(r"^from (\w+) import", app_source, re.MULTILINE))
+        imported |= set(re.findall(r"^import (\w+)", app_source, re.MULTILINE))
+        required = sorted(local_modules & imported)
+
+        copied = set(re.findall(r"COPY ([^\n]+) \./", dockerfile))
+        copied_modules = {
+            name.removesuffix(".py")
+            for block in copied
+            for name in block.split()
+            if name.endswith(".py")
+        }
+
+        missing = [name for name in required if name not in copied_modules]
+        assert not missing, (
+            "dashboard/Dockerfile must COPY every local module imported by app.py; "
+            f"missing: {missing}"
+        )
 class TestHostCommands:
     def test_service_check_uses_systemctl_states(self):
         with patch("host_status.systemctl_unit_exists", return_value=True):
