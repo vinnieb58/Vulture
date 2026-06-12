@@ -123,16 +123,30 @@ restart_systemd_services() {
     echo "  Restarted: $VULTURE_SCHEDULER_TIMER"
 }
 
+STORAGE_MOUNTPOINTS=(
+    /mnt/storage
+    /mnt/storage/microsd
+    /mnt/storage/toshiba_ext
+    /mnt/storage/portable_beast
+    /mnt/storage/pelican_backup
+    /mnt/storage/raven_nvme
+    /mnt/storage/roost_spinning_0
+)
+
 ensure_storage_mountpoints() {
+    local path
+
     section "Ensuring stable storage mountpoint directories"
-    sudo mkdir -p \
-        /mnt/storage \
-        /mnt/storage/microsd \
-        /mnt/storage/toshiba_ext \
-        /mnt/storage/portable_beast \
-        /mnt/storage/pelican_backup \
-        /mnt/storage/raven_nvme \
-        /mnt/storage/roost_spinning_0
+    for path in "${STORAGE_MOUNTPOINTS[@]}"; do
+        if [[ -e "$path" && ! -d "$path" ]]; then
+            echo "  ERROR: ${path} exists but is not a directory" >&2
+            exit 1
+        fi
+        if ! sudo mkdir -p "$path"; then
+            echo "  ERROR: failed to create mountpoint directory: ${path}" >&2
+            exit 1
+        fi
+    done
     echo "  Mountpoint directories present (drives may be unplugged)"
 }
 

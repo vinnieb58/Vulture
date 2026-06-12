@@ -112,16 +112,30 @@ needs_storage_mountpoints() {
     is_dashboard_compose_file "$compose_file"
 }
 
+STORAGE_MOUNTPOINTS=(
+    /mnt/storage
+    /mnt/storage/microsd
+    /mnt/storage/toshiba_ext
+    /mnt/storage/portable_beast
+    /mnt/storage/pelican_backup
+    /mnt/storage/raven_nvme
+    /mnt/storage/roost_spinning_0
+)
+
 ensure_storage_mountpoints() {
+    local path
+
     section "Ensuring stable storage mountpoint directories"
-    sudo mkdir -p \
-        /mnt/storage \
-        /mnt/storage/microsd \
-        /mnt/storage/toshiba_ext \
-        /mnt/storage/portable_beast \
-        /mnt/storage/pelican_backup \
-        /mnt/storage/raven_nvme \
-        /mnt/storage/roost_spinning_0
+    for path in "${STORAGE_MOUNTPOINTS[@]}"; do
+        if [[ -e "$path" && ! -d "$path" ]]; then
+            echo "  ERROR: ${path} exists but is not a directory" >&2
+            exit 1
+        fi
+        if ! sudo mkdir -p "$path"; then
+            echo "  ERROR: failed to create mountpoint directory: ${path}" >&2
+            exit 1
+        fi
+    done
     echo "  Mountpoint directories present (drives may be unplugged)"
 }
 
@@ -129,34 +143,59 @@ dashboard_container_id() {
     docker compose -f "$DASHBOARD_COMPOSE_FILE" ps -q "$DASHBOARD_SERVICE" 2>/dev/null | head -1 || true
 }
 
-dashboard_image_ref() {
-    local image_id
-    image_id="$(docker compose -f "$DASHBOARD_COMPOSE_FILE" images -q "$DASHBOARD_SERVICE" 2>/dev/null | head -1 || true)"
-    if [[ -n "$image_id" ]]; then
-        docker image inspect --format '{{.Id}} {{if .RepoTags}}{{index .RepoTags 0}}{{else}}<untagged>{{end}}' "$image_id" 2>/dev/null || echo "$image_id"
+dashboard_image_id() {
+    docker compose -f "$DASHBOARD_COMPOSE_FILE" images -q "$DASHBOARD_SERVICE" 2>/dev/null | head -1 || true
+}
+
+dashboard_image_tag() {
+    local image_id="$1"
+    if [[ -z "$image_id" ]]; then
+        echo "(not built yet)"
         return 0
     fi
-    echo "(image not built yet)"
+    docker image inspect --format '{{if .RepoTags}}{{index .RepoTags 0}}{{else}}<untagged>{{end}}' "$image_id" 2>/dev/null || echo unknown
 }
 
 print_dashboard_deploy_state() {
     local label="$1"
-    local container_id image_line created
+    local compose_cmd="${2:-}"
+    local container_id image_id image_tag created started status running_for
 
     echo ""
     echo "  ${label}:"
     echo "    compose file: ${DASHBOARD_COMPOSE_FILE}"
     echo "    service:      ${DASHBOARD_SERVICE}"
-    echo "    image:        $(dashboard_image_ref)"
+    if [[ -n "$compose_cmd" ]]; then
+        echo "    compose cmd:  ${compose_cmd}"
+    fi
+
+    image_id="$(dashboard_image_id)"
+    if [[ -n "$image_id" ]]; then
+        image_tag="$(dashboard_image_tag "$image_id")"
+        echo "    image id:     ${image_id}"
+        echo "    image tag:    ${image_tag}"
+    else
+        echo "    image id:     (not built yet)"
+        echo "    image tag:    (n/a)"
+    fi
 
     container_id="$(dashboard_container_id)"
     if [[ -n "$container_id" ]]; then
         created="$(docker inspect --format '{{.Created}}' "$container_id" 2>/dev/null || echo unknown)"
+        started="$(docker inspect --format '{{.State.StartedAt}}' "$container_id" 2>/dev/null || echo unknown)"
+        status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || echo unknown)"
+        running_for="$(docker ps --filter "id=${container_id}" --format '{{.RunningFor}}' 2>/dev/null | head -1 || echo unknown)"
         echo "    container id: ${container_id}"
         echo "    created:      ${created}"
+        echo "    started:      ${started}"
+        echo "    status:       ${status}"
+        echo "    running for:  ${running_for}"
     else
         echo "    container id: (not running)"
         echo "    created:      (n/a)"
+        echo "    started:      (n/a)"
+        echo "    status:       (n/a)"
+        echo "    running for:  (n/a)"
     fi
 }
 
@@ -179,8 +218,20 @@ rebuild_dashboard_stack() {
     print_dashboard_deploy_state "Before dashboard deploy"
 
     if [[ $NO_BUILD -eq 1 ]]; then
-        docker compose -f "$DASHBOARD_COMPOSE_FILE" up -d --force-recreate "$DASHBOARD_SERVICE"
+        local up_cmd=(
+            docker compose -f "$DASHBOARD_COMPOSE_FILE"
+            up -d --force-recreate "$DASHBOARD_SERVICE"
+        )
+        echo ""
+        echo "  Up command: ${up_cmd[*]}"
+        if ! "${up_cmd[@]}"; then
+            echo "  ERROR: dashboard recreate failed" >&2
+            docker compose -f "$DASHBOARD_COMPOSE_FILE" ps 2>&1 || true
+            docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+            exit 1
+        fi
         echo "  Restarted dashboard (no build)"
+        print_dashboard_deploy_state "After dashboard deploy" "${up_cmd[*]}"
     else
         local build_args_file
         build_args_file="$(mktemp)"
@@ -194,7 +245,11 @@ rebuild_dashboard_stack() {
 
         echo ""
         echo "  Build command: ${build_cmd[*]}"
-        "${build_cmd[@]}"
+        if ! "${build_cmd[@]}"; then
+            rm -f "$build_args_file"
+            echo "  ERROR: dashboard image build failed" >&2
+            exit 1
+        fi
 
         local up_cmd=(
             docker compose -f "$DASHBOARD_COMPOSE_FILE"
@@ -202,14 +257,21 @@ rebuild_dashboard_stack() {
             up -d --force-recreate "$DASHBOARD_SERVICE"
         )
         echo "  Up command: ${up_cmd[*]}"
-        "${up_cmd[@]}"
+        if ! "${up_cmd[@]}"; then
+            rm -f "$build_args_file"
+            echo "  ERROR: dashboard container recreate failed" >&2
+            docker compose -f "$DASHBOARD_COMPOSE_FILE" ps 2>&1 || true
+            docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+            exit 1
+        fi
 
         rm -f "$build_args_file"
-        echo "  Dashboard image rebuilt and container recreated"
+        print_dashboard_deploy_state "After dashboard deploy" "${build_cmd[*]} && ${up_cmd[*]}"
     fi
 
-    print_dashboard_deploy_state "After dashboard deploy"
     verify_dashboard_health
+    echo ""
+    echo "  Dashboard rebuilt and recreated successfully"
 }
 
 rebuild_generic_stack() {
