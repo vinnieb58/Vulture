@@ -16,7 +16,7 @@ services:
       - "8088:8088"
     pid: host
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data
       - ./logs:/app/logs:ro
       - /:/host/root:ro
       - /proc:/host/proc:ro

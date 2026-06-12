@@ -35,6 +35,7 @@ from host_status import (
     status_display_class,
 )
 from log_readers import LOG_PATH, read_log_snapshot
+from raven_metrics_history import sample_and_get_peaks
 from vulture_runtime import get_vulture_runtime
 
 AUTO_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_AUTO_REFRESH_SECONDS", "30"))
@@ -67,6 +68,7 @@ def _compute_raven_card(
     raven: dict[str, Any],
     services: list[ServiceStatus],
     docker: DockerSnapshot,
+    metrics_peaks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plain-English Raven health card for the Nest overview."""
     # Actionable failed units drive the FAIL status.  Ignored units (e.g.
@@ -117,6 +119,7 @@ def _compute_raven_card(
         "load_average": raven.get("load_average"),
         "memory": mem_str,
         "containers_running": docker.running_count,
+        "peaks": metrics_peaks or {},
     }
 
 
@@ -277,6 +280,7 @@ def _collect_data() -> tuple[
     logs = read_log_snapshot()
     db = read_db_snapshot(log_lines=logs.get("lines", []))
     raven = get_raven_health()
+    metrics_peaks = sample_and_get_peaks()
     services = get_service_statuses()
     storage = get_storage_status()
     for mount in storage:
@@ -287,7 +291,7 @@ def _collect_data() -> tuple[
         )
     docker = get_docker_snapshot()
     vulture = get_vulture_runtime(log_lines=logs.get("lines", []))
-    return refreshed_at, logs, db, raven, services, storage, docker, vulture
+    return refreshed_at, logs, db, raven, metrics_peaks, services, storage, docker, vulture
 
 
 def _build_warnings(
@@ -373,11 +377,11 @@ async def scheduler_health() -> JSONResponse:
 @app.get("/", response_class=HTMLResponse)
 async def nest_overview(request: Request) -> HTMLResponse:
     """Nest Overview — tablet-friendly summary with plain-English status."""
-    refreshed_at, logs, db, raven, services, storage, docker, vulture = _collect_data()
+    refreshed_at, logs, db, raven, metrics_peaks, services, storage, docker, vulture = _collect_data()
     warnings = _build_warnings(db, logs, raven, vulture, services, storage, docker)
 
     nest = {
-        "raven": _compute_raven_card(raven, services, docker),
+        "raven": _compute_raven_card(raven, services, docker, metrics_peaks),
         "storage": _compute_storage_card(storage),
         "vulture": _compute_vulture_card(vulture, db),
         "network": _compute_network_card(raven),
@@ -448,7 +452,7 @@ async def vulture_detail(request: Request) -> HTMLResponse:
 @app.get("/advanced", response_class=HTMLResponse)
 async def advanced_ops(request: Request) -> HTMLResponse:
     """Raven Ops — original dense operational view for troubleshooting."""
-    refreshed_at, logs, db, raven, services, storage, docker, vulture = _collect_data()
+    refreshed_at, logs, db, raven, metrics_peaks, services, storage, docker, vulture = _collect_data()
     warnings = _build_warnings(db, logs, raven, vulture, services, storage, docker)
 
     context = {
