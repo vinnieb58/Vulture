@@ -563,3 +563,203 @@ class TestSetupLocationWarning:
         loc = next(c for c in checks if c.name == "FINCH_KROGER_LOCATION_ID")
         assert loc.status == CheckStatus.MISSING
         assert "finch.locations" in loc.message
+
+
+class TestTokenStore:
+    def test_save_tokens_sets_mode_600(self, tmp_path: Path):
+        from finch.token_store import load_tokens, save_tokens_from_response
+
+        token_path = tmp_path / "finch_tokens.json"
+        with patch("finch.token_store.os.chmod") as mock_chmod:
+            save_tokens_from_response(
+                {
+                    "access_token": "access-abc",
+                    "refresh_token": "refresh-xyz",
+                    "expires_in": 1800,
+                    "token_type": "bearer",
+                },
+                tokens_path=token_path,
+            )
+            mock_chmod.assert_called_once_with(token_path, 0o600)
+
+        stored = load_tokens(token_path)
+        assert stored is not None
+        assert stored.access_token == "access-abc"
+        assert stored.refresh_token == "refresh-xyz"
+
+    def test_token_expiry_detection(self):
+        from datetime import datetime, timedelta, timezone
+
+        from finch.token_store import StoredTokens
+
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        tokens = StoredTokens(access_token="a", expires_in=3600, saved_at=old)
+        assert tokens.is_expired()
+
+    def test_resolve_user_access_token_prefers_env(self, monkeypatch, tmp_path: Path):
+        from finch.token_store import resolve_user_access_token, save_tokens_from_response
+
+        token_path = tmp_path / "finch_tokens.json"
+        save_tokens_from_response({"access_token": "from-file"}, tokens_path=token_path)
+        monkeypatch.setenv("FINCH_KROGER_USER_ACCESS_TOKEN", "from-env")
+        assert resolve_user_access_token(token_path) == "from-env"
+
+
+class TestAuth:
+    def test_auth_exchange_and_save(self, monkeypatch, tmp_path: Path, capsys):
+        from finch.auth import run_auth_flow
+
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_ID", "cid")
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_SECRET", "secret")
+        monkeypatch.setenv("FINCH_KROGER_REDIRECT_URI", "http://localhost:8765/callback")
+
+        mock_client = MagicMock()
+        mock_client.oauth.redirect_uri = "http://localhost:8765/callback"
+        mock_client.build_authorize_url.return_value = "https://api.kroger.com/v1/connect/oauth2/authorize?test=1"
+        mock_client.exchange_authorization_code_full.return_value = {
+            "access_token": "user-access-token-secret",
+            "refresh_token": "user-refresh-token-secret",
+            "expires_in": 1800,
+        }
+
+        with patch("finch.auth.load_kroger_client_from_env", return_value=mock_client):
+            with patch("finch.auth.FINCH_TOKENS_PATH", tmp_path / "finch_tokens.json"):
+                with patch("finch.auth.save_tokens_from_response") as mock_save:
+                    rc = run_auth_flow(input_fn=lambda _: "auth-code-123")
+
+        assert rc == 0
+        mock_client.exchange_authorization_code_full.assert_called_once_with("auth-code-123")
+        mock_save.assert_called_once()
+        out = capsys.readouterr().out
+        assert "authorize" in out.lower() or "Open this URL" in out
+        assert "user-access-token-secret" not in out
+        assert "user-refresh-token-secret" not in out
+
+    def test_refresh_user_token_mocked(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 1800},
+                    url="https://api.kroger.com/v1/connect/oauth2/token",
+                )
+            ]
+        )
+        oauth = KrogerOAuthConfig(
+            client_id="c",
+            client_secret="s",
+            redirect_uri="http://localhost/cb",
+        )
+        client = KrogerClient(oauth, session=session)
+        payload = client.refresh_user_token("old-refresh")
+        assert payload["access_token"] == "new-access"
+        assert session.calls[0]["data"]["grant_type"] == "refresh_token"
+        assert "secret" not in str(session.calls[0].get("headers", {}))
+
+
+class TestCart:
+    def test_resolve_cart_item(self, alias_db: Path):
+        from finch.cart_ops import resolve_cart_item
+
+        attempt = resolve_cart_item("eggs", db_path=alias_db)
+        assert attempt.upc == "0001111081708"
+        assert attempt.quantity == 1
+
+    def test_cart_guard_live_cart_off(self, monkeypatch, alias_db: Path):
+        from finch.cart_ops import CartGuardError, execute_cart_add, resolve_cart_item
+
+        monkeypatch.delenv("FINCH_LIVE_CART", raising=False)
+        attempt = resolve_cart_item("eggs", db_path=alias_db)
+        client = MagicMock()
+        with pytest.raises(CartGuardError):
+            execute_cart_add(attempt, client)
+
+    def test_cart_guard_no_token(self, monkeypatch):
+        from finch.cart_ops import CartGuardError, require_saved_token
+
+        monkeypatch.delenv("FINCH_KROGER_USER_ACCESS_TOKEN", raising=False)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value=None):
+            with pytest.raises(CartGuardError):
+                require_saved_token()
+
+    def test_cart_add_request_mocked(self, monkeypatch, alias_db: Path):
+        from finch.cart_ops import execute_cart_add, resolve_cart_item
+
+        monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        attempt = resolve_cart_item("eggs", db_path=alias_db)
+        session = _FakeSession(
+            [_FakeResponse(200, {"status": "ok"}, url="https://api.kroger.com/v1/cart/add")]
+        )
+        oauth = KrogerOAuthConfig(client_id="c", client_secret="s")
+        client = KrogerClient(oauth, session=session, user_access_token="user-tok")
+        execute_cart_add(attempt, client)
+        call = session.calls[0]
+        assert call["method"] == "PUT"
+        assert call["json"]["items"][0]["upc"] == "0001111081708"
+        assert call["json"]["items"][0]["quantity"] == 1
+        auth = call["headers"]["Authorization"]
+        assert auth.startswith("Bearer ")
+        assert "user-tok" in auth
+
+    def test_ensure_fresh_user_token_refreshes_when_expired(self, tmp_path: Path):
+        from datetime import datetime, timedelta, timezone
+
+        from finch.cart_ops import ensure_fresh_user_token
+        from finch.token_store import save_tokens_from_response
+
+        token_path = tmp_path / "finch_tokens.json"
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        save_tokens_from_response(
+            {
+                "access_token": "expired-access",
+                "refresh_token": "keep-refresh",
+                "expires_in": 3600,
+                "saved_at": old_time,
+            },
+            tokens_path=token_path,
+        )
+        # overwrite saved_at since save_tokens_from_response sets now
+        import json
+
+        data = json.loads(token_path.read_text())
+        data["saved_at"] = old_time
+        token_path.write_text(json.dumps(data))
+
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {"access_token": "fresh-access", "expires_in": 1800},
+                    url="https://api.kroger.com/v1/connect/oauth2/token",
+                )
+            ]
+        )
+        oauth = KrogerOAuthConfig(client_id="c", client_secret="s")
+        client = KrogerClient(oauth, session=session)
+        token = ensure_fresh_user_token(client, tokens_path=token_path)
+        assert token == "fresh-access"
+
+    def test_cart_test_validation_only_when_live_cart_off(self, monkeypatch, alias_db: Path, capsys):
+        from finch.cart.__main__ import cmd_test
+
+        monkeypatch.delenv("FINCH_LIVE_CART", raising=False)
+        with patch("finch.cart.__main__.pick_test_alias", return_value="eggs"):
+            with patch("finch.cart.__main__.resolve_cart_item") as mock_resolve:
+                        from finch.cart_ops import CartAttempt
+                        from finch.models import MatchStatus
+
+                        mock_resolve.return_value = CartAttempt(
+                            requested_item="eggs",
+                            normalized_name="eggs",
+                            alias_name="Kroger Eggs",
+                            upc="0001111081708",
+                            product_id=None,
+                            quantity=1,
+                            modality="pickup",
+                            status=MatchStatus.EXACT_DEFAULT,
+                        )
+                        rc = cmd_test()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "validation ok" in out
+        assert "FINCH_LIVE_CART is off" in out

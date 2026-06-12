@@ -56,6 +56,13 @@ def print_setup_report() -> int:
         print("  2. python -m finch.locations <your_zip> --save  (after credentials)")
         print("  3. python -m finch.preview \"eggs, milk\"")
     print("  (Later) OAuth + FINCH_LIVE_CART for cart add")
+    if search_with_prices_ready(checks):
+        print()
+        print("Cart flow (after aliases pinned):")
+        print("  python -m finch.auth")
+        print("  set FINCH_LIVE_CART=true in .env")
+        print("  python -m finch.cart test")
+        print("  python -m finch.cart add eggs")
 
     missing_required = [c for c in checks if c.status == CheckStatus.MISSING]
     if missing_required and not search_ready(checks):

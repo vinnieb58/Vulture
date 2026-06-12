@@ -2,94 +2,91 @@
 
 _Last updated: 2026-06-11_
 
-Finch is a small Aviary module that turns a plain-English grocery list into preferred Kroger product matches. It starts with **dry-run preview** and **live product search** — no checkout, no payment automation.
+Finch is a small Aviary module that turns a plain-English grocery list into preferred Kroger product matches. It supports dry-run preview, live search, alias pinning, and **guarded cart add** — no checkout or payment automation.
 
 ## Operator flow (recommended)
 
-Build your preferred Kroger store and item map **before** touching OAuth or cart writing.
+```text
+setup → locations → search → alias → auth → FINCH_LIVE_CART=true → cart add → review in Kroger app
+```
 
 ### Step 1 — Add Kroger client ID and secret
 
-Copy `.env.example` to `.env` and fill in:
+Copy `.env.example` to `.env`:
 
 ```bash
 FINCH_KROGER_CLIENT_ID=your_client_id
 FINCH_KROGER_CLIENT_SECRET=your_client_secret
+FINCH_KROGER_REDIRECT_URI=http://localhost:8765/callback
 ```
 
-Register at [Kroger Developer Portal](https://developer.kroger.com/). You do **not** need to look up a location ID manually.
-
-Verify with:
+Register at [Kroger Developer Portal](https://developer.kroger.com/). Set the same redirect URI in your Kroger app settings.
 
 ```bash
 python -m finch.setup
 ```
 
-### Step 2 — Find stores near your ZIP
+### Step 2 — Find and save your store
 
 ```bash
 python -m finch.locations 77406
-python -m finch.locations --zip 77406
-python -m finch.locations 77406 --json
-```
-
-Example output:
-
-```text
-Stores near ZIP 77406 (radius 20 mi)
-Found 2 result(s):
-
-  [1] Kroger
-      address: 123 Main St
-      city/state/zip: Richmond, TX 77406
-      locationId: 01400441
-      pickup (dept 94): yes
-      phone: (281) 555-1234
-
-  [2] Kroger Marketplace
-      address: 456 FM 1092
-      city/state/zip: Missouri City, TX 77459
-      locationId: 01400442
-      pickup (dept 94): no
-```
-
-### Step 3 — Save your preferred pickup store
-
-```bash
 python -m finch.locations 77406 --save --pick 1 --confirm
 ```
 
-This writes `data/finch_config.json` (gitignored). Finch reads `.env` first, then falls back to this file — you never need to paste a location ID by hand.
+Saves to `data/finch_config.json` (gitignored). No manual location ID lookup.
 
-Re-run setup to confirm:
-
-```bash
-python -m finch.setup
-# FINCH_KROGER_LOCATION_ID: is set (data/finch_config.json)
-```
-
-### Step 4 — Live product search and pin aliases
+### Step 3 — Search and pin preferred products
 
 ```bash
 python -m finch.search "eggs"
-python -m finch.search "coffee pods"
 python -m finch.search "eggs" --save-alias eggs --pick 1 --confirm
+python -m finch.preview "eggs, milk"
 ```
 
-Preview your map anytime (no auth):
+### Step 4 — OAuth (one-time browser login)
 
 ```bash
-python -m finch.preview "eggs, milk, coffee pods"
+python -m finch.auth
 ```
 
-### Step 5 — Later: OAuth and cart add
+1. Open the printed authorize URL in your browser.
+2. Sign in to Kroger and approve access.
+3. Paste the authorization code from the redirect URL.
 
-Only after your store and alias map are solid:
+Tokens save to `data/finch_tokens.json` (gitignored, mode 600). Finch never prints access tokens, refresh tokens, or auth headers.
 
-1. Complete Kroger OAuth authorization code flow (browser login).
-2. Set `FINCH_KROGER_USER_ACCESS_TOKEN` (or a future refresh-token helper).
-3. Set `FINCH_LIVE_CART=true` to allow guarded cart add.
-4. Finish checkout manually in the Kroger app — Finch never pays or places orders.
+### Step 5 — Enable cart add and smoke test
+
+Add to `.env`:
+
+```bash
+FINCH_LIVE_CART=true
+```
+
+```bash
+python -m finch.cart test
+python -m finch.cart add eggs
+python -m finch.cart add "coffee pods"
+```
+
+Example cart output:
+
+```text
+Cart add attempt:
+  requested: 'eggs'
+  normalized: 'eggs'
+  alias: 'Kroger Grade A Large Eggs 12 ct'
+  upc: 0001111081708
+  quantity: 1
+  modality: pickup
+  result: ok (ok)
+
+Review and checkout manually in the Kroger app.
+```
+
+### Step 6 — Review in Kroger app
+
+Finch adds items to your cart only. **You** complete checkout and payment in the Kroger app or website.
 
 ---
 
@@ -99,55 +96,60 @@ Only after your store and alias map are solid:
 |---------|-------------|
 | Dry-run preview | Automated checkout |
 | Store finder by ZIP | Storing secrets in git |
-| Live product search (client credentials) | Logging tokens or full auth headers |
-| Alias mapping (SQLite + YAML seed) | Payment or order placement |
-| Guarded cart add (`FINCH_LIVE_CART=true`, later) | |
+| Live product search | Logging tokens or auth headers |
+| Guarded cart add (`FINCH_LIVE_CART=true`) | Payment or order placement |
+| OAuth token save (`data/finch_tokens.json`) | Printing tokens to console |
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `python -m finch.setup` | Check configuration |
+| `python -m finch.locations 77406 --save --pick 1 --confirm` | Save store |
+| `python -m finch.search "eggs" --save-alias eggs --pick 1 --confirm` | Pin product |
+| `python -m finch.preview "eggs, milk"` | Dry-run alias map |
+| `python -m finch.auth` | Browser OAuth + token save |
+| `python -m finch.cart test` | Smoke test (validation or one safe add) |
+| `python -m finch.cart add eggs` | Add one alias-resolved item |
 
 ## Module layout
 
 ```text
 finch/
-  __init__.py
-  config.py           # FINCH_* paths and flags (no secrets)
-  local_config.py     # data/finch_config.json (saved store location)
-  env_check.py        # Setup validation (no secret values printed)
-  env_util.py         # load .env for CLIs
-  models.py
-  parser.py
-  aliases.py
-  preview.py          # python -m finch.preview
-  setup.py            # python -m finch.setup
-  locations.py        # python -m finch.locations
-  search.py           # python -m finch.search
-  kroger_client.py
-  data/
-    default_aliases.yaml
+  auth.py             # python -m finch.auth
+  cart_ops.py         # alias resolution + cart guards
+  cart/__main__.py    # python -m finch.cart
+  token_store.py      # data/finch_tokens.json
+  local_config.py     # data/finch_config.json
+  ...
 data/
   finch_config.json   # saved store (gitignored)
+  finch_tokens.json   # OAuth tokens (gitignored, chmod 600)
   finch_aliases.db    # alias map (gitignored)
 ```
 
 ## Environment variables
 
-Add to repo-root `.env` (never commit `.env`):
-
-| Variable | Step | Purpose |
+| Variable | When | Purpose |
 |----------|------|---------|
-| `FINCH_KROGER_CLIENT_ID` | 1 | Kroger developer app client ID |
-| `FINCH_KROGER_CLIENT_SECRET` | 1 | Kroger developer app client secret |
-| `FINCH_KROGER_LOCATION_ID` | Optional | Override saved store from `finch_config.json` |
-| `FINCH_KROGER_REDIRECT_URI` | 5 | OAuth callback (cart add only) |
-| `FINCH_KROGER_USER_ACCESS_TOKEN` | 5 | User token after browser OAuth |
-| `FINCH_LIVE_CART` | 5 | Set `true` to allow cart add (default off) |
+| `FINCH_KROGER_CLIENT_ID` | Step 1 | Kroger app client ID |
+| `FINCH_KROGER_CLIENT_SECRET` | Step 1 | Kroger app client secret |
+| `FINCH_KROGER_REDIRECT_URI` | Step 4 | OAuth callback URL |
+| `FINCH_LIVE_CART` | Step 5 | Must be `true` for cart add |
+| `FINCH_KROGER_USER_ACCESS_TOKEN` | Optional | Override saved tokens (debug only) |
 
-**Location ID:** use `python -m finch.locations <zip> --save` instead of setting manually.
+Location ID: use `finch.locations --save`, not manual `.env` entry.
+
+## Token refresh
+
+If Kroger returns a `refresh_token`, Finch saves it in `finch_tokens.json`. Before cart add, Finch refreshes expired access tokens automatically. If refresh fails, run `python -m finch.auth` again.
 
 ## Security notes
 
-- Secrets belong in `.env` only; `.env` is gitignored.
-- `finch.setup`, `finch.locations`, and `finch.search` never print client secrets or tokens.
-- Saved store info in `data/finch_config.json` is non-secret and gitignored.
-- Keep `FINCH_LIVE_CART` off while building your alias map.
+- Client secret stays in `.env` only.
+- User tokens stay in `data/finch_tokens.json` only (mode 600).
+- No command prints secrets, tokens, customer IDs, or full Authorization headers.
+- Keep `FINCH_LIVE_CART=false` until aliases and store are verified.
 
 ## Testing
 
@@ -155,20 +157,9 @@ Add to repo-root `.env` (never commit `.env`):
 pytest tests/test_finch.py -v
 ```
 
-All Kroger HTTP calls are mocked in tests — no live network required.
-
-## What is mocked vs live
-
-| Component | Default |
-|-----------|---------|
-| Parser, aliases, preview | Live (local) |
-| `finch.setup` | Live (reads .env + finch_config.json) |
-| `finch.locations` | Live when credentials configured |
-| `finch.search` | Live when credentials + store configured |
-| Kroger API in unit tests | Mocked |
-| Cart add | Guarded — off until Step 5 |
+All Kroger HTTP and OAuth flows are mocked in tests.
 
 ## Related docs
 
-- `docs/current/AVIARY_PROJECT_CONTEXT.md` — Aviary platform overview
-- `docs/current/CODEBASE_STATUS.md` — repo entrypoints and test commands
+- `docs/current/AVIARY_PROJECT_CONTEXT.md`
+- `docs/current/CODEBASE_STATUS.md`

@@ -205,9 +205,15 @@ class KrogerClient:
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
         self._client_token: str | None = None
-        self._user_access_token = user_access_token or os.getenv(
-            "FINCH_KROGER_USER_ACCESS_TOKEN", ""
-        ).strip() or None
+        self._user_access_token = user_access_token or self._resolve_initial_user_token()
+
+    def _resolve_initial_user_token(self) -> str | None:
+        from finch.token_store import resolve_user_access_token
+
+        return resolve_user_access_token()
+
+    def set_user_access_token(self, token: str) -> None:
+        self._user_access_token = token
 
     def build_authorize_url(
         self,
@@ -250,6 +256,10 @@ class KrogerClient:
         return self._client_token
 
     def exchange_authorization_code(self, code: str) -> str:
+        payload = self.exchange_authorization_code_full(code)
+        return str(payload["access_token"])
+
+    def exchange_authorization_code_full(self, code: str) -> dict[str, Any]:
         if not self.oauth.redirect_uri:
             raise KrogerAuthError("FINCH_KROGER_REDIRECT_URI is required for authorization code flow")
         url = f"{self.base_url}{OAUTH_TOKEN_PATH}"
@@ -270,11 +280,37 @@ class KrogerClient:
         if resp.status_code >= 400:
             logger.warning("%s (authorization code)", _safe_log_response(resp))
             raise KrogerAuthError(f"Code exchange failed: HTTP {resp.status_code}")
-        token = resp.json().get("access_token")
+        payload = resp.json()
+        token = payload.get("access_token")
         if not token:
             raise KrogerAuthError("Token response missing access_token")
         self._user_access_token = str(token)
-        return self._user_access_token
+        return payload
+
+    def refresh_user_token(self, refresh_token: str) -> dict[str, Any]:
+        url = f"{self.base_url}{OAUTH_TOKEN_PATH}"
+        resp = self.session.request(
+            "POST",
+            url,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": _basic_auth_header(self.oauth.client_id, self.oauth.client_secret),
+            },
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            logger.warning("%s (refresh token)", _safe_log_response(resp))
+            raise KrogerAuthError(f"Token refresh failed: HTTP {resp.status_code}")
+        payload = resp.json()
+        token = payload.get("access_token")
+        if not token:
+            raise KrogerAuthError("Refresh response missing access_token")
+        self._user_access_token = str(token)
+        return payload
 
     def _product_token(self) -> str:
         if self._client_token:

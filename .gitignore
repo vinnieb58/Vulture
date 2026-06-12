@@ -13,6 +13,7 @@ __pycache__/
 
 # Finch local operator config (store location, non-secret)
 data/finch_config.json
+data/finch_tokens.json
 
 # Editor / OS
 .vscode/
