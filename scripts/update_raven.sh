@@ -123,8 +123,11 @@ restart_systemd_services() {
     echo "  Restarted: $VULTURE_SCHEDULER_TIMER"
 }
 
-STORAGE_MOUNTPOINTS=(
-    /mnt/storage
+STORAGE_MOUNTPOINT_PARENT="/mnt/storage"
+
+# Optional per-drive paths under /mnt/storage. Unplugged or autofs-managed drives
+# must not block dashboard deploy — docker-compose only bind-mounts the parent.
+OPTIONAL_STORAGE_MOUNTPOINTS=(
     /mnt/storage/microsd
     /mnt/storage/toshiba_ext
     /mnt/storage/portable_beast
@@ -137,17 +140,30 @@ ensure_storage_mountpoints() {
     local path
 
     section "Ensuring stable storage mountpoint directories"
-    for path in "${STORAGE_MOUNTPOINTS[@]}"; do
+
+    if ! sudo mkdir -p "$STORAGE_MOUNTPOINT_PARENT"; then
+        echo "  ERROR: failed to create required mount parent: ${STORAGE_MOUNTPOINT_PARENT}" >&2
+        exit 1
+    fi
+    echo "  Required: ${STORAGE_MOUNTPOINT_PARENT} present"
+
+    for path in "${OPTIONAL_STORAGE_MOUNTPOINTS[@]}"; do
         if [[ -e "$path" && ! -d "$path" ]]; then
-            echo "  ERROR: ${path} exists but is not a directory" >&2
-            exit 1
+            echo "  WARNING: ${path} exists but is not a directory; skipping (optional drive)"
+            continue
         fi
-        if ! sudo mkdir -p "$path"; then
-            echo "  ERROR: failed to create mountpoint directory: ${path}" >&2
-            exit 1
+        if [[ -d "$path" ]]; then
+            echo "  Optional: ${path} already present"
+            continue
+        fi
+        if sudo mkdir -p "$path" 2>/dev/null; then
+            echo "  Optional: ${path} created"
+        else
+            echo "  WARNING: could not create ${path} (drive may be unplugged or autofs-managed); continuing"
         fi
     done
-    echo "  Mountpoint directories present (drives may be unplugged)"
+
+    echo "  Mountpoint setup complete (optional drives may be unplugged)"
 }
 
 REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
