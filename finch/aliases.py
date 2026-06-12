@@ -175,3 +175,32 @@ def ensure_seeded(db_path: Path | None = None, yaml_path: Path | None = None) ->
     init_db(path)
     if not get_all_aliases(path):
         seed_aliases_from_yaml(yaml_path, path)
+
+
+def upsert_alias(entry: AliasEntry, db_path: Path | None = None) -> AliasEntry:
+    """Insert or replace a single alias entry."""
+    path = db_path or ALIASES_DB_PATH
+    init_db(path)
+    with _connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO aliases (
+                alias_key, display_name, kroger_product_id, upc, search_term, notes
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(alias_key) DO UPDATE SET
+                display_name=excluded.display_name,
+                kroger_product_id=excluded.kroger_product_id,
+                upc=excluded.upc,
+                search_term=excluded.search_term,
+                notes=excluded.notes
+            """,
+            (
+                entry.alias_key.strip().lower(),
+                entry.display_name,
+                entry.kroger_product_id,
+                entry.upc,
+                entry.search_term,
+                entry.notes,
+            ),
+        )
+    return entry

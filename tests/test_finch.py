@@ -1,5 +1,5 @@
 """
-Unit tests for Finch grocery parsing, alias matching, preview, and Kroger client.
+Unit tests for Finch grocery parsing, alias matching, preview, setup, search, and Kroger client.
 """
 
 from __future__ import annotations
@@ -16,19 +16,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from finch.aliases import (
     ensure_seeded,
     find_alias_matches,
+    get_alias,
     get_all_aliases,
     init_db,
     seed_aliases_from_yaml,
+    upsert_alias,
 )
+from finch.env_check import CheckStatus, format_check_line, run_env_checks, search_ready
 from finch.kroger_client import (
     KrogerCartDisabledError,
     KrogerClient,
     KrogerOAuthConfig,
+    KrogerProduct,
     load_kroger_client_from_env,
 )
-from finch.models import MatchStatus
+from finch.models import AliasEntry, MatchStatus
 from finch.parser import parse_grocery_text
-from finch.preview import build_preview, format_preview_line, main, resolve_intent
+from finch.preview import build_preview, format_preview_line, main as preview_main, resolve_intent
+from finch.search import (
+    confirm_save,
+    format_product_line,
+    product_to_alias,
+    run_search,
+    save_alias_from_product,
+)
+from finch.setup import print_setup_report
 
 
 MESSY_GROCERY_TEXT = """
@@ -161,7 +173,7 @@ class TestPreview:
             "finch.preview.build_preview",
             return_value=build_preview("eggs", db_path=alias_db),
         ):
-            rc = main(["eggs", "--json"])
+            rc = preview_main(["eggs", "--json"])
         assert rc == 0
         out = capsys.readouterr().out
         data = json.loads(out)
@@ -200,7 +212,7 @@ class TestKrogerClient:
                                 "upc": "0001111081708",
                                 "description": "Kroger Large Eggs",
                                 "brand": "Kroger",
-                                "items": [{"price": {"regular": 2.99}}],
+                                "items": [{"price": {"regular": 2.99}, "size": "12 ct", "upc": "0001111081708"}],
                             }
                         ]
                     },
@@ -212,6 +224,11 @@ class TestKrogerClient:
         assert len(products) == 1
         assert products[0].product_id == "123"
         assert products[0].price == "2.99"
+        assert products[0].size == "12 ct"
+
+    def test_format_price(self):
+        p = KrogerProduct("1", "upc", "Eggs", price="3.5")
+        assert p.format_price() == "$3.50"
 
     def test_add_to_cart_blocked_by_default(self):
         session = _FakeSession([])
@@ -242,3 +259,153 @@ class TestKrogerClient:
         client = KrogerClient(oauth, session=MagicMock())
         with pytest.raises(Exception):
             client.build_authorize_url(state="xyz")
+
+
+class TestEnvCheck:
+    def test_search_not_ready_without_credentials(self, monkeypatch):
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
+        checks = run_env_checks()
+        assert not search_ready(checks)
+        missing = [c for c in checks if c.status == CheckStatus.MISSING]
+        assert any(c.name == "FINCH_KROGER_CLIENT_ID" for c in missing)
+
+    def test_live_cart_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("FINCH_LIVE_CART", raising=False)
+        checks = run_env_checks()
+        cart = next(c for c in checks if c.name == "FINCH_LIVE_CART")
+        assert cart.status == CheckStatus.OK
+        assert "off" in cart.message
+
+    def test_format_check_line_no_secret(self):
+        check = run_env_checks()[0]
+        line = format_check_line(check)
+        assert "secret" not in line.lower() or "not set" in line.lower()
+
+
+class TestSetup:
+    def test_setup_report_missing_credentials(self, monkeypatch, capsys):
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
+        rc = print_setup_report()
+        out = capsys.readouterr().out
+        assert "Finch setup check" in out
+        assert "FINCH_KROGER_CLIENT_ID" in out
+        assert rc == 1
+
+    def test_setup_does_not_print_secret_values(self, monkeypatch, capsys):
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_SECRET", "super-secret-value-12345")
+        monkeypatch.setenv("FINCH_KROGER_CLIENT_ID", "my-client-id")
+        print_setup_report()
+        out = capsys.readouterr().out
+        assert "super-secret-value-12345" not in out
+        assert "my-client-id" not in out
+
+
+class TestSearch:
+    def _sample_products(self) -> list[KrogerProduct]:
+        return [
+            KrogerProduct(
+                product_id="001",
+                upc="0001111081708",
+                description="Kroger Grade A Large Eggs 12 ct",
+                brand="Kroger",
+                size="12 ct",
+                price="2.99",
+            ),
+            KrogerProduct(
+                product_id="002",
+                upc="0001111081709",
+                description="Simple Truth Organic Eggs 12 ct",
+                brand="Simple Truth",
+                size="12 ct",
+                price="4.29",
+            ),
+        ]
+
+    def test_format_product_line(self):
+        line = format_product_line(1, self._sample_products()[0])
+        assert "[1]" in line
+        assert "Kroger Grade A Large Eggs" in line
+        assert "0001111081708" in line
+        assert "$2.99" in line
+        assert "12 ct" in line
+
+    def test_run_search_mocked(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(200, {"access_token": "tok"}, url="https://api.kroger.com/v1/connect/oauth2/token"),
+                _FakeResponse(
+                    200,
+                    {
+                        "data": [
+                            {
+                                "productId": "001",
+                                "upc": "0001111081708",
+                                "description": "Kroger Large Eggs",
+                                "brand": "Kroger",
+                                "items": [{"size": "12 ct", "price": {"regular": 2.99}}],
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        oauth = KrogerOAuthConfig(client_id="c", client_secret="s", location_id="01400441")
+        client = KrogerClient(oauth, session=session)
+        products = run_search("eggs", client=client)
+        assert len(products) == 1
+        assert products[0].size == "12 ct"
+
+    def test_product_to_alias(self):
+        product = self._sample_products()[0]
+        entry = product_to_alias("eggs", product, search_term="eggs")
+        assert entry.alias_key == "eggs"
+        assert entry.upc == "0001111081708"
+        assert entry.kroger_product_id == "001"
+
+    def test_save_alias_requires_confirmation(self, alias_db: Path):
+        product = self._sample_products()[0]
+        with patch("finch.search.get_alias", return_value=None):
+            with patch("finch.search.upsert_alias") as mock_upsert:
+                result = save_alias_from_product(
+                    "eggs",
+                    product,
+                    "eggs",
+                    db_path=alias_db,
+                    confirm=False,
+                    input_fn=lambda _: "n",
+                )
+        assert result is None
+        mock_upsert.assert_not_called()
+
+    def test_save_alias_with_confirm(self, alias_db: Path):
+        product = self._sample_products()[0]
+        saved = save_alias_from_product(
+            "eggs",
+            product,
+            "eggs",
+            db_path=alias_db,
+            confirm=True,
+        )
+        assert saved is not None
+        stored = get_alias("eggs", alias_db)
+        assert stored is not None
+        assert stored.upc == "0001111081708"
+
+    def test_upsert_alias_replaces_existing(self, alias_db: Path):
+        upsert_alias(
+            AliasEntry(alias_key="eggs", display_name="Old Eggs"),
+            alias_db,
+        )
+        upsert_alias(
+            AliasEntry(
+                alias_key="eggs",
+                display_name="New Eggs",
+                upc="999",
+            ),
+            alias_db,
+        )
+        entry = get_alias("eggs", alias_db)
+        assert entry.display_name == "New Eggs"
+        assert entry.upc == "999"

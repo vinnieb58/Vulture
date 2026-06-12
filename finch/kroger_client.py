@@ -53,7 +53,17 @@ class KrogerProduct:
     upc: str | None
     description: str
     brand: str | None = None
+    size: str | None = None
     price: str | None = None
+
+    def format_price(self) -> str | None:
+        if self.price is None:
+            return None
+        try:
+            value = float(self.price)
+            return f"${value:.2f}"
+        except ValueError:
+            return self.price
 
 
 @dataclass(frozen=True)
@@ -100,15 +110,21 @@ def _parse_products_payload(data: dict[str, Any]) -> list[KrogerProduct]:
         if not product_id:
             continue
         price = None
+        size = None
+        upc = item.get("upc")
         items = item.get("items") or []
         if items and isinstance(items[0], dict):
-            price = items[0].get("price", {}).get("regular")
+            first_item = items[0]
+            price = first_item.get("price", {}).get("regular")
+            size = first_item.get("size")
+            upc = upc or first_item.get("upc")
         products.append(
             KrogerProduct(
                 product_id=product_id,
-                upc=item.get("upc"),
+                upc=str(upc) if upc else None,
                 description=str(item.get("description", "")),
                 brand=item.get("brand"),
+                size=str(size) if size else None,
                 price=str(price) if price is not None else None,
             )
         )
