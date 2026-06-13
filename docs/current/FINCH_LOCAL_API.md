@@ -121,7 +121,41 @@ All paths are under `/finch`. Protected routes require header `X-Finch-Key: <FIN
 
 Cart add endpoints return `403` when `FINCH_LIVE_CART` is not enabled.
 
-## Run on Raven (manual smoke)
+## Run on Raven
+
+Set `FINCH_API_KEY` in `.env` before starting (server will exit on startup if missing).
+
+### Production (systemd)
+
+Reference unit file: `deploy/systemd/finch-api.service`.
+
+The service runs as user `vinnieb58`, loads `/home/vinnieb58/projects/vulture/.env`, and binds **localhost only** (`127.0.0.1:8091`).
+
+One-time install from the repo root on Raven:
+
+```bash
+sudo cp deploy/systemd/finch-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now finch-api.service
+```
+
+After code or `.env` changes:
+
+```bash
+sudo systemctl restart finch-api.service
+```
+
+**Systemd smoke commands:**
+
+```bash
+systemctl status finch-api --no-pager -l
+curl http://127.0.0.1:8091/finch/health
+journalctl -u finch-api -n 80 --no-pager
+```
+
+`scripts/update_raven_quick.sh` copies all unit files from `deploy/systemd/` on deploy, but you still need `enable --now` once for a new unit.
+
+### Manual smoke (foreground)
 
 Start the server (localhost only):
 
@@ -135,9 +169,7 @@ Or:
 python -m finch.api
 ```
 
-Set `FINCH_API_KEY` in `.env` before starting (server will exit on startup if missing).
-
-### Smoke commands
+### API smoke commands
 
 Replace `YOUR_KEY` with the value of `FINCH_API_KEY`.
 
