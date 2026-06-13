@@ -276,10 +276,26 @@ class TestKrogerClient:
         with pytest.raises(Exception):
             load_kroger_client_from_env()
 
-    def test_load_from_env_missing_raises_with_real_dotenv_file(
+    def test_load_from_env_loads_temp_dotenv_when_enabled(
         self, monkeypatch, tmp_path: Path, allow_dotenv
     ):
-        """Simulates Raven: delenv alone is not enough if .env reloads credentials."""
+        """With dotenv enabled, credentials in a temp .env are loaded."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "FINCH_KROGER_CLIENT_ID=raven-real-id\nFINCH_KROGER_CLIENT_SECRET=raven-real-secret\n"
+        )
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
+        reset_env_load_state()
+        load_env(dotenv_path=env_file)
+        client = load_kroger_client_from_env()
+        assert client.oauth.client_id == "raven-real-id"
+        assert client.oauth.client_secret == "raven-real-secret"
+
+    def test_load_from_env_missing_raises_when_skip_dotenv(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """FINCH_SKIP_DOTENV ignores a temp .env — missing creds still raise."""
         env_file = tmp_path / ".env"
         env_file.write_text(
             "FINCH_KROGER_CLIENT_ID=raven-real-id\nFINCH_KROGER_CLIENT_SECRET=raven-real-secret\n"
@@ -287,6 +303,8 @@ class TestKrogerClient:
         monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
         monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FINCH_SKIP_DOTENV", "1")
+        reset_env_load_state()
         with pytest.raises(Exception):
             load_kroger_client_from_env()
 
