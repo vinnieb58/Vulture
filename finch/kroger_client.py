@@ -25,6 +25,7 @@ from finch.config import (
     KROGER_BASE_URL,
     KROGER_CART_MODALITY,
 )
+from finch.env_util import load_env
 from finch.local_config import resolve_location_id
 
 logger = logging.getLogger(__name__)
@@ -432,11 +433,6 @@ def load_kroger_client_from_env(
     user_access_token: str | None = None,
 ) -> KrogerClient:
     """Load dotenv from repo root when available, then build a KrogerClient."""
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass
+    load_env()
     oauth = KrogerOAuthConfig.from_env()
     return KrogerClient(oauth, session=session, user_access_token=user_access_token)

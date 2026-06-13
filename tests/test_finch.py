@@ -13,6 +13,28 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from finch.env_util import load_env, reset_env_load_state, skip_dotenv
+
+
+@pytest.fixture(autouse=True)
+def _finch_test_env_isolation(monkeypatch):
+    """Prevent repo .env from contaminating Finch tests on Raven."""
+    monkeypatch.setenv("FINCH_SKIP_DOTENV", "1")
+    reset_env_load_state()
+    yield
+    reset_env_load_state()
+
+
+@pytest.fixture
+def allow_dotenv(monkeypatch):
+    """Opt-in fixture when a test intentionally loads dotenv."""
+    monkeypatch.delenv("FINCH_SKIP_DOTENV", raising=False)
+    reset_env_load_state()
+    yield
+    monkeypatch.setenv("FINCH_SKIP_DOTENV", "1")
+    reset_env_load_state()
+
+
 from finch.aliases import (
     ensure_seeded,
     find_alias_matches,
@@ -254,6 +276,20 @@ class TestKrogerClient:
         with pytest.raises(Exception):
             load_kroger_client_from_env()
 
+    def test_load_from_env_missing_raises_with_real_dotenv_file(
+        self, monkeypatch, tmp_path: Path, allow_dotenv
+    ):
+        """Simulates Raven: delenv alone is not enough if .env reloads credentials."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "FINCH_KROGER_CLIENT_ID=raven-real-id\nFINCH_KROGER_CLIENT_SECRET=raven-real-secret\n"
+        )
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(Exception):
+            load_kroger_client_from_env()
+
     def test_authorize_url_requires_redirect(self):
         oauth = KrogerOAuthConfig(client_id="cid", client_secret="secret")
         client = KrogerClient(oauth, session=MagicMock())
@@ -291,7 +327,26 @@ class TestSetup:
         out = capsys.readouterr().out
         assert "Finch setup check" in out
         assert "FINCH_KROGER_CLIENT_ID" in out
+        assert "[MISSING]" in out
         assert rc == 1
+
+    def test_setup_missing_credentials_with_dotenv_on_disk(
+        self, monkeypatch, tmp_path: Path, capsys, allow_dotenv
+    ):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "FINCH_KROGER_CLIENT_ID=raven-real-id\nFINCH_KROGER_CLIENT_SECRET=raven-real-secret\n"
+        )
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
+        monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FINCH_SKIP_DOTENV", "1")
+        rc = print_setup_report()
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "raven-real-id" not in out
+        assert "raven-real-secret" not in out
+        assert not search_ready(run_env_checks())
 
     def test_setup_does_not_print_secret_values(self, monkeypatch, capsys):
         monkeypatch.setenv("FINCH_KROGER_CLIENT_SECRET", "super-secret-value-12345")
@@ -763,3 +818,101 @@ class TestCart:
         out = capsys.readouterr().out
         assert "validation ok" in out
         assert "FINCH_LIVE_CART is off" in out
+
+
+class TestCartQuantityAndList:
+    def test_resolve_cart_item_parsed_quantity(self, alias_db: Path):
+        from finch.cart_ops import resolve_cart_item
+
+        attempt = resolve_cart_item("2 eggs", db_path=alias_db)
+        assert attempt.quantity == 2
+        assert attempt.upc == "0001111081708"
+
+    def test_resolve_cart_list(self, alias_db: Path):
+        from finch.cart_ops import resolve_cart_list
+
+        result = resolve_cart_list("eggs, milk", db_path=alias_db)
+        assert len(result.succeeded) == 2
+        assert len(result.failed) == 0
+        names = {a.normalized_name for a in result.succeeded}
+        assert names == {"eggs", "milk"}
+
+    def test_resolve_cart_list_partial_failure(self, alias_db: Path):
+        from finch.cart_ops import resolve_cart_list
+
+        result = resolve_cart_list("eggs, quinoa", db_path=alias_db)
+        assert len(result.succeeded) == 1
+        assert result.succeeded[0].normalized_name == "eggs"
+        assert len(result.failed) == 1
+
+    def test_activity_log_cart_add(self, alias_db: Path, tmp_path: Path):
+        from finch.activity import list_cart_activity
+        from finch.cart_ops import record_cart_activity, resolve_cart_item
+
+        activity_db = tmp_path / "finch_activity.db"
+        attempt = resolve_cart_item("eggs", db_path=alias_db)
+        record_cart_activity(
+            attempt,
+            action="cart_add",
+            result="ok (ok)",
+            activity_db_path=activity_db,
+        )
+        records = list_cart_activity(db_path=activity_db)
+        assert len(records) == 1
+        assert records[0].requested_text == "eggs"
+        assert records[0].upc == "0001111081708"
+        assert records[0].action == "cart_add"
+
+    def test_cart_add_list_mocked(self, monkeypatch, alias_db: Path, tmp_path: Path):
+        from finch.cart.__main__ import cmd_add_list
+
+        monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        activity_db = tmp_path / "activity.db"
+        with patch("finch.config.ALIASES_DB_PATH", alias_db):
+            with patch("finch.activity.ACTIVITY_DB_PATH", activity_db):
+                with patch("finch.cart_ops.resolve_user_access_token", return_value="tok"):
+                    with patch("finch.cart.__main__.load_kroger_client_from_env") as mock_load:
+                        mock_client = MagicMock()
+                        mock_client.add_to_cart.return_value = {"status": "ok"}
+                        mock_load.return_value = mock_client
+                        with patch("finch.cart.__main__.ensure_fresh_user_token"):
+                            rc = cmd_add_list("eggs, milk")
+        assert rc == 0
+        assert mock_client.add_to_cart.call_count == 2
+
+    def test_cart_history_command(self, tmp_path: Path, capsys):
+        from finch.activity import log_activity
+        from finch.cart.__main__ import cmd_history
+
+        activity_db = tmp_path / "activity.db"
+        log_activity(
+            requested_text="eggs",
+            resolved_alias="Kroger Eggs",
+            upc="0001111081708",
+            product_id=None,
+            quantity=1,
+            action="cart_add",
+            result="ok (ok)",
+            db_path=activity_db,
+        )
+        with patch("finch.cart.__main__.list_cart_activity") as mock_list:
+            from finch.activity import ActivityRecord
+
+            mock_list.return_value = [
+                ActivityRecord(
+                    id=1,
+                    timestamp="2026-06-11T12:00:00+00:00",
+                    requested_text="eggs",
+                    resolved_alias="Kroger Eggs",
+                    upc="0001111081708",
+                    product_id=None,
+                    quantity=1,
+                    action="cart_add",
+                    result="ok (ok)",
+                )
+            ]
+            rc = cmd_history()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "eggs" in out
+        assert "cart_add" in out
