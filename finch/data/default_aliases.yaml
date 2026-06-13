@@ -1,0 +1,35 @@
+# Default Finch alias mappings — edit to match your preferred Kroger products.
+# UPCs are placeholders until you confirm real product IDs from Kroger search.
+#
+# Fields:
+#   alias_key      — normalized lookup key (lowercase)
+#   display_name   — human-readable preferred product name
+#   kroger_product_id — Kroger productId when known
+#   upc            — UPC when known (used for cart add)
+#   search_term    — Kroger search term when product is not pinned yet
+
+aliases:
+  - alias_key: eggs
+    display_name: Kroger Grade A Large Eggs 12 ct
+    upc: "0001111081708"
+    search_term: kroger large eggs 12
+
+  - alias_key: milk
+    display_name: Kroger Vitamin D Whole Milk 1 gal
+    upc: "0001111050350"
+    search_term: kroger whole milk gallon
+
+  - alias_key: coffee pods
+    display_name: Kroger Breakfast Blend K-Cup Pods 12 ct
+    upc: null
+    search_term: kroger breakfast blend k-cup
+
+  - alias_key: instant coffee
+    display_name: Kroger Instant Coffee 8 oz
+    upc: null
+    search_term: kroger instant coffee
+
+  - alias_key: flank steak
+    display_name: Kroger Beef Flank Steak
+    upc: null
+    search_term: kroger flank steak

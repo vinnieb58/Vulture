@@ -11,6 +11,10 @@ __pycache__/
 # Secrets
 .env
 
+# Finch local operator config (store location, non-secret)
+data/finch_config.json
+data/finch_tokens.json
+
 # Editor / OS
 .vscode/
 .DS_Store
