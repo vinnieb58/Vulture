@@ -1,0 +1,16 @@
+[Unit]
+Description=Finch local API (localhost preview and guarded cart ops)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python -m uvicorn finch.api:app --host 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
