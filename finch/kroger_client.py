@@ -35,6 +35,7 @@ OAUTH_AUTHORIZE_PATH = "/v1/connect/oauth2/authorize"
 PRODUCTS_PATH = "/v1/products"
 LOCATIONS_PATH = "/v1/locations"
 CART_ADD_PATH = "/v1/cart/add"
+CART_READ_PATH = "/v1/cart"
 
 # Kroger department ID for in-store / curbside pickup.
 PICKUP_DEPARTMENT_ID = "94"
@@ -52,6 +53,10 @@ class KrogerCartDisabledError(KrogerError):
     """Cart mutation blocked by Finch guardrails."""
 
 
+class KrogerCartReadNotSupportedError(KrogerError):
+    """Kroger cart read is unavailable with the current API access level."""
+
+
 @dataclass(frozen=True)
 class KrogerLocation:
     location_id: str
@@ -67,6 +72,36 @@ class KrogerLocation:
     @property
     def city_state_zip(self) -> str:
         return f"{self.city}, {self.state} {self.zip_code}".strip()
+
+
+@dataclass(frozen=True)
+class KrogerCartLineItem:
+    name: str
+    quantity: int
+    upc: str | None = None
+    price: str | None = None
+    line_total: str | None = None
+
+
+@dataclass(frozen=True)
+class KrogerCartSnapshot:
+    items: list[KrogerCartLineItem]
+    subtotal: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "name": item.name,
+                    "quantity": item.quantity,
+                    "upc": item.upc,
+                    "price": item.price,
+                    "line_total": item.line_total,
+                }
+                for item in self.items
+            ],
+            "subtotal": self.subtotal,
+        }
 
 
 @dataclass(frozen=True)
@@ -189,6 +224,73 @@ def _parse_locations_payload(data: dict[str, Any]) -> list[KrogerLocation]:
             )
         )
     return locations
+
+
+def _format_money(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or None
+
+
+def _parse_cart_payload(data: dict[str, Any]) -> KrogerCartSnapshot:
+    """Best-effort parse for Kroger cart read payloads (Public or Partner API)."""
+    raw_items = data.get("items") or data.get("data") or []
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    items: list[KrogerCartLineItem] = []
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        product = entry.get("product") if isinstance(entry.get("product"), dict) else {}
+        name = (
+            entry.get("description")
+            or entry.get("name")
+            or product.get("description")
+            or product.get("name")
+            or entry.get("upc")
+            or "item"
+        )
+        quantity_raw = entry.get("quantity", 1)
+        try:
+            quantity = max(1, int(quantity_raw))
+        except (TypeError, ValueError):
+            quantity = 1
+
+        price_block = entry.get("price") if isinstance(entry.get("price"), dict) else {}
+        price = _format_money(
+            price_block.get("regular")
+            or price_block.get("promo")
+            or entry.get("price")
+            or entry.get("unitPrice")
+        )
+        line_total = _format_money(
+            entry.get("total")
+            or entry.get("lineTotal")
+            or entry.get("extendedPrice")
+        )
+        upc = entry.get("upc") or product.get("upc")
+        items.append(
+            KrogerCartLineItem(
+                name=str(name),
+                quantity=quantity,
+                upc=str(upc) if upc else None,
+                price=price,
+                line_total=line_total,
+            )
+        )
+
+    subtotal = _format_money(
+        data.get("subtotal")
+        or data.get("subTotal")
+        or data.get("estimatedSubtotal")
+        or data.get("total")
+    )
+    return KrogerCartSnapshot(items=items, subtotal=subtotal)
 
 
 class KrogerClient:
@@ -425,6 +527,60 @@ class KrogerClient:
             logger.warning("%s (cart add)", _safe_log_response(resp))
             raise KrogerError(f"Cart add failed: HTTP {resp.status_code}")
         return resp.json() if resp.content else {"status": "ok"}
+
+    def get_current_cart(
+        self,
+        *,
+        modality: str | None = None,
+    ) -> KrogerCartSnapshot:
+        """
+        Read the authenticated user's Kroger cart.
+
+        Requires user OAuth token. The Kroger Public API currently exposes only
+        PUT /v1/cart/add (cart.basic:write). Cart read (GET /v1/cart) is available
+        on the Partner Cart API with cart.basic:read — not on standard Public access.
+        """
+        if not self._user_access_token:
+            raise KrogerAuthError(
+                "User access token required for cart read. Complete OAuth authorization code flow."
+            )
+
+        params: dict[str, str] = {}
+        selected_modality = modality or KROGER_CART_MODALITY
+        if selected_modality:
+            params["filter.modality"] = selected_modality
+
+        url = f"{self.base_url}{CART_READ_PATH}"
+        resp = self.session.request(
+            "GET",
+            url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self._user_access_token}",
+            },
+            params=params or None,
+            timeout=30,
+        )
+        if resp.status_code in (403, 404, 405, 501):
+            logger.warning("%s (cart read unavailable)", _safe_log_response(resp))
+            raise KrogerCartReadNotSupportedError(
+                "Kroger cart read is not available with Public API access. "
+                "The Public Cart API only supports PUT /v1/cart/add (cart.basic:write). "
+                "Reading the live cart requires Partner API access (GET /v1/cart or "
+                "GET /v1/carts) and the cart.basic:read OAuth scope — re-run "
+                "python -m finch.auth after Kroger grants read access."
+            )
+        if resp.status_code >= 400:
+            logger.warning("%s (cart read)", _safe_log_response(resp))
+            raise KrogerError(f"Cart read failed: HTTP {resp.status_code}")
+
+        if not resp.content:
+            return KrogerCartSnapshot(items=[], subtotal=None)
+
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            return KrogerCartSnapshot(items=[], subtotal=None)
+        return _parse_cart_payload(payload)
 
 
 def load_kroger_client_from_env(

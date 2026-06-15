@@ -32,6 +32,11 @@ class HistoryCommand:
 
 
 @dataclass(frozen=True)
+class CartCommand:
+    kind: str = "cart"
+
+
+@dataclass(frozen=True)
 class PreviewCommand:
     text: str
     kind: str = "preview"
@@ -53,6 +58,7 @@ Command = (
     StartCommand
     | HelpCommand
     | HistoryCommand
+    | CartCommand
     | PreviewCommand
     | AddCommand
     | AddListCommand
@@ -64,6 +70,7 @@ HELP_TEXT = """Finch grocery commands:
 • add eggs
 • add-list eggs, milk
 • 2 eggs
+• cart / show cart
 • history
 
 Cart writes stay disabled until FINCH_LIVE_CART=true on Raven."""
@@ -95,6 +102,8 @@ def parse_command(message: str) -> Command | None:
         return HelpCommand()
     if lower == "history":
         return HistoryCommand()
+    if lower in ("cart", "show cart", "current cart"):
+        return CartCommand()
     if lower == "preview":
         return None
     if lower.startswith("preview "):
@@ -188,6 +197,35 @@ def format_history_response(payload: dict[str, Any]) -> str:
         result = entry.get("result") or ""
         lines.append(f"• {requested} — {action} — {result}")
     return "Recent Finch cart activity:\n" + "\n".join(lines)
+
+
+def format_cart_response(payload: dict[str, Any]) -> str:
+    if not payload.get("supported", True):
+        message = payload.get("message") or "Kroger cart read is not supported yet."
+        return f"Cart read not available yet.\n\n{message}"
+
+    items = payload.get("items") or []
+    if not items:
+        return "Your Kroger cart is empty."
+
+    lines: list[str] = []
+    for item in items:
+        name = item.get("name") or "item"
+        quantity = item.get("quantity") or 1
+        parts = [f"• {name} × {quantity}"]
+        price = item.get("price")
+        line_total = item.get("line_total")
+        if price:
+            parts.append(f"@ {price}")
+        if line_total:
+            parts.append(f"= {line_total}")
+        lines.append(" ".join(parts))
+
+    body = "Current Kroger cart:\n" + "\n".join(lines)
+    subtotal = payload.get("subtotal")
+    if subtotal:
+        body += f"\n\nSubtotal: {subtotal}"
+    return body
 
 
 def format_error(message: str) -> str:

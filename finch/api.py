@@ -30,7 +30,12 @@ from finch.cart_ops import (
     resolve_cart_list,
 )
 from finch.env_util import load_env
-from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
+from finch.kroger_client import (
+    KrogerAuthError,
+    KrogerCartReadNotSupportedError,
+    KrogerError,
+    load_kroger_client_from_env,
+)
 from finch.preview import build_preview
 
 FINCH_KEY_HEADER = "X-Finch-Key"
@@ -222,6 +227,38 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail="limit must be at least 1")
         records = list_cart_activity(limit=limit)
         return {"entries": [_activity_to_dict(r) for r in records]}
+
+    @application.get("/finch/cart/current", dependencies=[Depends(require_finch_key)])
+    def finch_cart_current() -> dict[str, Any]:
+        try:
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        client = load_kroger_client_from_env()
+        try:
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            snapshot = client.get_current_cart()
+        except KrogerCartReadNotSupportedError as exc:
+            return {
+                "supported": False,
+                "message": str(exc),
+                "items": [],
+                "subtotal": None,
+            }
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        payload = snapshot.to_dict()
+        return {
+            "supported": True,
+            "items": payload["items"],
+            "subtotal": payload["subtotal"],
+        }
 
     return application
 
