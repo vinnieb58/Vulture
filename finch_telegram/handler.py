@@ -55,6 +55,13 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
             return commands.format_error(exc.detail)
         return commands.format_history_response(payload)
 
+    if isinstance(command, commands.CartCommand):
+        try:
+            payload = finch_client.cart_current()
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return commands.format_cart_response(payload)
+
     return None
 
 

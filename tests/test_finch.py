@@ -270,6 +270,56 @@ class TestKrogerClient:
         assert auth.startswith("Bearer ")
         assert "user-tok" in auth
 
+    def test_get_current_cart_parses_items(self):
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {
+                        "items": [
+                            {
+                                "description": "Kroger Large Eggs",
+                                "quantity": 2,
+                                "upc": "0001111081708",
+                                "price": {"regular": 2.99},
+                                "total": 5.98,
+                            }
+                        ],
+                        "subtotal": 5.98,
+                    },
+                    url="https://api.kroger.com/v1/cart",
+                )
+            ]
+        )
+        client = self._client(session, user_token="user-tok")
+        snapshot = client.get_current_cart()
+        assert len(snapshot.items) == 1
+        assert snapshot.items[0].name == "Kroger Large Eggs"
+        assert snapshot.items[0].quantity == 2
+        assert snapshot.items[0].price == "$2.99"
+        assert snapshot.items[0].line_total == "$5.98"
+        assert snapshot.subtotal == "$5.98"
+        assert session.calls[0]["method"] == "GET"
+        assert "user-tok" in session.calls[0]["headers"]["Authorization"]
+
+    def test_get_current_cart_not_supported_on_public_api(self):
+        session = _FakeSession(
+            [_FakeResponse(404, {}, url="https://api.kroger.com/v1/cart")]
+        )
+        client = self._client(session, user_token="user-tok")
+        from finch.kroger_client import KrogerCartReadNotSupportedError
+
+        with pytest.raises(KrogerCartReadNotSupportedError, match="Public API"):
+            client.get_current_cart()
+
+    def test_get_current_cart_requires_user_token(self):
+        session = _FakeSession([])
+        client = self._client(session, user_token=None)
+        from finch.kroger_client import KrogerAuthError
+
+        with pytest.raises(KrogerAuthError):
+            client.get_current_cart()
+
     def test_load_from_env_missing_raises(self, monkeypatch):
         monkeypatch.delenv("FINCH_KROGER_CLIENT_ID", raising=False)
         monkeypatch.delenv("FINCH_KROGER_CLIENT_SECRET", raising=False)

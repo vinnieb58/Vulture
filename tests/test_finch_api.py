@@ -154,6 +154,60 @@ class TestFinchApiCart:
         assert "user-tok" not in response.text
 
 
+class TestFinchApiCartCurrent:
+    def test_cart_current_not_supported(self, api_client, monkeypatch):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env") as mock_load:
+                mock_client = MagicMock()
+                from finch.kroger_client import KrogerCartReadNotSupportedError
+
+                mock_client.get_current_cart.side_effect = KrogerCartReadNotSupportedError(
+                    "Kroger cart read is not available with Public API access."
+                )
+                mock_load.return_value = mock_client
+                with patch("finch.api.ensure_fresh_user_token"):
+                    response = api_client.get("/finch/cart/current", headers=AUTH_HEADERS)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["supported"] is False
+        assert "Public API" in payload["message"]
+        assert payload["items"] == []
+
+    def test_cart_current_ok(self, api_client, monkeypatch):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env") as mock_load:
+                from finch.kroger_client import KrogerCartLineItem, KrogerCartSnapshot
+
+                mock_client = MagicMock()
+                mock_client.get_current_cart.return_value = KrogerCartSnapshot(
+                    items=[
+                        KrogerCartLineItem(
+                            name="Kroger Large Eggs",
+                            quantity=2,
+                            price="$2.99",
+                            line_total="$5.98",
+                        )
+                    ],
+                    subtotal="$5.98",
+                )
+                mock_load.return_value = mock_client
+                with patch("finch.api.ensure_fresh_user_token"):
+                    response = api_client.get("/finch/cart/current", headers=AUTH_HEADERS)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["supported"] is True
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["name"] == "Kroger Large Eggs"
+        assert payload["subtotal"] == "$5.98"
+        assert "user-tok" not in response.text
+
+    def test_cart_current_requires_token(self, api_client):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value=None):
+            response = api_client.get("/finch/cart/current", headers=AUTH_HEADERS)
+        assert response.status_code == 403
+        assert "token" in response.json()["detail"].lower()
+
+
 class TestFinchApiHistory:
     def test_history(self, api_client, alias_db: Path, tmp_path: Path):
         from finch.activity import list_cart_activity

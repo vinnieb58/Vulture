@@ -67,6 +67,13 @@ All paths are under `/finch`. Protected routes require header `X-Finch-Key: <FIN
 | `POST` | `/finch/cart/add` | yes | Add one item (guarded by `FINCH_LIVE_CART`) |
 | `POST` | `/finch/cart/add-list` | yes | Add multiple items (guarded) |
 | `GET` | `/finch/cart/history` | yes | Recent cart activity log |
+| `GET` | `/finch/cart/current` | yes | Read live Kroger cart (when API access allows) |
+
+### Cart read note
+
+Kroger **Public** API access currently exposes only `PUT /v1/cart/add` (`cart.basic:write`). Finch calls `GET /v1/cart` with the saved user OAuth token; when Kroger returns 403/404/405, the endpoint responds with `"supported": false` and a short explanation instead of failing the request.
+
+Reading the live cart requires **Partner** Cart API access (`GET /v1/cart` or `GET /v1/carts`) and the `cart.basic:read` OAuth scope. After Kroger grants read access, re-run `python -m finch.auth` so Finch requests the expanded scope. No new env vars are required beyond existing Kroger OAuth settings.
 
 ### Request / response shapes
 
@@ -116,6 +123,37 @@ All paths are under `/finch`. Protected routes require header `X-Finch-Key: <FIN
       "result": "ok (ok)"
     }
   ]
+}
+```
+
+**GET /finch/cart/current**
+
+When Kroger cart read is unavailable (typical on Public API access):
+
+```json
+{
+  "supported": false,
+  "message": "Kroger cart read is not available with Public API access. ...",
+  "items": [],
+  "subtotal": null
+}
+```
+
+When supported:
+
+```json
+{
+  "supported": true,
+  "items": [
+    {
+      "name": "Kroger Large Eggs",
+      "quantity": 2,
+      "upc": "0001111081708",
+      "price": "$2.99",
+      "line_total": "$5.98"
+    }
+  ],
+  "subtotal": "$5.98"
 }
 ```
 
@@ -203,6 +241,13 @@ Expected: HTTP 403 with detail mentioning `FINCH_LIVE_CART`.
 
 ```bash
 curl -s http://127.0.0.1:8091/finch/cart/history \
+  -H "X-Finch-Key: YOUR_KEY" | jq .
+```
+
+**Current Kroger cart:**
+
+```bash
+curl -s http://127.0.0.1:8091/finch/cart/current \
   -H "X-Finch-Key: YOUR_KEY" | jq .
 ```
 

@@ -52,3 +52,7 @@ def cart_add_list(text: str) -> dict[str, Any]:
 
 def cart_history(limit: int = 10) -> dict[str, Any]:
     return _request("GET", "/finch/cart/history", params={"limit": limit})
+
+
+def cart_current() -> dict[str, Any]:
+    return _request("GET", "/finch/cart/current")

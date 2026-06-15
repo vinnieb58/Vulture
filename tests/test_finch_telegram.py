@@ -96,6 +96,46 @@ class TestCommandParsing:
 
         assert parse_command("preview") is None
 
+    def test_parse_cart_commands(self):
+        from finch_telegram.commands import CartCommand, parse_command
+
+        for text in ("cart", "show cart", "current cart"):
+            cmd = parse_command(text)
+            assert isinstance(cmd, CartCommand), text
+
+    def test_format_cart_response_supported(self):
+        from finch_telegram.commands import format_cart_response
+
+        body = format_cart_response(
+            {
+                "supported": True,
+                "items": [
+                    {
+                        "name": "Kroger Large Eggs",
+                        "quantity": 2,
+                        "price": "$2.99",
+                        "line_total": "$5.98",
+                    }
+                ],
+                "subtotal": "$5.98",
+            }
+        )
+        assert "Current Kroger cart" in body
+        assert "Kroger Large Eggs" in body
+        assert "Subtotal: $5.98" in body
+
+    def test_format_cart_response_not_supported(self):
+        from finch_telegram.commands import format_cart_response
+
+        body = format_cart_response(
+            {
+                "supported": False,
+                "message": "Kroger cart read is not available with Public API access.",
+            }
+        )
+        assert "not available yet" in body
+        assert "Public API" in body
+
 
 class TestHandler:
     @patch("finch_telegram.handler.telegram_client.send_text_message")
@@ -154,6 +194,39 @@ class TestHandler:
         process_inbound(message)
 
         mock_add.assert_called_once_with("2 eggs")
+
+    @patch("finch_telegram.handler.telegram_client.send_text_message")
+    @patch("finch_telegram.handler.finch_client.cart_current")
+    def test_cart_calls_finch_api_and_replies(self, mock_cart, mock_send, telegram_env):
+        from finch_telegram.handler import process_inbound
+        from finch_telegram.telegram_client import InboundTextMessage
+
+        mock_cart.return_value = {
+            "supported": True,
+            "items": [
+                {
+                    "name": "Kroger Large Eggs",
+                    "quantity": 2,
+                    "price": "$2.99",
+                    "line_total": "$5.98",
+                }
+            ],
+            "subtotal": "$5.98",
+        }
+        message = InboundTextMessage(
+            chat_id="111222333",
+            user_id="111222333",
+            text="cart",
+            update_id=46,
+        )
+
+        process_inbound(message)
+
+        mock_cart.assert_called_once()
+        mock_send.assert_called_once()
+        body = mock_send.call_args[0][1]
+        assert "Kroger Large Eggs" in body
+        assert "Subtotal" in body
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     def test_rejects_non_whitelisted_user(self, mock_send, telegram_env, caplog):
