@@ -1,0 +1,17 @@
+[Unit]
+Description=Finch WhatsApp bridge (Meta webhook to local Finch API)
+After=network-online.target finch-api.service
+Wants=network-online.target
+Requires=finch-api.service
+
+[Service]
+Type=simple
+User=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python -m uvicorn finch_whatsapp.app:app --host 127.0.0.1 --port 8092
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
