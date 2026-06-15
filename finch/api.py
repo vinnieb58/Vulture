@@ -15,6 +15,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from finch import __version__
+from finch.cart_choice import (
+    NeedsChoiceOutcome,
+    execute_pending_choice,
+    prepare_add_or_needs_choice,
+    process_add_list_with_choice,
+    rerun_pending_search,
+)
 from finch.cart_ops import (
     CartAttempt,
     CartGuardError,
@@ -29,7 +36,6 @@ from finch.cart_ops import (
     require_live_cart,
     require_saved_token,
     resolve_cart_item,
-    resolve_cart_list,
 )
 from finch.trip_ledger import (
     TripItemRecord,
@@ -40,6 +46,7 @@ from finch.trip_ledger import (
     reset_trip,
     undo_last_trip_item,
 )
+from finch.pending_selection import clear_pending_selection, get_pending_selection
 from finch.env_util import load_env
 from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
 from finch.preview import build_preview
@@ -124,11 +131,34 @@ class CartAddRequest(BaseModel):
     quantity: int | None = Field(default=None, ge=1)
     force: bool = False
     source: str | None = None
+    chat_key: str | None = None
 
 
 class CartAddListRequest(BaseModel):
     text: str = Field(..., min_length=1)
     source: str | None = None
+    chat_key: str | None = None
+
+
+class CartChooseRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+    selection: int = Field(..., ge=1)
+    prefer: bool = False
+    force: bool = False
+    source: str | None = None
+
+
+class PendingSearchRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+    query: str = Field(..., min_length=1)
+
+
+class PendingCancelRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+
+
+def _needs_choice_response(outcome: NeedsChoiceOutcome) -> dict[str, Any]:
+    return outcome.to_dict()
 
 
 def _execute_single_cart_add(
@@ -198,20 +228,30 @@ def create_app() -> FastAPI:
         except CartGuardError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-        try:
-            item_text, parsed_force = parse_add_item(body.item)
-            attempt = resolve_cart_item(item_text, quantity=body.quantity)
-        except CartResolveError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
         client = load_kroger_client_from_env()
         try:
             ensure_fresh_user_token(client)
         except (KrogerAuthError, KrogerError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+        try:
+            item_text, parsed_force = parse_add_item(body.item)
+            resolved = prepare_add_or_needs_choice(
+                item_text,
+                quantity=body.quantity,
+                chat_key=body.chat_key,
+                client=client,
+            )
+        except CartResolveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if isinstance(resolved, NeedsChoiceOutcome):
+            return _needs_choice_response(resolved)
+
         outcome = _execute_single_cart_add(
-            attempt,
+            resolved,
             client,
             force=body.force or parsed_force,
             source=body.source,
@@ -233,19 +273,55 @@ def create_app() -> FastAPI:
         except CartGuardError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+        client = load_kroger_client_from_env()
         try:
-            parsed = resolve_cart_list(body.text)
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            progress = process_add_list_with_choice(
+                body.text,
+                chat_key=body.chat_key,
+                client=client,
+                source=body.source,
+                execute_add_fn=lambda attempt: _execute_single_cart_add(
+                    attempt,
+                    client,
+                    action="cart_add_list",
+                    source=body.source,
+                ),
+            )
         except CartResolveError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        for item_text, err in parsed.failed:
-            record_cart_activity_from_text(item_text, err)
+        if progress.needs_choice is not None:
+            payload = _needs_choice_response(progress.needs_choice)
+            payload["partial_outcomes"] = progress.added_outcomes
+            payload["succeeded"] = [
+                o["attempt"] for o in progress.added_outcomes if o.get("attempt")
+            ]
+            return payload
 
-        if not parsed.succeeded:
-            raise HTTPException(
-                status_code=422,
-                detail="No items could be resolved for cart add.",
-            )
+        outcomes = progress.added_outcomes
+        succeeded = [o["attempt"] for o in outcomes if o.get("attempt")]
+        return {
+            "ok": all(o.get("ok") or o.get("duplicate") for o in outcomes) if outcomes else False,
+            "succeeded": succeeded,
+            "failed": [],
+            "outcomes": outcomes,
+            "live_cart": live_cart_enabled(),
+        }
+
+    @application.post("/finch/cart/choose", dependencies=[Depends(require_finch_key)])
+    def finch_cart_choose(body: CartChooseRequest) -> dict[str, Any]:
+        try:
+            require_live_cart()
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
         client = load_kroger_client_from_env()
         try:
@@ -253,28 +329,64 @@ def create_app() -> FastAPI:
         except (KrogerAuthError, KrogerError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        outcomes: list[dict[str, Any]] = []
-        ok = True
-        for attempt in parsed.succeeded:
-            item_result = _execute_single_cart_add(
-                attempt,
-                client,
-                action="cart_add_list",
-                source=body.source,
-            )
-            if item_result.get("duplicate"):
-                item_result["result"] = item_result.get("message")
-            elif not item_result.get("ok"):
-                ok = False
-            outcomes.append(item_result)
+        outcome = execute_pending_choice(
+            chat_key=body.chat_key,
+            selection=body.selection,
+            prefer=body.prefer,
+            force=body.force,
+            source=body.source,
+            client=client,
+        )
+        if outcome.get("duplicate"):
+            return outcome
+        if not outcome.get("ok"):
+            detail = outcome.get("message", "choice failed")
+            if "FINCH_LIVE_CART" in detail:
+                raise HTTPException(status_code=403, detail=detail) from None
+            raise HTTPException(status_code=422, detail=detail) from None
+        outcome["live_cart"] = live_cart_enabled()
+        return outcome
 
+    @application.post("/finch/cart/pending/search", dependencies=[Depends(require_finch_key)])
+    def finch_cart_pending_search(body: PendingSearchRequest) -> dict[str, Any]:
+        try:
+            require_live_cart()
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        client = load_kroger_client_from_env()
+        try:
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        outcome = rerun_pending_search(
+            chat_key=body.chat_key,
+            query=body.query,
+            client=client,
+        )
+        if isinstance(outcome, NeedsChoiceOutcome):
+            return _needs_choice_response(outcome)
+        if not outcome.get("ok"):
+            raise HTTPException(status_code=422, detail=outcome.get("message", "search failed"))
+        return outcome
+
+    @application.post("/finch/cart/pending/cancel", dependencies=[Depends(require_finch_key)])
+    def finch_cart_pending_cancel(body: PendingCancelRequest) -> dict[str, Any]:
+        cleared = clear_pending_selection(body.chat_key)
         return {
-            "ok": ok and all(o.get("ok") or o.get("duplicate") for o in outcomes),
-            "succeeded": [_attempt_to_dict(a) for a in parsed.succeeded],
-            "failed": [{"item": item, "error": err} for item, err in parsed.failed],
-            "outcomes": outcomes,
-            "live_cart": live_cart_enabled(),
+            "ok": True,
+            "cleared": cleared,
+            "message": "Cancelled pending product choice." if cleared else "No pending choice to cancel.",
         }
+
+    @application.get("/finch/cart/pending", dependencies=[Depends(require_finch_key)])
+    def finch_cart_pending(chat_key: str) -> dict[str, Any]:
+        pending = get_pending_selection(chat_key)
+        if not pending:
+            return {"ok": True, "pending": None}
+        return {"ok": True, "pending": pending.to_dict()}
 
     @application.get("/finch/cart/history", dependencies=[Depends(require_finch_key)])
     def finch_cart_history(limit: int = 50, scope: str = "trip") -> dict[str, Any]:
