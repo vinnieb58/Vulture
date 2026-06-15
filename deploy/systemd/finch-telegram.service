@@ -1,0 +1,17 @@
+[Unit]
+Description=Finch Telegram bridge (long polling to local Finch API)
+After=network-online.target finch-api.service
+Wants=network-online.target
+Requires=finch-api.service
+
+[Service]
+Type=simple
+User=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python -m finch_telegram
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
