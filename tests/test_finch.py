@@ -885,6 +885,7 @@ class TestCartQuantityAndList:
         from finch.cart.__main__ import cmd_add_list
 
         monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        monkeypatch.setenv("FINCH_TRIP_LEDGER_DB_PATH", str(tmp_path / "trip_ledger.db"))
         activity_db = tmp_path / "activity.db"
         with patch("finch.config.ALIASES_DB_PATH", alias_db):
             with patch("finch.activity.ACTIVITY_DB_PATH", activity_db):
@@ -899,38 +900,128 @@ class TestCartQuantityAndList:
         assert mock_client.add_to_cart.call_count == 2
 
     def test_cart_history_command(self, tmp_path: Path, capsys):
-        from finch.activity import log_activity
         from finch.cart.__main__ import cmd_history
+        from finch.trip_ledger import record_trip_add, reset_trip
 
-        activity_db = tmp_path / "activity.db"
-        log_activity(
-            requested_text="eggs",
-            resolved_alias="Kroger Eggs",
-            upc="0001111081708",
+        ledger_db = tmp_path / "trip_ledger.db"
+        trip_id = reset_trip(db_path=ledger_db)
+        record_trip_add(
+            trip_id=trip_id,
+            normalized_name="eggs",
+            display_name="Kroger Grade A Large Eggs 12 ct",
             product_id=None,
+            upc="0001111081708",
             quantity=1,
-            action="cart_add",
-            result="ok (ok)",
-            db_path=activity_db,
+            requested_text="eggs",
+            source="cli",
+            db_path=ledger_db,
         )
-        with patch("finch.cart.__main__.list_cart_activity") as mock_list:
-            from finch.activity import ActivityRecord
-
-            mock_list.return_value = [
-                ActivityRecord(
-                    id=1,
-                    timestamp="2026-06-11T12:00:00+00:00",
-                    requested_text="eggs",
-                    resolved_alias="Kroger Eggs",
-                    upc="0001111081708",
-                    product_id=None,
-                    quantity=1,
-                    action="cart_add",
-                    result="ok (ok)",
-                )
-            ]
-            rc = cmd_history()
+        rc = cmd_history(trip_ledger_db_path=ledger_db)
         assert rc == 0
         out = capsys.readouterr().out
-        assert "eggs" in out
-        assert "cart_add" in out
+        assert "Finch added list" in out
+        assert "eggs" in out.lower()
+        assert "not your live Kroger cart" in out
+
+
+class TestTripLedger:
+    def _run_add(
+        self,
+        monkeypatch,
+        alias_db: Path,
+        tmp_path: Path,
+        *,
+        item: str = "eggs",
+        force: bool = False,
+    ):
+        from finch.cart.__main__ import cmd_add
+
+        monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        ledger_db = tmp_path / "trip_ledger.db"
+        with patch("finch.config.ALIASES_DB_PATH", alias_db):
+            with patch("finch.trip_ledger.TRIP_LEDGER_DB_PATH", ledger_db):
+                with patch("finch.cart_ops.resolve_user_access_token", return_value="tok"):
+                    with patch("finch.cart.__main__.load_kroger_client_from_env") as mock_load:
+                        mock_client = MagicMock()
+                        mock_client.add_to_cart.return_value = {"status": "ok"}
+                        mock_load.return_value = mock_client
+                        with patch("finch.cart.__main__.ensure_fresh_user_token"):
+                            rc = cmd_add(
+                                item,
+                                force=force,
+                                trip_ledger_db_path=ledger_db,
+                            )
+        return rc, mock_client
+
+    def test_add_eggs_once_succeeds(self, monkeypatch, alias_db: Path, tmp_path: Path, capsys):
+        rc, mock_client = self._run_add(monkeypatch, alias_db, tmp_path)
+        assert rc == 0
+        assert mock_client.add_to_cart.call_count == 1
+        out = capsys.readouterr().out
+        assert "ok" in out.lower()
+
+    def test_add_eggs_twice_warns(self, monkeypatch, alias_db: Path, tmp_path: Path, capsys):
+        rc1, mock_client = self._run_add(monkeypatch, alias_db, tmp_path)
+        assert rc1 == 0
+        assert mock_client.add_to_cart.call_count == 1
+
+        rc2, mock_client = self._run_add(monkeypatch, alias_db, tmp_path)
+        assert rc2 == 0
+        assert mock_client.add_to_cart.call_count == 0
+        out = capsys.readouterr().out
+        assert "already added eggs this trip" in out
+
+    def test_force_add_eggs_succeeds(self, monkeypatch, alias_db: Path, tmp_path: Path, capsys):
+        self._run_add(monkeypatch, alias_db, tmp_path)
+        rc, mock_client = self._run_add(monkeypatch, alias_db, tmp_path, item="force add eggs")
+        assert rc == 0
+        assert mock_client.add_to_cart.call_count == 1
+        out = capsys.readouterr().out
+        assert "already added" not in out
+
+    def test_reset_trip_clears_duplicate_guard(self, monkeypatch, alias_db: Path, tmp_path: Path):
+        from finch.cart.__main__ import cmd_reset_trip
+
+        self._run_add(monkeypatch, alias_db, tmp_path)
+        ledger_db = tmp_path / "trip_ledger.db"
+        with patch("finch.trip_ledger.TRIP_LEDGER_DB_PATH", ledger_db):
+            assert cmd_reset_trip(trip_ledger_db_path=ledger_db) == 0
+
+        rc, mock_client = self._run_add(monkeypatch, alias_db, tmp_path)
+        assert rc == 0
+        assert mock_client.add_to_cart.call_count == 1
+
+    def test_history_shows_finch_added_items(self, monkeypatch, alias_db: Path, tmp_path: Path, capsys):
+        from finch.cart.__main__ import cmd_history
+
+        self._run_add(monkeypatch, alias_db, tmp_path)
+        ledger_db = tmp_path / "trip_ledger.db"
+        with patch("finch.trip_ledger.TRIP_LEDGER_DB_PATH", ledger_db):
+            rc = cmd_history(trip_ledger_db_path=ledger_db)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Finch added list" in out
+        assert "eggs" in out.lower()
+
+    def test_parse_add_item_force_variants(self):
+        from finch.cart_ops import parse_add_item
+
+        assert parse_add_item("force add eggs") == ("eggs", True)
+        assert parse_add_item("add eggs again") == ("eggs", True)
+        assert parse_add_item("2 eggs") == ("2 eggs", False)
+
+    def test_undo_last_local_only(self, monkeypatch, alias_db: Path, tmp_path: Path, capsys):
+        from finch.cart.__main__ import cmd_undo_last
+
+        self._run_add(monkeypatch, alias_db, tmp_path)
+        ledger_db = tmp_path / "trip_ledger.db"
+        with patch("finch.trip_ledger.TRIP_LEDGER_DB_PATH", ledger_db):
+            rc = cmd_undo_last(trip_ledger_db_path=ledger_db)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "local only" in out
+        assert "Kroger cart was not changed" in out
+
+        rc2, mock_client = self._run_add(monkeypatch, alias_db, tmp_path)
+        assert rc2 == 0
+        assert mock_client.add_to_cart.call_count == 1

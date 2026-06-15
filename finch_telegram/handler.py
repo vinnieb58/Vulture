@@ -32,7 +32,7 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
 
     if isinstance(command, commands.AddCommand):
         try:
-            payload = finch_client.cart_add(command.item)
+            payload = finch_client.cart_add(command.item, source="telegram")
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
@@ -41,7 +41,7 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
 
     if isinstance(command, commands.AddListCommand):
         try:
-            payload = finch_client.cart_add_list(command.text)
+            payload = finch_client.cart_add_list(command.text, source="telegram")
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
@@ -50,10 +50,24 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
 
     if isinstance(command, commands.HistoryCommand):
         try:
-            payload = finch_client.cart_history(limit=10)
+            payload = finch_client.cart_history(limit=10, scope=command.scope)
         except finch_client.FinchApiError as exc:
             return commands.format_error(exc.detail)
         return commands.format_history_response(payload)
+
+    if isinstance(command, commands.ResetTripCommand):
+        try:
+            payload = finch_client.trip_reset()
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return str(payload.get("message") or "Started new grocery trip.")
+
+    if isinstance(command, commands.UndoLastCommand):
+        try:
+            payload = finch_client.trip_undo_last()
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return str(payload.get("message") or "Undo complete.")
 
     return None
 

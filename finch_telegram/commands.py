@@ -29,6 +29,17 @@ class HelpCommand:
 @dataclass(frozen=True)
 class HistoryCommand:
     kind: str = "history"
+    scope: str = "trip"
+
+
+@dataclass(frozen=True)
+class ResetTripCommand:
+    kind: str = "reset-trip"
+
+
+@dataclass(frozen=True)
+class UndoLastCommand:
+    kind: str = "undo-last"
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,8 @@ Command = (
     StartCommand
     | HelpCommand
     | HistoryCommand
+    | ResetTripCommand
+    | UndoLastCommand
     | PreviewCommand
     | AddCommand
     | AddListCommand
@@ -62,10 +75,14 @@ HELP_TEXT = """Finch grocery commands:
 • help
 • preview eggs, milk
 • add eggs
+• add eggs again / force add eggs
 • add-list eggs, milk
 • 2 eggs
-• history
+• history / added today / what did finch add
+• reset trip / new grocery trip
+• undo last
 
+Finch tracks a local "added list" per trip (not your live Kroger cart).
 Cart writes stay disabled until FINCH_LIVE_CART=true on Raven."""
 
 START_TEXT = (
@@ -93,8 +110,14 @@ def parse_command(message: str) -> Command | None:
         return StartCommand()
     if lower in ("help", "/help"):
         return HelpCommand()
-    if lower == "history":
-        return HistoryCommand()
+    if lower in ("history", "finch history", "what did finch add"):
+        return HistoryCommand(scope="trip")
+    if lower == "added today":
+        return HistoryCommand(scope="today")
+    if lower in ("reset trip", "new grocery trip"):
+        return ResetTripCommand()
+    if lower == "undo last":
+        return UndoLastCommand()
     if lower == "preview":
         return None
     if lower.startswith("preview "):
@@ -142,6 +165,8 @@ def format_cart_blocked(detail: str | None = None) -> str:
 
 
 def format_add_response(payload: dict[str, Any]) -> str:
+    if payload.get("duplicate"):
+        return str(payload.get("message") or "Already added this trip.")
     attempt = payload.get("attempt") or {}
     name = attempt.get("normalized_name") or attempt.get("requested_item") or "item"
     alias = attempt.get("alias_name")
@@ -178,16 +203,20 @@ def format_add_list_response(payload: dict[str, Any]) -> str:
 
 
 def format_history_response(payload: dict[str, Any]) -> str:
-    entries = payload.get("entries") or []
-    if not entries:
-        return "No recent Finch cart activity."
-    lines = []
-    for entry in entries[:10]:
-        requested = entry.get("requested_text") or "item"
-        action = entry.get("action") or "unknown"
-        result = entry.get("result") or ""
-        lines.append(f"• {requested} — {action} — {result}")
-    return "Recent Finch cart activity:\n" + "\n".join(lines)
+    text = payload.get("text")
+    if text:
+        return str(text)
+    items = payload.get("items") or []
+    if not items:
+        return "Finch added list: empty.\n(Kroger app is the source of truth for your live cart.)"
+    lines = [str(payload.get("title") or "Finch added list") + ":"]
+    lines.append("(This is what Finch added — not your live Kroger cart.)")
+    for item in items[:10]:
+        label = item.get("display_name") or item.get("normalized_name") or "item"
+        qty = item.get("quantity") or 1
+        qty_text = f" x{qty}" if qty != 1 else ""
+        lines.append(f"• {label}{qty_text}")
+    return "\n".join(lines)
 
 
 def format_error(message: str) -> str:
