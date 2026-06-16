@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from finch.pending_selection import make_chat_key
 from finch_telegram import config
 
 FINCH_KEY_HEADER = "X-Finch-Key"
@@ -16,6 +17,10 @@ class FinchApiError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+def telegram_chat_key(chat_id: str) -> str:
+    return make_chat_key("telegram", chat_id)
 
 
 def _headers() -> dict[str, str]:
@@ -42,18 +47,58 @@ def preview(text: str) -> dict[str, Any]:
     return _request("POST", "/finch/preview", json={"text": text})
 
 
-def cart_add(item: str, *, source: str | None = None) -> dict[str, Any]:
+def cart_add(item: str, *, source: str | None = None, chat_key: str | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"item": item}
     if source:
         body["source"] = source
+    if chat_key:
+        body["chat_key"] = chat_key
     return _request("POST", "/finch/cart/add", json=body)
 
 
-def cart_add_list(text: str, *, source: str | None = None) -> dict[str, Any]:
+def cart_add_list(
+    text: str,
+    *,
+    source: str | None = None,
+    chat_key: str | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {"text": text}
     if source:
         body["source"] = source
+    if chat_key:
+        body["chat_key"] = chat_key
     return _request("POST", "/finch/cart/add-list", json=body)
+
+
+def cart_choose(
+    chat_key: str,
+    selection: int,
+    *,
+    prefer: bool = False,
+    force: bool = False,
+    source: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "chat_key": chat_key,
+        "selection": selection,
+        "prefer": prefer,
+        "force": force,
+    }
+    if source:
+        body["source"] = source
+    return _request("POST", "/finch/cart/choose", json=body)
+
+
+def pending_cancel(chat_key: str) -> dict[str, Any]:
+    return _request("POST", "/finch/cart/pending/cancel", json={"chat_key": chat_key})
+
+
+def pending_search(chat_key: str, query: str) -> dict[str, Any]:
+    return _request(
+        "POST",
+        "/finch/cart/pending/search",
+        json={"chat_key": chat_key, "query": query},
+    )
 
 
 def cart_history(limit: int = 10, *, scope: str = "trip") -> dict[str, Any]:

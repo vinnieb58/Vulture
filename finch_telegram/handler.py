@@ -9,13 +9,52 @@ from finch_telegram import commands, config, finch_client, telegram_client
 logger = logging.getLogger(__name__)
 
 
+def _chat_key(message: telegram_client.InboundTextMessage) -> str:
+    return finch_client.telegram_chat_key(message.chat_id)
+
+
+def _handle_pending_reply(
+    message: telegram_client.InboundTextMessage,
+    command: commands.ChooseReplyCommand
+    | commands.CancelPendingCommand
+    | commands.SearchPendingCommand,
+) -> str:
+    chat_key = _chat_key(message)
+    try:
+        if isinstance(command, commands.CancelPendingCommand):
+            payload = finch_client.pending_cancel(chat_key)
+            return commands.format_cancel_pending_response(payload)
+        if isinstance(command, commands.SearchPendingCommand):
+            payload = finch_client.pending_search(chat_key, command.query)
+            if payload.get("needs_choice"):
+                return commands.format_needs_choice_response(payload)
+            return commands.format_error("Unexpected search response.")
+        payload = finch_client.cart_choose(
+            chat_key,
+            command.selection,
+            prefer=command.prefer,
+            source="telegram",
+        )
+    except finch_client.FinchApiError as exc:
+        if exc.status_code == 403:
+            return commands.format_cart_blocked(exc.detail)
+        return commands.format_error(exc.detail)
+    return commands.format_choose_response(payload)
+
+
 def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
+    pending = commands.parse_pending_reply(message.text)
+    if pending is not None:
+        return _handle_pending_reply(message, pending)
+
     command = commands.parse_command(message.text)
     if command is None:
         normalized = commands.normalize_message(message.text)
         if normalized.lower() == "preview":
             return "Usage: preview eggs, milk"
         return "Unknown command. Send 'help' for available commands."
+
+    chat_key = _chat_key(message)
 
     if isinstance(command, commands.StartCommand):
         return commands.START_TEXT
@@ -32,7 +71,11 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
 
     if isinstance(command, commands.AddCommand):
         try:
-            payload = finch_client.cart_add(command.item, source="telegram")
+            payload = finch_client.cart_add(
+                command.item,
+                source="telegram",
+                chat_key=chat_key,
+            )
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
@@ -41,7 +84,11 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
 
     if isinstance(command, commands.AddListCommand):
         try:
-            payload = finch_client.cart_add_list(command.text, source="telegram")
+            payload = finch_client.cart_add_list(
+                command.text,
+                source="telegram",
+                chat_key=chat_key,
+            )
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
