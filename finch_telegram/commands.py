@@ -60,6 +60,24 @@ class AddListCommand:
     kind: str = "add-list"
 
 
+@dataclass(frozen=True)
+class ChooseReplyCommand:
+    selection: int
+    prefer: bool = False
+    kind: str = "choose-reply"
+
+
+@dataclass(frozen=True)
+class CancelPendingCommand:
+    kind: str = "cancel-pending"
+
+
+@dataclass(frozen=True)
+class SearchPendingCommand:
+    query: str
+    kind: str = "search-pending"
+
+
 Command = (
     StartCommand
     | HelpCommand
@@ -69,7 +87,16 @@ Command = (
     | PreviewCommand
     | AddCommand
     | AddListCommand
+    | ChooseReplyCommand
+    | CancelPendingCommand
+    | SearchPendingCommand
 )
+
+_PENDING_PREFER_RE = re.compile(r"^prefer\s+(\d+)\s*$", re.IGNORECASE)
+_PENDING_CHOOSE_RE = re.compile(r"^choose\s+(\d+)\s*$", re.IGNORECASE)
+_PENDING_DIGIT_RE = re.compile(r"^(\d+)\s*$")
+_PENDING_CANCEL_RE = re.compile(r"^(nvm|cancel)\s*$", re.IGNORECASE)
+_PENDING_SEARCH_RE = re.compile(r"^search\s+(.+)$", re.IGNORECASE)
 
 HELP_TEXT = """Finch grocery commands:
 • help
@@ -81,6 +108,8 @@ HELP_TEXT = """Finch grocery commands:
 • history / added today / what did finch add
 • reset trip / new grocery trip
 • undo last
+
+If Finch asks you to choose, reply 1 to add once, prefer 1 to remember it, or nvm to cancel.
 
 Finch tracks a local "added list" per trip (not your live Kroger cart).
 Cart writes stay disabled until FINCH_LIVE_CART=true on Raven."""
@@ -98,6 +127,28 @@ def normalize_message(message: str) -> str:
     if text.startswith("/") and "@" in text:
         text = text.split("@", 1)[0]
     return text
+
+
+def parse_pending_reply(message: str) -> ChooseReplyCommand | CancelPendingCommand | SearchPendingCommand | None:
+    text = normalize_message(message)
+    if not text:
+        return None
+    match = _PENDING_PREFER_RE.match(text)
+    if match:
+        return ChooseReplyCommand(selection=int(match.group(1)), prefer=True)
+    match = _PENDING_CHOOSE_RE.match(text)
+    if match:
+        return ChooseReplyCommand(selection=int(match.group(1)), prefer=False)
+    match = _PENDING_DIGIT_RE.match(text)
+    if match:
+        return ChooseReplyCommand(selection=int(match.group(1)), prefer=False)
+    if _PENDING_CANCEL_RE.match(text):
+        return CancelPendingCommand()
+    match = _PENDING_SEARCH_RE.match(text)
+    if match:
+        query = match.group(1).strip()
+        return SearchPendingCommand(query=query) if query else None
+    return None
 
 
 def parse_command(message: str) -> Command | None:
@@ -164,7 +215,53 @@ def format_cart_blocked(detail: str | None = None) -> str:
     return message
 
 
+def format_needs_choice_response(payload: dict[str, Any]) -> str:
+    requested = payload.get("requested_item") or payload.get("normalized_name") or "item"
+    results = payload.get("results") or []
+    lines = [f'Needs choice for "{requested}":', ""]
+    if not results:
+        lines.append("No Kroger results found. Reply search <query> to try again, or nvm to cancel.")
+        return "\n".join(lines)
+
+    for index, result in enumerate(results, start=1):
+        name = result.get("description") or "item"
+        size = result.get("size")
+        price = result.get("price")
+        detail_parts = [name]
+        if size:
+            detail_parts.append(str(size))
+        line = f"{index}. {' — '.join(detail_parts)}"
+        if price:
+            line += f" — {price}"
+        lines.append(line)
+
+    lines.append("")
+    lines.append("Reply 1 to add once, prefer 1 to remember it, search <query> to refine, or nvm to cancel.")
+    return "\n".join(lines)
+
+
+def format_choose_response(payload: dict[str, Any]) -> str:
+    if payload.get("duplicate"):
+        return str(payload.get("message") or "Already added this trip.")
+    attempt = payload.get("attempt") or {}
+    name = attempt.get("normalized_name") or attempt.get("requested_item") or "item"
+    alias = attempt.get("alias_name")
+    if payload.get("preferred"):
+        line = f"Saved preference and added: {name}"
+    else:
+        line = f"Added: {name}"
+    if alias:
+        line += f" ({alias})"
+    return line
+
+
+def format_cancel_pending_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("message") or "Cancelled pending product choice.")
+
+
 def format_add_response(payload: dict[str, Any]) -> str:
+    if payload.get("needs_choice"):
+        return format_needs_choice_response(payload)
     if payload.get("duplicate"):
         return str(payload.get("message") or "Already added this trip.")
     attempt = payload.get("attempt") or {}
@@ -177,6 +274,26 @@ def format_add_response(payload: dict[str, Any]) -> str:
 
 
 def format_add_list_response(payload: dict[str, Any]) -> str:
+    if payload.get("needs_choice"):
+        parts: list[str] = []
+        partial = payload.get("partial_outcomes") or []
+        added_attempts = [
+            o.get("attempt")
+            for o in partial
+            if o.get("ok") and o.get("attempt")
+        ]
+        if added_attempts:
+            lines = []
+            for attempt in added_attempts:
+                name = attempt.get("normalized_name") or attempt.get("requested_item") or "item"
+                alias = attempt.get("alias_name")
+                if alias:
+                    lines.append(f"• {name} ({alias})")
+                else:
+                    lines.append(f"• {name}")
+            parts.append("Added:\n" + "\n".join(lines))
+        parts.append(format_needs_choice_response(payload))
+        return "\n\n".join(parts)
     added = payload.get("succeeded") or []
     skipped = payload.get("failed") or []
     parts: list[str] = []

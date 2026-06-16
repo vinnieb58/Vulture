@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import yaml
 
-from finch.config import ALIASES_DB_PATH, DEFAULT_ALIASES_YAML
+from finch.config import DATA_DIR, DEFAULT_ALIASES_YAML
 from finch.models import AliasEntry
 
 _SCHEMA = """
@@ -22,6 +23,12 @@ CREATE TABLE IF NOT EXISTS aliases (
 """
 
 
+def _resolve_db_path(db_path: Path | None = None) -> Path:
+    if db_path is not None:
+        return db_path
+    return Path(os.getenv("FINCH_ALIASES_DB_PATH", str(DATA_DIR / "finch_aliases.db")))
+
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -30,7 +37,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init_db(db_path: Path | None = None) -> None:
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     with _connect(path) as conn:
         conn.executescript(_SCHEMA)
 
@@ -80,7 +87,7 @@ def seed_aliases_from_yaml(
     if not entries:
         return 0
 
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     init_db(path)
     inserted = 0
     with _connect(path) as conn:
@@ -129,7 +136,7 @@ def seed_aliases_from_yaml(
 
 
 def get_all_aliases(db_path: Path | None = None) -> list[AliasEntry]:
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     init_db(path)
     with _connect(path) as conn:
         rows = conn.execute("SELECT * FROM aliases ORDER BY alias_key").fetchall()
@@ -138,7 +145,7 @@ def get_all_aliases(db_path: Path | None = None) -> list[AliasEntry]:
 
 def get_alias(alias_key: str, db_path: Path | None = None) -> AliasEntry | None:
     key = alias_key.strip().lower()
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     init_db(path)
     with _connect(path) as conn:
         row = conn.execute(
@@ -171,7 +178,7 @@ def find_alias_matches(
 
 def ensure_seeded(db_path: Path | None = None, yaml_path: Path | None = None) -> None:
     """Initialize DB and seed from YAML when empty."""
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     init_db(path)
     if not get_all_aliases(path):
         seed_aliases_from_yaml(yaml_path, path)
@@ -179,7 +186,7 @@ def ensure_seeded(db_path: Path | None = None, yaml_path: Path | None = None) ->
 
 def upsert_alias(entry: AliasEntry, db_path: Path | None = None) -> AliasEntry:
     """Insert or replace a single alias entry."""
-    path = db_path or ALIASES_DB_PATH
+    path = _resolve_db_path(db_path)
     init_db(path)
     with _connect(path) as conn:
         conn.execute(
