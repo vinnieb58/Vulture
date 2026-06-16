@@ -34,6 +34,7 @@ from host_status import (
     get_storage_status,
     status_display_class,
 )
+from kestrel_status import read_kestrel_status
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_metrics_history import sample_and_get_peaks
 from vulture_runtime import get_vulture_runtime
@@ -231,6 +232,35 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     }
 
 
+def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
+    """Plain-English Kestrel energy card for the Nest overview."""
+    state = kestrel.get("state", "no_data")
+    status_labels = {
+        "available": "Available",
+        "no_data": "No data",
+        "error": "Error",
+    }
+    style_map = {
+        "available": "ok",
+        "no_data": "unknown",
+        "error": "fail",
+    }
+    return {
+        "status": status_labels.get(state, "No data"),
+        "style": style_map.get(state, "unknown"),
+        "headline": kestrel.get("headline", "No energy data yet"),
+        "generated_at": kestrel.get("generated_at"),
+        "range": kestrel.get("range"),
+        "interval_count": kestrel.get("interval_count"),
+        "total_kwh": kestrel.get("total_kwh"),
+        "peak_interval_kwh": kestrel.get("peak_interval_kwh"),
+        "estimated_peak_kw": kestrel.get("estimated_peak_kw"),
+        "missing_interval_count": kestrel.get("missing_interval_count"),
+        "top_intervals": kestrel.get("top_intervals") or [],
+        "daily_totals": kestrel.get("daily_totals") or {},
+    }
+
+
 def _compute_network_card(raven: dict[str, Any]) -> dict[str, Any]:
     """Plain-English network status card for the Nest overview."""
     lan_ip = raven.get("lan_ip")
@@ -380,11 +410,13 @@ async def nest_overview(request: Request) -> HTMLResponse:
     refreshed_at, logs, db, raven, metrics_peaks, services, storage, docker, vulture = _collect_data()
     warnings = _build_warnings(db, logs, raven, vulture, services, storage, docker)
 
+    kestrel = read_kestrel_status()
     nest = {
         "raven": _compute_raven_card(raven, services, docker, metrics_peaks),
         "storage": _compute_storage_card(storage),
         "vulture": _compute_vulture_card(vulture, db),
         "network": _compute_network_card(raven),
+        "kestrel": _compute_kestrel_card(kestrel),
     }
 
     context = {
