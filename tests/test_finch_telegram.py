@@ -153,7 +153,7 @@ class TestHandler:
 
         process_inbound(message)
 
-        mock_add.assert_called_once_with("2 eggs", source="telegram")
+        mock_add.assert_called_once_with("2 eggs", source="telegram", chat_key="telegram:111222333")
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     def test_rejects_non_whitelisted_user(self, mock_send, telegram_env, caplog):
