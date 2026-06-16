@@ -29,4 +29,7 @@ experiments/debug/
 # Simply Fresh Kitchen probe session + run artifacts
 experiments/simplyfresh_probe/.auth/
 experiments/simplyfresh_probe/artifacts/
+
+# Kestrel probe runtime data (SQLite, status JSON)
+data/kestrel/
 *.trace.zip
