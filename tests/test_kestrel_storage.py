@@ -10,12 +10,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kestrel.config import PROVIDER_SMART_METER_TEXAS
-from kestrel.models import EnergyInterval, hash_identifier
+from kestrel.models import EnergyInterval, hash_identifier, normalize_account_identifier
 from kestrel.smart_meter_texas import import_csv_file, parse_csv_content
 from kestrel.storage import fetch_intervals, upsert_intervals
 
 
 FIXTURE_CSV = Path(__file__).resolve().parent / "fixtures" / "kestrel_smt_intervals.csv"
+SMT_PORTAL_FIXTURE_CSV = Path(__file__).resolve().parent / "fixtures" / "kestrel_smt_portal_export.csv"
 
 
 def _sample_interval(start: str, end: str, kwh: float) -> EnergyInterval:
@@ -85,3 +86,53 @@ class TestKestrelStorage:
         assert hashed is not None
         assert raw not in hashed
         assert len(hashed) == 16
+
+    def test_smt_portal_export_fixture(self, tmp_path: Path) -> None:
+        intervals = import_csv_file(SMT_PORTAL_FIXTURE_CSV)
+        assert len(intervals) == 3
+        assert intervals[0].kwh == pytest.approx(0.131)
+        assert intervals[0].start_ts == "2026-06-15T05:00:00+00:00"
+        assert intervals[0].end_ts == "2026-06-15T05:15:00+00:00"
+        assert intervals[0].account_id_hash == hash_identifier("1000000000000000000001")
+        assert "1000000000000000000001" not in (intervals[0].raw_source or "")
+        assert "est=A" in (intervals[0].raw_source or "")
+        assert "type=Consumption" in (intervals[0].raw_source or "")
+
+        db_path = tmp_path / "kestrel.db"
+        inserted, skipped = upsert_intervals(db_path, intervals)
+        assert inserted == 3
+        assert skipped == 0
+
+    def test_smt_esiid_apostrophe_is_hashed_not_stored_raw(self) -> None:
+        content = (
+            "ESIID,USAGE_DATE,REVISION_DATE,USAGE_START_TIME,USAGE_END_TIME,"
+            "USAGE_KWH,ESTIMATED_ACTUAL,CONSUMPTION_SURPLUSGENERATION\n"
+            "'1000000000000000000001,06/15/2026,06/15/2026 11:18:06,00:00,00:15,0.131,A,Consumption\n"
+        )
+        rows = parse_csv_content(content)
+        assert len(rows) == 1
+        expected_hash = hash_identifier("1000000000000000000001")
+        assert rows[0].account_id_hash == expected_hash
+        assert hash_identifier("'1000000000000000000001") == expected_hash
+        assert normalize_account_identifier("'1000000000000000000001") == "1000000000000000000001"
+
+    def test_smt_midnight_rollover(self) -> None:
+        content = (
+            "ESIID,USAGE_DATE,REVISION_DATE,USAGE_START_TIME,USAGE_END_TIME,"
+            "USAGE_KWH,ESTIMATED_ACTUAL,CONSUMPTION_SURPLUSGENERATION\n"
+            "'1000000000000000000001,06/15/2026,06/15/2026 11:18:06,23:45,00:00,0.250,A,Consumption\n"
+        )
+        rows = parse_csv_content(content)
+        assert len(rows) == 1
+        assert rows[0].start_ts == "2026-06-16T04:45:00+00:00"
+        assert rows[0].end_ts == "2026-06-16T05:00:00+00:00"
+        assert rows[0].kwh == pytest.approx(0.25)
+
+    def test_smt_usage_kwh_column_maps_correctly(self) -> None:
+        content = (
+            "ESIID,USAGE_DATE,REVISION_DATE,USAGE_START_TIME,USAGE_END_TIME,"
+            "USAGE_KWH,ESTIMATED_ACTUAL,CONSUMPTION_SURPLUSGENERATION\n"
+            "'1000000000000000000001,06/15/2026,06/15/2026 11:18:06,01:00,01:15,1.234,A,Consumption\n"
+        )
+        rows = parse_csv_content(content)
+        assert rows[0].kwh == pytest.approx(1.234)

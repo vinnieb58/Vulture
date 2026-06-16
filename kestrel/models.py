@@ -36,11 +36,22 @@ class EnergyInterval:
         )
 
 
-def hash_identifier(value: str | None) -> str | None:
-    """Return a short stable hash for account/meter identifiers (never log raw values)."""
+def normalize_account_identifier(value: str | None) -> str | None:
+    """Normalize account/meter identifiers before hashing (strip Excel apostrophe prefix)."""
     if not value:
         return None
-    digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+    text = value.strip()
+    if text.startswith("'"):
+        text = text[1:].strip()
+    return text or None
+
+
+def hash_identifier(value: str | None) -> str | None:
+    """Return a short stable hash for account/meter identifiers (never log raw values)."""
+    normalized = normalize_account_identifier(value)
+    if not normalized:
+        return None
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return digest[:16]
 
 
