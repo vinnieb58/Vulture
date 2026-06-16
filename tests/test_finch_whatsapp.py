@@ -194,7 +194,7 @@ class TestWebhookInbound:
         response = whatsapp_client.post("/webhook", json=payload)
 
         assert response.status_code == 200
-        mock_add.assert_called_once_with("eggs")
+        mock_add.assert_called_once_with("eggs", source="whatsapp")
         body = mock_send.call_args[0][1]
         assert "Cart writes are currently disabled" in body
 
@@ -202,13 +202,15 @@ class TestWebhookInbound:
     @patch("finch_whatsapp.handler.finch_client.cart_history")
     def test_history_calls_finch_api(self, mock_history, mock_send, whatsapp_client):
         mock_history.return_value = {
-            "entries": [
+            "title": "Finch added list",
+            "items": [
                 {
-                    "requested_text": "eggs",
-                    "action": "cart_add",
-                    "result": "ok (ok)",
+                    "normalized_name": "eggs",
+                    "display_name": "Kroger Grade A Large Eggs 12 ct",
+                    "quantity": 1,
                 }
-            ]
+            ],
+            "text": "Finch added list (trip 1):\n(This is what Finch added — not your live Kroger cart.)\n  • Kroger Grade A Large Eggs 12 ct — 2026-06-11",
         }
 
         payload = dict(WHATSAPP_PAYLOAD)
@@ -217,10 +219,10 @@ class TestWebhookInbound:
         response = whatsapp_client.post("/webhook", json=payload)
 
         assert response.status_code == 200
-        mock_history.assert_called_once_with(limit=10)
+        mock_history.assert_called_once_with(limit=10, scope="trip")
         body = mock_send.call_args[0][1]
-        assert "eggs" in body
-        assert "cart_add" in body
+        assert "Finch added list" in body
+        assert "Eggs" in body or "eggs" in body
 
     @patch("finch_whatsapp.handler.whatsapp_client.send_text_message")
     def test_unknown_message_gets_help_hint(self, mock_send, whatsapp_client):

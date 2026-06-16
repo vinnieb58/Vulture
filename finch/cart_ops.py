@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,18 @@ from finch.token_store import (
     load_tokens,
     resolve_user_access_token,
     save_tokens_from_response,
+)
+from finch.trip_ledger import (
+    find_trip_duplicate,
+    format_duplicate_message,
+    get_or_create_open_trip,
+    record_trip_add,
+)
+
+_FORCE_ADD_PREFIX_RE = re.compile(r"^force\s+add\s+", re.IGNORECASE)
+_FORCE_ADD_AGAIN_RE = re.compile(
+    r"^(?:force\s+add|add)\s+(.+?)\s+again$",
+    re.IGNORECASE,
 )
 
 
@@ -197,6 +210,59 @@ def ensure_fresh_user_token(
     access = str(refreshed["access_token"])
     client.set_user_access_token(access)
     return access
+
+
+def parse_add_item(item_text: str) -> tuple[str, bool]:
+    """Return (item_text, force_add) for add commands with optional force phrasing."""
+    text = item_text.strip()
+    match = _FORCE_ADD_AGAIN_RE.match(text)
+    if match:
+        return match.group(1).strip(), True
+    if _FORCE_ADD_PREFIX_RE.match(text):
+        return _FORCE_ADD_PREFIX_RE.sub("", text).strip(), True
+    return text, False
+
+
+def check_trip_duplicate(
+    attempt: CartAttempt,
+    *,
+    force: bool = False,
+    trip_ledger_db_path: Path | None = None,
+) -> str | None:
+    """Return a user-facing duplicate message, or None if the add may proceed."""
+    if force:
+        return None
+    trip_id = get_or_create_open_trip(db_path=trip_ledger_db_path)
+    duplicate = find_trip_duplicate(
+        trip_id=trip_id,
+        normalized_name=attempt.normalized_name,
+        product_id=attempt.product_id,
+        upc=attempt.upc,
+        db_path=trip_ledger_db_path,
+    )
+    if duplicate:
+        return format_duplicate_message(attempt.normalized_name)
+    return None
+
+
+def record_successful_trip_add(
+    attempt: CartAttempt,
+    *,
+    source: str | None = None,
+    trip_ledger_db_path: Path | None = None,
+) -> None:
+    trip_id = get_or_create_open_trip(db_path=trip_ledger_db_path)
+    record_trip_add(
+        trip_id=trip_id,
+        normalized_name=attempt.normalized_name,
+        display_name=attempt.alias_name,
+        product_id=attempt.product_id,
+        upc=attempt.upc,
+        quantity=attempt.quantity,
+        requested_text=attempt.requested_item,
+        source=source,
+        db_path=trip_ledger_db_path,
+    )
 
 
 def record_cart_activity(

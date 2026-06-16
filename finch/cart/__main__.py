@@ -5,20 +5,30 @@ from __future__ import annotations
 import argparse
 import sys
 
-from finch.activity import format_activity_line, list_cart_activity
 from finch.cart_ops import (
     CartGuardError,
     CartResolveError,
+    check_trip_duplicate,
     ensure_fresh_user_token,
     execute_cart_add,
     format_attempt_result,
     live_cart_enabled,
+    parse_add_item,
     pick_test_alias,
     record_cart_activity,
+    record_successful_trip_add,
     require_live_cart,
     require_saved_token,
     resolve_cart_item,
     resolve_cart_list,
+)
+from finch.trip_ledger import (
+    format_added_list,
+    get_or_create_open_trip,
+    list_added_today,
+    list_trip_items,
+    reset_trip,
+    undo_last_trip_item,
 )
 from finch.env_util import load_env
 from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
@@ -31,7 +41,24 @@ def _run_single_add(
     *,
     action: str = "cart_add",
     activity_db_path=None,
+    trip_ledger_db_path=None,
+    source: str | None = None,
+    force: bool = False,
 ) -> tuple[int, str]:
+    duplicate_msg = check_trip_duplicate(
+        attempt,
+        force=force,
+        trip_ledger_db_path=trip_ledger_db_path,
+    )
+    if duplicate_msg:
+        record_cart_activity(
+            attempt,
+            action=action,
+            result="skipped — duplicate this trip",
+            activity_db_path=activity_db_path,
+        )
+        return 0, duplicate_msg
+
     try:
         result = execute_cart_add(
             attempt,
@@ -42,16 +69,31 @@ def _run_single_add(
     except (CartGuardError, KrogerAuthError, KrogerError) as exc:
         return 1, format_attempt_result(attempt, result=f"failed — {exc}")
 
+    record_successful_trip_add(
+        attempt,
+        source=source or "cli",
+        trip_ledger_db_path=trip_ledger_db_path,
+    )
     status = result.get("status", "ok") if isinstance(result, dict) else "ok"
     return 0, format_attempt_result(attempt, result=f"ok ({status})")
 
 
-def cmd_add(item: str, *, quantity: int | None = None) -> int:
+def cmd_add(
+    item: str,
+    *,
+    quantity: int | None = None,
+    force: bool = False,
+    source: str | None = None,
+    trip_ledger_db_path=None,
+) -> int:
     require_live_cart()
     require_saved_token()
 
+    item_text, parsed_force = parse_add_item(item)
+    force = force or parsed_force
+
     try:
-        attempt = resolve_cart_item(item, quantity=quantity)
+        attempt = resolve_cart_item(item_text, quantity=quantity)
     except CartResolveError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -63,9 +105,15 @@ def cmd_add(item: str, *, quantity: int | None = None) -> int:
         print(format_attempt_result(attempt, result=f"failed — {exc}"))
         return 1
 
-    rc, output = _run_single_add(attempt, client)
+    rc, output = _run_single_add(
+        attempt,
+        client,
+        source=source or "cli",
+        trip_ledger_db_path=trip_ledger_db_path,
+        force=force,
+    )
     print(output)
-    if rc == 0:
+    if rc == 0 and "already added" not in output:
         print()
         print("Review and checkout manually in the Kroger app.")
     return rc
@@ -98,7 +146,12 @@ def cmd_add_list(list_text: str) -> int:
 
     rc = 0
     for attempt in parsed.succeeded:
-        item_rc, output = _run_single_add(attempt, client, action="cart_add_list")
+        item_rc, output = _run_single_add(
+            attempt,
+            client,
+            action="cart_add_list",
+            source="cli",
+        )
         print(output)
         print()
         if item_rc != 0:
@@ -123,15 +176,41 @@ def record_cart_activity_from_text(item_text: str, err: str) -> None:
     )
 
 
-def cmd_history(*, limit: int = 50) -> int:
-    records = list_cart_activity(limit=limit)
-    if not records:
-        print("No Finch cart activity recorded yet.")
+def cmd_history(
+    *,
+    limit: int = 50,
+    scope: str = "trip",
+    trip_ledger_db_path=None,
+) -> int:
+    if scope == "today":
+        items = list_added_today(db_path=trip_ledger_db_path)[:limit]
+        print(format_added_list(items, title="Finch added list (today)"))
         return 0
-    print(f"Finch cart history (last {len(records)} entries):")
-    print("=" * 40)
-    for record in records:
-        print(format_activity_line(record))
+
+    trip_id = get_or_create_open_trip(db_path=trip_ledger_db_path)
+    items = list_trip_items(trip_id, db_path=trip_ledger_db_path)[:limit]
+    print(format_added_list(items, trip_id=trip_id))
+    return 0
+
+
+def cmd_reset_trip(*, trip_ledger_db_path=None) -> int:
+    trip_id = reset_trip(db_path=trip_ledger_db_path)
+    print(f"Started new Finch grocery trip (trip {trip_id}).")
+    print("Duplicate guard cleared for this trip.")
+    return 0
+
+
+def cmd_undo_last(*, trip_ledger_db_path=None) -> int:
+    trip_id = get_or_create_open_trip(db_path=trip_ledger_db_path)
+    item = undo_last_trip_item(trip_id, db_path=trip_ledger_db_path)
+    if not item:
+        print("Nothing to undo on the Finch added list for this trip.")
+        return 0
+    label = item.display_name or item.normalized_name
+    print(
+        f"Removed {label!r} from the Finch added list (local only). "
+        "Your Kroger cart was not changed — review it in the Kroger app."
+    )
     return 0
 
 
@@ -203,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
     add_parser = sub.add_parser("add", help="Add one item by alias name")
     add_parser.add_argument("item", help='Grocery term, e.g. "2 eggs" or "coffee pods"')
     add_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force add even if this item was already added this trip",
+    )
+
+    add_parser.add_argument(
         "--quantity",
         type=int,
         default=None,
@@ -215,18 +300,31 @@ def main(argv: list[str] | None = None) -> int:
         help='Grocery list, e.g. "eggs, milk, coffee pods"',
     )
 
-    history_parser = sub.add_parser("history", help="Show Finch-added cart activity")
+    history_parser = sub.add_parser("history", help="Show Finch added list for this trip")
     history_parser.add_argument("--limit", type=int, default=50, help="Max entries (default 50)")
+    history_parser.add_argument(
+        "--scope",
+        choices=("trip", "today"),
+        default="trip",
+        help="Show current trip (default) or everything added today",
+    )
+
+    sub.add_parser("reset-trip", help="Start a new Finch grocery trip (clears duplicate guard)")
+    sub.add_parser("undo-last", help="Undo last Finch-added item locally (no Kroger cart remove)")
 
     sub.add_parser("test", help="Smoke test — add eggs (or first pinned alias)")
 
     args = parser.parse_args(argv)
     if args.command == "add":
-        return cmd_add(args.item, quantity=args.quantity)
+        return cmd_add(args.item, quantity=args.quantity, force=args.force)
     if args.command == "add-list":
         return cmd_add_list(args.list_text)
     if args.command == "history":
-        return cmd_history(limit=args.limit)
+        return cmd_history(limit=args.limit, scope=args.scope)
+    if args.command == "reset-trip":
+        return cmd_reset_trip()
+    if args.command == "undo-last":
+        return cmd_undo_last()
     if args.command == "test":
         return cmd_test()
     parser.error("unknown command")

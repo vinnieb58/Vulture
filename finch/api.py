@@ -15,19 +15,30 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from finch import __version__
-from finch.activity import ActivityRecord, list_cart_activity
 from finch.cart_ops import (
     CartAttempt,
     CartGuardError,
     CartResolveError,
+    check_trip_duplicate,
     ensure_fresh_user_token,
     execute_cart_add,
     live_cart_enabled,
+    parse_add_item,
     record_cart_activity,
+    record_successful_trip_add,
     require_live_cart,
     require_saved_token,
     resolve_cart_item,
     resolve_cart_list,
+)
+from finch.trip_ledger import (
+    TripItemRecord,
+    format_added_list,
+    get_or_create_open_trip,
+    list_added_today,
+    list_trip_items,
+    reset_trip,
+    undo_last_trip_item,
 )
 from finch.env_util import load_env
 from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
@@ -74,20 +85,6 @@ def _attempt_to_dict(attempt: CartAttempt) -> dict[str, Any]:
     }
 
 
-def _activity_to_dict(record: ActivityRecord) -> dict[str, Any]:
-    return {
-        "id": record.id,
-        "timestamp": record.timestamp,
-        "requested_text": record.requested_text,
-        "resolved_alias": record.resolved_alias,
-        "upc": record.upc,
-        "product_id": record.product_id,
-        "quantity": record.quantity,
-        "action": record.action,
-        "result": record.result,
-    }
-
-
 async def require_finch_key(
     x_finch_key: Annotated[str | None, Header(alias=FINCH_KEY_HEADER)] = None,
 ) -> None:
@@ -102,6 +99,22 @@ async def require_finch_key(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+def _trip_item_to_dict(item: TripItemRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "trip_id": item.trip_id,
+        "normalized_name": item.normalized_name,
+        "display_name": item.display_name,
+        "product_id": item.product_id,
+        "upc": item.upc,
+        "quantity": item.quantity,
+        "requested_text": item.requested_text,
+        "source": item.source,
+        "added_at": item.added_at,
+        "undone": item.undone,
+    }
+
+
 class PreviewRequest(BaseModel):
     text: str = Field(..., min_length=1)
 
@@ -109,10 +122,56 @@ class PreviewRequest(BaseModel):
 class CartAddRequest(BaseModel):
     item: str = Field(..., min_length=1)
     quantity: int | None = Field(default=None, ge=1)
+    force: bool = False
+    source: str | None = None
 
 
 class CartAddListRequest(BaseModel):
     text: str = Field(..., min_length=1)
+    source: str | None = None
+
+
+def _execute_single_cart_add(
+    attempt: CartAttempt,
+    client: Any,
+    *,
+    action: str = "cart_add",
+    force: bool = False,
+    source: str | None = None,
+) -> dict[str, Any]:
+    duplicate_msg = check_trip_duplicate(attempt, force=force)
+    if duplicate_msg:
+        record_cart_activity(
+            attempt,
+            action=action,
+            result="skipped — duplicate this trip",
+        )
+        return {
+            "ok": False,
+            "duplicate": True,
+            "message": duplicate_msg,
+            "attempt": _attempt_to_dict(attempt),
+        }
+
+    try:
+        result = execute_cart_add(attempt, client, action=action)
+    except (CartGuardError, KrogerAuthError, KrogerError) as exc:
+        return {
+            "ok": False,
+            "duplicate": False,
+            "message": str(exc),
+            "attempt": _attempt_to_dict(attempt),
+        }
+
+    record_successful_trip_add(attempt, source=source)
+    status = result.get("status", "ok") if isinstance(result, dict) else "ok"
+    return {
+        "ok": True,
+        "duplicate": False,
+        "attempt": _attempt_to_dict(attempt),
+        "result": f"ok ({status})",
+        "live_cart": live_cart_enabled(),
+    }
 
 
 def create_app() -> FastAPI:
@@ -140,7 +199,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
         try:
-            attempt = resolve_cart_item(body.item, quantity=body.quantity)
+            item_text, parsed_force = parse_add_item(body.item)
+            attempt = resolve_cart_item(item_text, quantity=body.quantity)
         except CartResolveError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -150,20 +210,20 @@ def create_app() -> FastAPI:
         except (KrogerAuthError, KrogerError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        try:
-            result = execute_cart_add(attempt, client)
-        except CartGuardError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except (KrogerAuthError, KrogerError) as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-        status = result.get("status", "ok") if isinstance(result, dict) else "ok"
-        return {
-            "ok": True,
-            "attempt": _attempt_to_dict(attempt),
-            "result": f"ok ({status})",
-            "live_cart": live_cart_enabled(),
-        }
+        outcome = _execute_single_cart_add(
+            attempt,
+            client,
+            force=body.force or parsed_force,
+            source=body.source,
+        )
+        if outcome.get("duplicate"):
+            return outcome
+        if not outcome.get("ok"):
+            detail = outcome.get("message", "cart add failed")
+            if "FINCH_LIVE_CART" in detail:
+                raise HTTPException(status_code=403, detail=detail) from None
+            raise HTTPException(status_code=502, detail=detail) from None
+        return outcome
 
     @application.post("/finch/cart/add-list", dependencies=[Depends(require_finch_key)])
     def finch_cart_add_list(body: CartAddListRequest) -> dict[str, Any]:
@@ -196,20 +256,20 @@ def create_app() -> FastAPI:
         outcomes: list[dict[str, Any]] = []
         ok = True
         for attempt in parsed.succeeded:
-            item_result: dict[str, Any] = {"attempt": _attempt_to_dict(attempt)}
-            try:
-                result = execute_cart_add(attempt, client, action="cart_add_list")
-                status = result.get("status", "ok") if isinstance(result, dict) else "ok"
-                item_result["ok"] = True
-                item_result["result"] = f"ok ({status})"
-            except (CartGuardError, KrogerAuthError, KrogerError) as exc:
-                item_result["ok"] = False
-                item_result["result"] = f"failed — {exc}"
+            item_result = _execute_single_cart_add(
+                attempt,
+                client,
+                action="cart_add_list",
+                source=body.source,
+            )
+            if item_result.get("duplicate"):
+                item_result["result"] = item_result.get("message")
+            elif not item_result.get("ok"):
                 ok = False
             outcomes.append(item_result)
 
         return {
-            "ok": ok,
+            "ok": ok and all(o.get("ok") or o.get("duplicate") for o in outcomes),
             "succeeded": [_attempt_to_dict(a) for a in parsed.succeeded],
             "failed": [{"item": item, "error": err} for item, err in parsed.failed],
             "outcomes": outcomes,
@@ -217,11 +277,64 @@ def create_app() -> FastAPI:
         }
 
     @application.get("/finch/cart/history", dependencies=[Depends(require_finch_key)])
-    def finch_cart_history(limit: int = 50) -> dict[str, Any]:
+    def finch_cart_history(limit: int = 50, scope: str = "trip") -> dict[str, Any]:
         if limit < 1:
             raise HTTPException(status_code=422, detail="limit must be at least 1")
-        records = list_cart_activity(limit=limit)
-        return {"entries": [_activity_to_dict(r) for r in records]}
+        if scope not in ("trip", "today"):
+            raise HTTPException(status_code=422, detail="scope must be 'trip' or 'today'")
+
+        if scope == "today":
+            items = list_added_today()[:limit]
+            return {
+                "title": "Finch added list (today)",
+                "scope": scope,
+                "trip_id": None,
+                "items": [_trip_item_to_dict(item) for item in items],
+                "text": format_added_list(items, title="Finch added list (today)"),
+            }
+
+        trip_id = get_or_create_open_trip()
+        items = list_trip_items(trip_id)[:limit]
+        return {
+            "title": "Finch added list",
+            "scope": scope,
+            "trip_id": trip_id,
+            "items": [_trip_item_to_dict(item) for item in items],
+            "text": format_added_list(items, trip_id=trip_id),
+        }
+
+    @application.post("/finch/trip/reset", dependencies=[Depends(require_finch_key)])
+    def finch_trip_reset() -> dict[str, Any]:
+        trip_id = reset_trip()
+        return {
+            "ok": True,
+            "trip_id": trip_id,
+            "message": (
+                f"Started new Finch grocery trip (trip {trip_id}). "
+                "Duplicate guard cleared for this trip."
+            ),
+        }
+
+    @application.post("/finch/trip/undo-last", dependencies=[Depends(require_finch_key)])
+    def finch_trip_undo_last() -> dict[str, Any]:
+        trip_id = get_or_create_open_trip()
+        item = undo_last_trip_item(trip_id)
+        if not item:
+            return {
+                "ok": True,
+                "undone": False,
+                "message": "Nothing to undo on the Finch added list for this trip.",
+            }
+        label = item.display_name or item.normalized_name
+        return {
+            "ok": True,
+            "undone": True,
+            "item": _trip_item_to_dict(item),
+            "message": (
+                f"Removed {label!r} from the Finch added list (local only). "
+                "Your Kroger cart was not changed — review it in the Kroger app."
+            ),
+        }
 
     return application
 

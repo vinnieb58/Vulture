@@ -35,6 +35,18 @@ def alias_db(tmp_path: Path) -> Path:
     return db
 
 
+@pytest.fixture(autouse=True)
+def _reset_trip_ledger_between_api_tests(tmp_path: Path, monkeypatch):
+    ledger_db = tmp_path / "finch_trip_ledger.db"
+    monkeypatch.setenv("FINCH_TRIP_LEDGER_DB_PATH", str(ledger_db))
+    if ledger_db.exists():
+        ledger_db.unlink()
+    from finch.trip_ledger import reset_trip
+
+    reset_trip(db_path=ledger_db)
+    yield
+
+
 @pytest.fixture
 def api_env(monkeypatch, alias_db: Path, tmp_path: Path):
     monkeypatch.setenv("FINCH_API_TEST_MODE", "1")
@@ -42,6 +54,7 @@ def api_env(monkeypatch, alias_db: Path, tmp_path: Path):
     monkeypatch.delenv("FINCH_LIVE_CART", raising=False)
     monkeypatch.setenv("FINCH_ALIASES_DB_PATH", str(alias_db))
     monkeypatch.setenv("FINCH_ACTIVITY_DB_PATH", str(tmp_path / "finch_activity.db"))
+    monkeypatch.setenv("FINCH_TRIP_LEDGER_DB_PATH", str(tmp_path / "finch_trip_ledger.db"))
 
 
 @pytest.fixture
@@ -156,36 +169,85 @@ class TestFinchApiCart:
 
 class TestFinchApiHistory:
     def test_history(self, api_client, alias_db: Path, tmp_path: Path):
-        from finch.activity import list_cart_activity
-        from finch.cart_ops import record_cart_activity, resolve_cart_item
+        from finch.trip_ledger import record_trip_add, reset_trip
 
-        activity_db = tmp_path / "history_only.db"
-        attempt = resolve_cart_item("eggs", db_path=alias_db)
-        record_cart_activity(
-            attempt,
-            action="cart_add",
-            result="ok (ok)",
-            activity_db_path=activity_db,
+        ledger_db = tmp_path / "finch_trip_ledger.db"
+        trip_id = reset_trip(db_path=ledger_db)
+        record_trip_add(
+            trip_id=trip_id,
+            normalized_name="eggs",
+            display_name="Kroger Grade A Large Eggs 12 ct",
+            product_id=None,
+            upc="0001111081708",
+            quantity=1,
+            requested_text="eggs",
+            source="api",
+            db_path=ledger_db,
         )
 
-        with patch(
-            "finch.api.list_cart_activity",
-            lambda **kwargs: list_cart_activity(
-                limit=kwargs.get("limit", 50),
-                db_path=activity_db,
-            ),
-        ):
-            response = api_client.get("/finch/cart/history", headers=AUTH_HEADERS)
+        response = api_client.get("/finch/cart/history", headers=AUTH_HEADERS)
 
         assert response.status_code == 200
-        entries = response.json()["entries"]
-        assert len(entries) == 1
-        assert entries[0]["requested_text"] == "eggs"
-        assert entries[0]["action"] == "cart_add"
-        assert entries[0]["upc"] == "0001111081708"
+        payload = response.json()
+        assert payload["title"] == "Finch added list"
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["normalized_name"] == "eggs"
+        assert "Finch added list" in payload["text"]
 
-    def test_history_empty(self, api_client, tmp_path: Path):
-        with patch("finch.api.list_cart_activity", return_value=[]):
-            response = api_client.get("/finch/cart/history", headers=AUTH_HEADERS)
+    def test_history_empty(self, api_client):
+        response = api_client.get("/finch/cart/history", headers=AUTH_HEADERS)
         assert response.status_code == 200
-        assert response.json()["entries"] == []
+        payload = response.json()
+        assert payload["items"] == []
+        assert "empty" in payload["text"].lower()
+
+
+class TestFinchApiTripLedger:
+    def test_duplicate_add_returns_message(self, api_client, monkeypatch):
+        monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env") as mock_load:
+                mock_client = MagicMock()
+                mock_client.add_to_cart.return_value = {"status": "ok"}
+                mock_load.return_value = mock_client
+                with patch("finch.api.ensure_fresh_user_token"):
+                    first = api_client.post(
+                        "/finch/cart/add",
+                        json={"item": "eggs"},
+                        headers=AUTH_HEADERS,
+                    )
+                    second = api_client.post(
+                        "/finch/cart/add",
+                        json={"item": "eggs"},
+                        headers=AUTH_HEADERS,
+                    )
+        assert first.status_code == 200
+        assert first.json()["ok"] is True
+        assert second.status_code == 200
+        assert second.json()["duplicate"] is True
+        assert "already added eggs this trip" in second.json()["message"]
+        assert mock_client.add_to_cart.call_count == 1
+
+    def test_reset_trip(self, api_client, monkeypatch):
+        monkeypatch.setenv("FINCH_LIVE_CART", "true")
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env") as mock_load:
+                mock_client = MagicMock()
+                mock_client.add_to_cart.return_value = {"status": "ok"}
+                mock_load.return_value = mock_client
+                with patch("finch.api.ensure_fresh_user_token"):
+                    api_client.post(
+                        "/finch/cart/add",
+                        json={"item": "eggs"},
+                        headers=AUTH_HEADERS,
+                    )
+                    reset = api_client.post("/finch/trip/reset", headers=AUTH_HEADERS)
+                    again = api_client.post(
+                        "/finch/cart/add",
+                        json={"item": "eggs"},
+                        headers=AUTH_HEADERS,
+                    )
+        assert reset.status_code == 200
+        assert again.status_code == 200
+        assert again.json()["ok"] is True
+        assert mock_client.add_to_cart.call_count == 2

@@ -42,13 +42,27 @@ def preview(text: str) -> dict[str, Any]:
     return _request("POST", "/finch/preview", json={"text": text})
 
 
-def cart_add(item: str) -> dict[str, Any]:
-    return _request("POST", "/finch/cart/add", json={"item": item})
+def cart_add(item: str, *, source: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"item": item}
+    if source:
+        body["source"] = source
+    return _request("POST", "/finch/cart/add", json=body)
 
 
-def cart_add_list(text: str) -> dict[str, Any]:
-    return _request("POST", "/finch/cart/add-list", json={"text": text})
+def cart_add_list(text: str, *, source: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"text": text}
+    if source:
+        body["source"] = source
+    return _request("POST", "/finch/cart/add-list", json=body)
 
 
-def cart_history(limit: int = 10) -> dict[str, Any]:
-    return _request("GET", "/finch/cart/history", params={"limit": limit})
+def cart_history(limit: int = 10, *, scope: str = "trip") -> dict[str, Any]:
+    return _request("GET", "/finch/cart/history", params={"limit": limit, "scope": scope})
+
+
+def trip_reset() -> dict[str, Any]:
+    return _request("POST", "/finch/trip/reset")
+
+
+def trip_undo_last() -> dict[str, Any]:
+    return _request("POST", "/finch/trip/undo-last")
