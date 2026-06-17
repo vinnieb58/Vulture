@@ -1,6 +1,26 @@
-# Facebook Marketplace Probe (probe-only)
+# Facebook Marketplace (experimental runtime adapter)
 
-Reconnaissance script for Vulture. **Not** registered in `adapters/registry.py` and **not** selectable in production hunts.
+Facebook Marketplace is registered in `adapters/registry.py` as **experimental** and **explicit opt-in only**. It is not included in any default vertical profile or translated hunt `source_sites`.
+
+Raven residential SSR smoke tests (May 2026) returned listings for queries such as steam deck, rtx 4070, 65 inch tv, and mercedes e550, but every run also reported `login_wall` and `captcha_checkpoint` blocker signals. Public access is fragile and may fail without notice.
+
+**Safety boundaries:** no credentials, session storage, cookie persistence, or CAPTCHA/login/checkpoint bypass are implemented. The adapter logs blocker warnings and returns any SSR listings present; otherwise `[]`.
+
+**Explicit usage:** add `facebook_marketplace` to a hunt's `source_sites` list only when you accept the fragility:
+
+```python
+resolve_source_sites("general", explicit_sources=["facebook_marketplace", "craigslist"])
+```
+
+Probe/recon script (isolated): `experiments/adapters/facebook_marketplace_probe.py`
+
+---
+
+# Facebook Marketplace Probe (probe-only recon)
+
+Reconnaissance script for Vulture. The experimental runtime adapter lives in
+`adapters/facebook_marketplace.py` (explicit opt-in via `source_sites` only).
+This probe remains useful for isolated viability checks without touching hunt runtime.
 
 ## Purpose
 

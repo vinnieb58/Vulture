@@ -23,6 +23,7 @@ from typing import Callable, Optional
 from adapters.bestbuy import search_bestbuy
 from adapters.carsdotcom import search_carsdotcom
 from adapters.craigslist import search_craigslist
+from adapters.facebook_marketplace import search_facebook_marketplace
 from adapters.mercari import search_mercari
 from adapters.microcenter import search_microcenter
 from adapters.newegg import search_newegg
@@ -286,6 +287,45 @@ _CAPABILITIES: dict[str, dict] = {
             "general_marketplace",
         ],
     },
+    # -------------------------------------------------------------------------
+    # Facebook Marketplace — experimental, explicit opt-in only
+    #
+    # NOT included in any default vertical profile or translated hunt defaults.
+    # Select only via hunt source_sites: ["facebook_marketplace", ...].
+    #
+    # Parsing: Playwright Chromium → SSR JSON / feed_units / DOM item links.
+    # Raven residential smoke tests (May 2026) returned listings for steam deck,
+    # rtx 4070, 65 inch tv, and mercedes e550 but every run also reported
+    # login_wall and captcha_checkpoint blockers. Public access is fragile.
+    #
+    # No credentials, cookies, sessions, or CAPTCHA/login bypass implemented.
+    # -------------------------------------------------------------------------
+    "facebook_marketplace": {
+        "status": "experimental",
+        "stable": False,
+        "experimental": True,
+        "flaky": True,
+        "browser_sensitive": True,
+        "blocking_risk": "login_captcha_checkpoint",
+        "failure_mode": "returns_empty_list",
+        "requires_browser": True,
+        "requires_login": False,
+        "supports_location": True,
+        "location_control": "city_slug",
+        "recommended_runtime": "residential_ip",
+        "supports_radius": False,
+        "supports_price_filter_in_url": False,
+        "explicit_opt_in_only": True,
+        "verticals": [
+            "general_marketplace",
+            "computer_parts",
+            "gaming",
+            "electronics",
+            "phones_tablets",
+            "vehicles",
+            "home_theater",
+        ],
+    },
 }
 
 # Reserved for future probe-only sources (no runtime adapter yet).
@@ -313,6 +353,7 @@ _REGISTRY: dict[str, Callable] = {
     "bestbuy": search_bestbuy,
     "carsdotcom": search_carsdotcom,
     "craigslist": search_craigslist,
+    "facebook_marketplace": search_facebook_marketplace,
     "microcenter": search_microcenter,
     "newegg": search_newegg,
     "offerup": search_offerup,
