@@ -57,6 +57,7 @@ _CAPABILITIES: dict[str, dict] = {
             "phones_tablets",
             "vehicles",
             "home_theater",
+            "furniture_home",
         ],
     },
     # -------------------------------------------------------------------------
@@ -98,6 +99,7 @@ _CAPABILITIES: dict[str, dict] = {
             "phones_tablets",
             "home_theater",
             "vehicles",
+            "furniture_home",
         ],
     },
     "mercari": {
@@ -288,10 +290,8 @@ _CAPABILITIES: dict[str, dict] = {
         ],
     },
     # -------------------------------------------------------------------------
-    # Facebook Marketplace — experimental, explicit opt-in only
-    #
-    # NOT included in any default vertical profile or translated hunt defaults.
-    # Select only via hunt source_sites: ["facebook_marketplace", ...].
+    # Facebook Marketplace — experimental; enabled in default vertical profiles
+    # for this single-user Raven deployment (not retail-only profiles).
     #
     # Parsing: Playwright Chromium → SSR JSON / feed_units / DOM item links.
     # Raven residential smoke tests (May 2026) returned listings for steam deck,
@@ -299,6 +299,7 @@ _CAPABILITIES: dict[str, dict] = {
     # login_wall and captcha_checkpoint blockers. Public access is fragile.
     #
     # No credentials, cookies, sessions, or CAPTCHA/login bypass implemented.
+    # Remove from default profiles if noisy or blocked; adapter stays registered.
     # -------------------------------------------------------------------------
     "facebook_marketplace": {
         "status": "experimental",
@@ -315,15 +316,18 @@ _CAPABILITIES: dict[str, dict] = {
         "recommended_runtime": "residential_ip",
         "supports_radius": False,
         "supports_price_filter_in_url": False,
-        "explicit_opt_in_only": True,
+        "default_profile_allowed": True,
         "verticals": [
+            "general",
             "general_marketplace",
             "computer_parts",
+            "laptops_computers",
             "gaming",
             "electronics",
             "phones_tablets",
             "vehicles",
             "home_theater",
+            "furniture_home",
         ],
     },
 }

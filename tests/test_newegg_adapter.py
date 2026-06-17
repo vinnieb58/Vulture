@@ -127,11 +127,15 @@ class TestNeweggRegistry:
             "newegg"
         ]
 
-    def test_vehicle_profile_unchanged(self):
-        assert resolve_source_sites("vehicles") == ["craigslist", "carsdotcom", "offerup"]
+    def test_vehicle_profile_excludes_newegg(self):
+        sites = resolve_source_sites("vehicles")
+        assert "newegg" not in sites
+        assert "facebook_marketplace" in sites
 
-    def test_tv_profile_unchanged(self):
-        assert resolve_source_sites("tv_home_theater") == ["craigslist", "offerup"]
+    def test_tv_profile_excludes_newegg(self):
+        sites = resolve_source_sites("tv_home_theater")
+        assert "newegg" not in sites
+        assert "facebook_marketplace" in sites
 
 
 class TestNeweggGracefulFailure:

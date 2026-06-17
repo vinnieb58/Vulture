@@ -32,6 +32,7 @@ def _expand_hunt_sources(hunt: dict) -> list[dict]:
 
 _COMPUTER_PARTS_DEFAULTS = [
     "craigslist",
+    "facebook_marketplace",
     "mercari",
     "offerup",
     "microcenter",
@@ -42,6 +43,7 @@ _COMPUTER_PARTS_DEFAULTS = [
 
 _GAMING_DEFAULTS = [
     "craigslist",
+    "facebook_marketplace",
     "mercari",
     "offerup",
     "swappa",
@@ -56,7 +58,14 @@ class TestVerticalProfiles:
 
     def test_laptops_computers_includes_retail_and_swappa(self):
         sites = resolve_source_sites("laptops_computers")
-        assert sites == ["mercari", "microcenter", "swappa", "bestbuy", "newegg"]
+        assert sites == [
+            "facebook_marketplace",
+            "mercari",
+            "microcenter",
+            "swappa",
+            "bestbuy",
+            "newegg",
+        ]
 
     def test_gaming_includes_swappa_bestbuy_newegg(self):
         assert resolve_source_sites("gaming") == _GAMING_DEFAULTS
@@ -66,7 +75,7 @@ class TestVerticalProfiles:
 
     def test_phones_tablets_includes_swappa(self):
         assert resolve_source_sites("phones_tablets") == [
-            "craigslist", "offerup", "swappa",
+            "craigslist", "facebook_marketplace", "offerup", "swappa",
         ]
 
     def test_retail_includes_all_retail_adapters(self):
@@ -74,24 +83,39 @@ class TestVerticalProfiles:
             "bestbuy", "microcenter", "newegg",
         ]
 
-    def test_vehicles_profile_unchanged(self):
+    def test_retail_excludes_facebook_marketplace(self):
+        sites = resolve_source_sites("retail")
+        assert sites == [
+            "bestbuy", "microcenter", "newegg",
+        ]
+        assert "facebook_marketplace" not in sites
+
+    def test_vehicles_profile_includes_facebook_marketplace(self):
         sites = resolve_source_sites("vehicles")
         assert "microcenter" not in sites
         assert "swappa" not in sites
         assert "bestbuy" not in sites
         assert "newegg" not in sites
-        assert sites == ["craigslist", "carsdotcom", "offerup"]
+        assert sites == [
+            "craigslist", "facebook_marketplace", "carsdotcom", "offerup",
+        ]
 
-    def test_tv_no_retail_sources(self):
+    def test_tv_includes_facebook_not_retail(self):
         sites = resolve_source_sites("tv_home_theater")
-        assert sites == ["craigslist", "offerup"]
+        assert sites == ["craigslist", "facebook_marketplace", "offerup"]
         assert "microcenter" not in sites
         assert "swappa" not in sites
 
-    def test_general_includes_mercari_not_retail(self):
+    def test_general_includes_facebook_and_mercari_not_retail(self):
         sites = resolve_source_sites("general")
-        assert sites == ["craigslist", "offerup", "mercari"]
+        assert sites == [
+            "craigslist", "facebook_marketplace", "offerup", "mercari",
+        ]
         assert "bestbuy" not in sites
+
+    def test_furniture_home_includes_facebook_marketplace(self):
+        sites = resolve_source_sites("furniture_home")
+        assert sites == ["craigslist", "facebook_marketplace", "offerup"]
 
     def test_pc_components_alias_matches_computer_parts(self):
         assert resolve_source_sites("pc_components") == resolve_source_sites(
@@ -150,11 +174,15 @@ class TestTranslatorIntegration:
 
     def test_vehicle_multi_source(self):
         t = translate("toyota sequoia under 50k miles under $30k")
-        assert t.source_sites == ["craigslist", "carsdotcom", "offerup"]
+        assert t.source_sites == [
+            "craigslist", "facebook_marketplace", "carsdotcom", "offerup",
+        ]
 
-    def test_tv_home_theater_unchanged(self):
+    def test_tv_home_theater_includes_facebook(self):
         t = translate("75 inch 4K TV under $500")
-        assert t.source_sites == ["craigslist", "offerup"]
+        assert t.source_sites == [
+            "craigslist", "facebook_marketplace", "offerup",
+        ]
 
 
 class TestMultiSourceFanOut:

@@ -148,37 +148,80 @@ class TestFacebookMarketplaceRegistry:
         assert "facebook_marketplace" in list_sources()
         assert get_adapter("facebook_marketplace") is search_facebook_marketplace
 
-    def test_capabilities_experimental_explicit_opt_in(self):
+    def test_capabilities_experimental_flaky_browser_sensitive(self):
         caps = get_capabilities("facebook_marketplace")
         assert caps is not None
         assert caps["stable"] is False
         assert caps["experimental"] is True
+        assert caps["flaky"] is True
+        assert caps["browser_sensitive"] is True
+        assert caps["blocking_risk"] == "login_captcha_checkpoint"
         assert caps["requires_browser"] is True
         assert caps["requires_login"] is False
-        assert caps.get("explicit_opt_in_only") is True
+        assert caps.get("default_profile_allowed") is True
+        assert caps.get("explicit_opt_in_only") is not True
         assert caps["failure_mode"] == "returns_empty_list"
 
-    def test_not_in_default_vertical_profiles(self):
+    def test_in_default_vertical_profiles(self):
         for vertical in (
             "computer_parts",
             "gaming",
             "electronics",
-            "retail",
             "vehicles",
             "tv_home_theater",
             "general",
             "general_marketplace",
             "phones_tablets",
             "laptops_computers",
+            "furniture_home",
         ):
-            assert "facebook_marketplace" not in resolve_source_sites(vertical)
+            assert "facebook_marketplace" in resolve_source_sites(vertical)
 
-    def test_explicit_source_sites_opt_in(self):
+    def test_excluded_from_retail_profile(self):
+        assert "facebook_marketplace" not in resolve_source_sites("retail")
+
+    def test_explicit_source_sites_override(self):
         sites = resolve_source_sites(
             "general",
             explicit_sources=["facebook_marketplace", "craigslist"],
         )
         assert sites == ["facebook_marketplace", "craigslist"]
+
+    def test_no_credentials_or_session_support(self):
+        import inspect
+
+        from adapters import facebook_marketplace as mod
+
+        fetch_source = inspect.getsource(mod._fetch_search_html)
+        assert "storage_state" not in fetch_source
+        assert "add_cookies" not in fetch_source
+        caps = get_capabilities("facebook_marketplace")
+        assert caps is not None
+        assert caps["requires_login"] is False
+
+
+class TestFacebookMarketplaceAdapterKwargs:
+    def test_accepts_common_hunt_kwargs_without_raising(self):
+        html = (FIXTURES / "search_ssr_sample.html").read_text(encoding="utf-8")
+        with patch(
+            "adapters.facebook_marketplace._fetch_search_html",
+            return_value=(
+                html,
+                "https://www.facebook.com/marketplace/houston/search/?query=steam+deck",
+                "Facebook Marketplace",
+                "houston",
+            ),
+        ):
+            result = search_facebook_marketplace(
+                "steam deck",
+                city="Houston, TX",
+                limit=5,
+                max_price=500,
+                min_price=50,
+                radius=25,
+                condition="used",
+            )
+        assert len(result) >= 2
 
 
 class TestFacebookMarketplaceAdapterKwargs:

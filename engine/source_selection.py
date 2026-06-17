@@ -25,6 +25,7 @@ _VERTICAL_ALIASES: dict[str, str] = {
 
 _COMPUTER_ELECTRONICS_SOURCES = [
     "craigslist",
+    "facebook_marketplace",
     "mercari",
     "offerup",
     "microcenter",
@@ -35,6 +36,7 @@ _COMPUTER_ELECTRONICS_SOURCES = [
 
 _GAMING_SOURCES = [
     "craigslist",
+    "facebook_marketplace",
     "mercari",
     "offerup",
     "swappa",
@@ -44,6 +46,7 @@ _GAMING_SOURCES = [
 
 _PHONES_TABLETS_SOURCES = [
     "craigslist",
+    "facebook_marketplace",
     "offerup",
     "swappa",
 ]
@@ -64,12 +67,12 @@ _VERTICAL_PROFILES: dict[str, list[str]] = {
     "electronics": list(_COMPUTER_ELECTRONICS_SOURCES),
     "phones_tablets": list(_PHONES_TABLETS_SOURCES),
     "retail": list(_RETAIL_SOURCES),
-    "vehicles": ["craigslist", "carsdotcom", "offerup"],
-    "tv_home_theater": ["craigslist", "offerup"],
-    "home_theater": ["craigslist", "offerup"],
-    "general": ["craigslist", "offerup", "mercari"],
-    "general_marketplace": ["craigslist", "offerup", "mercari"],
-    "furniture_home": ["craigslist", "offerup"],
+    "vehicles": ["craigslist", "facebook_marketplace", "carsdotcom", "offerup"],
+    "tv_home_theater": ["craigslist", "facebook_marketplace", "offerup"],
+    "home_theater": ["craigslist", "facebook_marketplace", "offerup"],
+    "general": ["craigslist", "facebook_marketplace", "offerup", "mercari"],
+    "general_marketplace": ["craigslist", "facebook_marketplace", "offerup", "mercari"],
+    "furniture_home": ["craigslist", "facebook_marketplace", "offerup"],
 }
 
 # Alias for callers that want the full vertical map (same as runtime profiles).

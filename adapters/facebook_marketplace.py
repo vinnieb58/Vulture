@@ -3,11 +3,17 @@ adapters/facebook_marketplace.py
 
 Facebook Marketplace search adapter for Vulture.
 
-Status: EXPERIMENTAL — explicit opt-in only; not in default source profiles.
+Status: EXPERIMENTAL — included in selected default vertical profiles for
+this single-user Raven deployment (marketplace/general verticals, not retail).
 ----------------------------------------------------------------------
 Raven residential smoke tests (May 2026) returned SSR listings for common
 queries but every run also reported ``login_wall`` and ``captcha_checkpoint``
 blockers. Public access is fragile and may fail without warning.
+
+Public SSR access is fragile and often reports login_wall/captcha_checkpoint.
+No login, cookies, sessions, or CAPTCHA bypass are implemented. If Facebook
+becomes noisy or blocked, remove it from default profiles in
+``engine/source_selection.py`` but leave this adapter registered.
 
 Parsing strategy
 ----------------
@@ -230,10 +236,9 @@ def search_facebook_marketplace(
     """
     Search Facebook Marketplace and return up to *limit* ``Listing`` objects.
 
-    Experimental and explicit opt-in only — include ``facebook_marketplace`` in
-    a hunt's ``source_sites`` list. Not part of any default vertical profile.
-
-    When login/CAPTCHA blockers are detected, logs a warning. Returns any SSR
+    Experimental — included in selected default vertical profiles for this
+    single-user Raven deployment. Public SSR access is fragile; login/CAPTCHA
+    blockers may appear. When blockers are detected, logs a warning. Returns any SSR
     listings extracted from the page when present; otherwise returns ``[]``.
     Never raises.
 
