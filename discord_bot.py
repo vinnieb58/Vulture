@@ -30,6 +30,11 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 from crow.bot import setup_crow
+from discord_messages import (
+    SAFE_MESSAGE_LIMIT,
+    paginate_command_message,
+    send_paginated_followup,
+)
 from engine.command_router import dispatch
 from engine.database import init_db
 from engine.hunt_repository import init_hunts_table
@@ -63,8 +68,8 @@ if not BOT_TOKEN:
 _raw_guild_id = os.getenv("DISCORD_GUILD_ID", "").strip()
 GUILD = discord.Object(id=int(_raw_guild_id)) if _raw_guild_id.isdigit() else None
 
-# Discord limits one message to 2000 characters; leave room for truncation notice.
-_MAX_MSG = 1900
+# Discord message limit shared with Crow commands on the same bot runtime.
+_MAX_MSG = SAFE_MESSAGE_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +83,15 @@ def _split_csv(value: str | None) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def _reply_text(result) -> str:
-    """Return result.message, truncated to Discord's message limit if needed."""
-    text = result.message
-    if len(text) > _MAX_MSG:
-        text = text[:_MAX_MSG] + "\n…*(truncated)*"
-    return text
+async def _send_command_result(
+    interaction: discord.Interaction,
+    result,
+    *,
+    command: str | None = None,
+) -> None:
+    """Send a command result across one or more paginated Discord messages."""
+    pages = paginate_command_message(result, command=command)
+    await send_paginated_followup(interaction, pages, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +145,7 @@ async def hunt_list(
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     result = dispatch("list", {"status": status or None})
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result, command="list")
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +160,7 @@ async def hunt_show(
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     result = dispatch("show", {"hunt_id": hunt_id.strip()})
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +205,7 @@ async def hunt_create(
         "notes":            notes,
         "created_by":       str(interaction.user),
     })
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +220,7 @@ async def hunt_pause(
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     result = dispatch("pause", {"hunt_id": hunt_id.strip()})
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +235,7 @@ async def hunt_resume(
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     result = dispatch("resume", {"hunt_id": hunt_id.strip()})
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +250,7 @@ async def hunt_end(
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     result = dispatch("end", {"hunt_id": hunt_id.strip()})
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +282,7 @@ async def hunt(
         "max_price":  max_price,
         "created_by": str(interaction.user),
     })
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +314,7 @@ async def hunt_from_intent(
         "max_price":  max_price,
         "created_by": str(interaction.user),
     })
-    await interaction.followup.send(_reply_text(result), ephemeral=True)
+    await _send_command_result(interaction, result)
 
 
 # ---------------------------------------------------------------------------
