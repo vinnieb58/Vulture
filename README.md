@@ -10,6 +10,7 @@
 | **Crow** | Discord read-only ops / Raven health checks |
 | **Canary** | Periodic read-only monitoring (JSON + logs) |
 | **Dashboard** | Read-only web ops UI (`:8088`) |
+| **Sparrow** | Toddler school meal ordering assist (Simply Fresh — experiment) |
 | **Roost** | Storage/NAS layer (`/mnt/storage/*`) |
 
 **Start here:** [docs/current/AVIARY_PROJECT_CONTEXT.md](docs/current/AVIARY_PROJECT_CONTEXT.md) — authoritative platform context, service catalog, Raven runtime, and agent guidance.
@@ -33,6 +34,7 @@ Vulture-specific docs live under `docs/current/VULTURE_*.md`. Crow: [docs/CROW_V
 ├── config/hunts.yaml       # Legacy YAML hunts (dev / yaml mode only)
 ├── data/vulture.db         # SQLite (runtime; auto-created)
 ├── docs/current/           # Current-state documentation
+│   └── SPARROW_MEAL_ORDERING.md  # Sparrow (Simply Fresh meal ordering experiment)
 └── scripts/                # Raven deploy and smoke scripts
 ```
 
@@ -137,5 +139,6 @@ Systemd model: [docs/current/RAVEN_SYSTEMD_RUNTIME.md](docs/current/RAVEN_SYSTEM
 | [AVIARY_PROJECT_CONTEXT.md](docs/current/AVIARY_PROJECT_CONTEXT.md) | Platform vision, services, Raven inventory, accuracy notes |
 | [CODEBASE_STATUS.md](docs/current/CODEBASE_STATUS.md) | Implementation-grounded code map |
 | [PROJECT_STATUS.md](docs/current/PROJECT_STATUS.md) | Current workstream / priorities |
+| [SPARROW_MEAL_ORDERING.md](docs/current/SPARROW_MEAL_ORDERING.md) | Sparrow — Simply Fresh toddler meal ordering (experiment) |
 | [OPERATING_MODEL.md](docs/current/OPERATING_MODEL.md) | How Vulture runs in production |
 | [SESSION_LOG.md](docs/current/SESSION_LOG.md) | Session history |

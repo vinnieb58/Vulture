@@ -1,6 +1,6 @@
 # Codebase Status (Current)
 
-Last refreshed: 2026-06-10 (UTC)
+Last refreshed: 2026-06-17 (UTC)
 
 **Platform context:** [AVIARY_PROJECT_CONTEXT.md](AVIARY_PROJECT_CONTEXT.md) — this file focuses on **what is implemented in code**.
 
@@ -18,6 +18,7 @@ Last refreshed: 2026-06-10 (UTC)
 | Vulture + Crow Discord | `discord_bot.py`, `crow/` | `vulture-bot.service` |
 | Canary | `canary/` | `docker-compose.canary.yml` |
 | Dashboard | `dashboard/` | `docker-compose.dashboard.yml` (`:8088`) |
+| Sparrow (meal ordering) | `experiments/simplyfresh_probe/` | Manual Playwright probes only — **no systemd** |
 | Roost (storage) | — | Host `/mnt/storage/*`; observed by above |
 
 ## Runtime entrypoints
@@ -26,6 +27,17 @@ Last refreshed: 2026-06-10 (UTC)
 - `discord_bot.py` — Discord slash commands (Vulture hunts + Crow v0.2 ops)
 - `canary/app.py` — periodic health checks (Docker)
 - `dashboard/app.py` — read-only ops UI (Docker)
+
+## Sparrow (meal ordering experiment)
+
+- `experiments/simplyfresh_probe/probe_simplyfresh.py` — feasibility + manual login session save
+- `experiments/simplyfresh_probe/probe_meal_selection.py` — inspect-only + dry-run meal selection
+- `experiments/simplyfresh_probe/probe_common.py` — navigation, profile dedup, overlay/modal dismiss
+- `experiments/simplyfresh_probe/meal_classification.py` — vegetarian / non-veg meal rules
+- Session: `experiments/simplyfresh_probe/.auth/simplyfresh_storage_state.json` (gitignored)
+- Docs: [SPARROW_MEAL_ORDERING.md](SPARROW_MEAL_ORDERING.md)
+- Tests: `tests/test_simplyfresh_*.py`
+- **Not deployed** — no systemd unit, no timer, operator-invoked only
 
 ## Core Vulture modules
 

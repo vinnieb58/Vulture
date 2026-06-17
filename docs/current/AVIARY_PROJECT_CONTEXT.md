@@ -1,6 +1,6 @@
 # Aviary Project Context
 
-_Authoritative transition document — last refreshed: 2026-06-10 (UTC)_
+_Authoritative transition document — last refreshed: 2026-06-17 (UTC)_
 
 This repository is the **Aviary monorepo**: one codebase that hosts multiple services for a personal/self-hosted platform. **Vulture** is one service inside it, not the whole platform.
 
@@ -30,6 +30,7 @@ Naming follows bird motifs. Services may start in this repo and later split into
 | **Crow** | Discord operations / read-only Raven+Vulture checks | **Active v0.2** | `crow/`, `docs/CROW_V0_1.md`, `docs/CROW_V0_2.md` |
 | **Canary** | Periodic read-only Raven monitoring (JSON + logs) | **Active v0.1** | `canary/`, `docker-compose.canary.yml` |
 | **Dashboard** | Read-only web ops UI (Raven health, Vulture runtime, storage) | **Active v0.2** | `dashboard/`, `docker-compose.dashboard.yml` |
+| **Sparrow** | Toddler school meal ordering assist (Simply Fresh Kitchen) | **Experiment v0** — manual Playwright probes only | `experiments/simplyfresh_probe/`, `docs/current/SPARROW_MEAL_ORDERING.md` |
 | **Roost** | Storage / NAS layer (mounts under `/mnt/storage`) | **Operational** (filesystem + monitoring) | Observed by dashboard, Canary, Crow; not a separate daemon yet |
 | **Nest** | Future unified dashboard / API surface | Planned | Referenced in Crow docs as future consumer of `crow/system/` |
 | **Magpie** | Planned | Emerging / unnamed scope | — |
@@ -206,6 +207,7 @@ Probe-only / no runtime adapter: eBay and others under `experiments/adapters/`.
 | Priority | Item |
 |----------|------|
 | Near-term | Adapter smoke evidence; docs/code sync; Crow mount defaults → `/mnt/storage` |
+| Near-term | **Sparrow** meal-ordering experiment — manual dry-run validation on Raven (no scheduler yet) |
 | Medium | Canary → Discord alerts; Nest consuming `crow/system/` APIs |
 | Medium | Controlled restarts (Crow v0.3+) with admin gating |
 | Longer | Extract Crow to own container/repo if boundaries require |
@@ -257,6 +259,7 @@ _Last verification: 2026-06-10_
 - systemd units: `vulture-bot.service`, `vulture-scheduler.service` (oneshot), `vulture-scheduler.timer`.
 - `.env.example` sets `VULTURE_HUNT_SOURCE=db`.
 - Vertical source profiles in `engine/source_selection.py`.
+- Sparrow v0 Playwright probes under `experiments/simplyfresh_probe/` (manual only; no systemd).
 
 ### Inferred from docs / history
 
