@@ -218,18 +218,16 @@ class TestDashboardHTTP:
             encoding="utf-8",
         )
         monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
         response = self._stub_host(client)
         assert response.status_code == 200
         text = response.text
         assert "Energy data available" in text
         assert "42.50" in text
-        assert "2.50" in text
-        assert "10.00" in text
         assert "Missing intervals" in text
-        assert "Mon 6/15, 1:00–1:15 PM" in text
-        assert "Mon 6/15 — 6.25 kWh" in text
-        assert "→" in text
-        assert "Daily totals" in text
+        assert "Top intervals" not in text
+        assert "Daily totals" not in text
+        assert "Energy details" in text
         assert "2026-06-15T18:00:00+00:00" not in text
         assert "2026-06-16T12:00:00+00:00" not in text
 
@@ -286,9 +284,10 @@ class TestDashboardHTTP:
             encoding="utf-8",
         )
         monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
         response = self._stub_host(client)
         assert response.status_code == 200
-        assert "Est. peak kW (15-min)" in response.text
+        assert "Est. peak kW (15-min)" not in response.text
 
     def test_nest_home_shows_navigation(self, client):
         response = self._stub_host(client)

@@ -7,6 +7,7 @@ or other write/admin actions. Intended for local / Tailscale access on Raven.
 Routes
 ------
 /          Nest Overview    tablet-friendly summary cards (default)
+/kestrel   Kestrel detail   read-only energy charts and summaries
 /storage   Storage detail   per-drive status and usage
 /vulture   Vulture detail   scheduler / bot / hunts
 /advanced  Raven Ops        original dense operational view (v0.2)
@@ -21,6 +22,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from db_readers import DB_PATH, read_db_snapshot
@@ -34,7 +36,8 @@ from host_status import (
     get_storage_status,
     status_display_class,
 )
-from kestrel_formatting import format_kestrel_card_display
+from kestrel_formatting import format_kestrel_card_display, format_kestrel_detail_display
+from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_metrics_history import sample_and_get_peaks
@@ -44,6 +47,11 @@ AUTO_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_AUTO_REFRESH_SECONDS", "30"
 
 app = FastAPI(title="Nest Dashboard", version="1.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).parent / "static")),
+    name="static",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +254,37 @@ def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
         "no_data": "unknown",
         "error": "fail",
     }
-    display = format_kestrel_card_display(kestrel)
+    try:
+        metrics = get_home_metrics()
+    except Exception:
+        metrics = {}
+    display = format_kestrel_card_display(kestrel, metrics)
+    return {
+        "status": status_labels.get(state, "No data"),
+        "style": style_map.get(state, "unknown"),
+        "headline": kestrel.get("headline", "No energy data yet"),
+        **display,
+    }
+
+
+def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
+    """Read-only Kestrel detail page context."""
+    state = kestrel.get("state", "no_data")
+    status_labels = {
+        "available": "Available",
+        "no_data": "No data",
+        "error": "Error",
+    }
+    style_map = {
+        "available": "ok",
+        "no_data": "unknown",
+        "error": "fail",
+    }
+    try:
+        metrics = get_detail_metrics()
+    except Exception:
+        metrics = {"available": False}
+    display = format_kestrel_detail_display(kestrel, metrics)
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
@@ -425,6 +463,24 @@ async def nest_overview(request: Request) -> HTMLResponse:
         "db": db,
     }
     return templates.TemplateResponse(request, "nest.html", context)
+
+
+@app.get("/kestrel", response_class=HTMLResponse)
+async def kestrel_detail(request: Request) -> HTMLResponse:
+    """Kestrel detail — read-only energy charts and summaries."""
+    refreshed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    kestrel_status = read_kestrel_status()
+    kestrel = _compute_kestrel_detail(kestrel_status)
+
+    context = {
+        "title": "Kestrel",
+        "version": "1.0",
+        "page": "kestrel",
+        "refreshed_at": refreshed_at,
+        "auto_refresh_seconds": AUTO_REFRESH_SECONDS,
+        "kestrel": kestrel,
+    }
+    return templates.TemplateResponse(request, "kestrel.html", context)
 
 
 @app.get("/storage", response_class=HTMLResponse)
