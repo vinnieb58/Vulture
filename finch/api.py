@@ -47,6 +47,15 @@ from finch.trip_ledger import (
     undo_last_trip_item,
 )
 from finch.pending_selection import clear_pending_selection, get_pending_selection
+from finch.aliases import delete_aliases_matching_normalized, lookup_alias
+from finch.preferences import (
+    alias_preference_key,
+    build_preferences_list,
+    forget_preference,
+    get_preference_text,
+    preference_to_dict,
+    prepare_change_preference,
+)
 from finch.env_util import load_env
 from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
 from finch.preview import build_preview
@@ -155,6 +164,17 @@ class PendingSearchRequest(BaseModel):
 
 class PendingCancelRequest(BaseModel):
     chat_key: str = Field(..., min_length=1)
+
+
+class PreferenceChangeRequest(BaseModel):
+    item: str = Field(..., min_length=1)
+    chat_key: str = Field(..., min_length=1)
+    source: str | None = None
+
+
+class PreferenceAliasRequest(BaseModel):
+    from_key: str = Field(..., min_length=1)
+    to_key: str = Field(..., min_length=1)
 
 
 def _needs_choice_response(outcome: NeedsChoiceOutcome) -> dict[str, Any]:
@@ -387,6 +407,71 @@ def create_app() -> FastAPI:
         if not pending:
             return {"ok": True, "pending": None}
         return {"ok": True, "pending": pending.to_dict()}
+
+    @application.get("/finch/preferences", dependencies=[Depends(require_finch_key)])
+    def finch_preferences_list() -> dict[str, Any]:
+        payload = build_preferences_list()
+        return {"ok": True, **payload}
+
+    @application.get("/finch/preferences/{item}", dependencies=[Depends(require_finch_key)])
+    def finch_preference_get(item: str) -> dict[str, Any]:
+        entry = lookup_alias(item)
+        if entry is None:
+            return {
+                "ok": True,
+                "found": False,
+                "text": get_preference_text(item),
+            }
+        return {
+            "ok": True,
+            "found": True,
+            "preference": preference_to_dict(entry),
+            "text": get_preference_text(item),
+        }
+
+    @application.delete("/finch/preferences/{item}", dependencies=[Depends(require_finch_key)])
+    def finch_preference_delete(item: str) -> dict[str, Any]:
+        from finch.preferences import format_forget_message
+
+        removed = delete_aliases_matching_normalized(item)
+        message = format_forget_message(item, removed)
+        return {
+            "ok": True,
+            "removed": [preference_to_dict(entry) for entry in removed],
+            "text": message,
+        }
+
+    @application.post("/finch/preferences/change", dependencies=[Depends(require_finch_key)])
+    def finch_preference_change(body: PreferenceChangeRequest) -> dict[str, Any]:
+        try:
+            require_live_cart()
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        client = load_kroger_client_from_env()
+        try:
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            outcome = prepare_change_preference(
+                body.item,
+                chat_key=body.chat_key,
+                client=client,
+            )
+        except CartResolveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return _needs_choice_response(outcome)
+
+    @application.post("/finch/preferences/alias", dependencies=[Depends(require_finch_key)])
+    def finch_preference_alias(body: PreferenceAliasRequest) -> dict[str, Any]:
+        message = alias_preference_key(body.from_key, body.to_key)
+        return {"ok": True, "text": message}
 
     @application.get("/finch/cart/history", dependencies=[Depends(require_finch_key)])
     def finch_cart_history(limit: int = 50, scope: str = "trip") -> dict[str, Any]:

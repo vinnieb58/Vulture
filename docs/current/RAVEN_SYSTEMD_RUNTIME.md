@@ -198,6 +198,36 @@ Crow v0.1 remains read-only (no restarts from Discord).
 
 The read-only dashboard container (`docker-compose.dashboard.yml`) is separate from bot/scheduler runtime. The dashboard treats **`vulture-scheduler.timer`** as the scheduler heartbeat. An inactive oneshot service between runs is healthy when the timer is active and recent hunt-cycle logs exist.
 
+See `docs/current/RAVEN_RESTART_SURVIVAL_PLAN.md` and `docs/current/RAVEN_BOOT_WARNINGS.md` (optional Priority 7 noise reduction).
+
+## Manual DB maintenance — prune ended hunts
+
+Ended hunts remain in `data/vulture.db` until removed manually. The listings table is a global dedup cache (no `hunt_id` column) and is **not** modified by this script.
+
+**Dry-run (default)** — shows what would be deleted:
+
+```bash
+cd /home/vinnieb58/projects/vulture
+python scripts/prune_ended_hunts.py
+# or explicitly:
+python scripts/prune_ended_hunts.py --dry-run
+```
+
+**Apply** — deletes `status = ended` rows from `hunts` only:
+
+```bash
+python scripts/prune_ended_hunts.py --apply
+python scripts/prune_ended_hunts.py --apply --db data/vulture.db
+```
+
+Stop or restart `vulture-bot.service` before applying if you want a clean bot process state after large prune operations (not strictly required for read-only hunt list commands, but recommended after schema-affecting maintenance):
+
+```bash
+sudo systemctl restart vulture-bot.service
+```
+
+This script is **not** wired into the scheduler or Discord; run it manually when cleaning up old ended hunts.
+
 ## Reboot survival
 
 Bot and scheduler survive reboot only when their units are **enabled**:

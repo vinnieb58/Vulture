@@ -57,13 +57,15 @@ python experiments/kestrel/smart_meter_texas_probe.py --import-csv ~/imports/smt
 cd /home/vinnieb58/projects/vulture
 source .venv/bin/activate
 # Ensure KESTREL_ENABLED=true and SMT credentials in .env
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 7
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --from 2026-06-01 --to 2026-06-16
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 3 --no-browser-fallback
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 2 --dry-run
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --debug-safe
 python experiments/kestrel/smart_meter_texas_probe.py --summary-only
 ```
 
-`--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then optionally falls back to Playwright CSV export. Use `--no-browser-fallback` for timer-safe API-only runs.
+`--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then optionally falls back to Playwright CSV export. MFA/CAPTCHA blocks fail clearly without bypass attempts. Use `--no-browser-fallback` for timer-safe API-only runs.
 
 By default, `--live-refresh --days N` excludes the current local day (America/Chicago) because SMT interval data may lag 24–48 hours. Use `--include-current-day` to request today's unpublished data.
 
