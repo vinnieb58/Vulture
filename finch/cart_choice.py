@@ -241,6 +241,8 @@ def save_preference_from_pending(
             upc=entry.upc,
             search_term=entry.search_term,
             notes="Pinned via Finch search selection",
+            product_size=result.size,
+            product_price=result.price,
         ),
         db_path,
     )

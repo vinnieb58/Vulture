@@ -1,4 +1,4 @@
-"""Tests for Finch preference management commands and API."""
+"""Tests for Finch preference listing and management."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from finch.pending_selection import (
     get_pending_selection,
     make_chat_key,
 )
+from finch.preferences import format_preferences_list
 
 
 @pytest.fixture(autouse=True)
@@ -93,6 +94,16 @@ BAGEL_RESULTS = [
     ),
 ]
 
+BANANA_RESULTS = [
+    PendingSearchResult(
+        product_id="banana-1",
+        upc="0001111000100",
+        description="Simple Truth Organic Bananas",
+        size="bunch",
+        price="$1.99",
+    ),
+]
+
 
 def _mock_kroger_client():
     mock_client = MagicMock()
@@ -120,14 +131,14 @@ def _patch_search(results: list[PendingSearchResult] | None = None):
     return patch("finch.cart_choice.run_search", side_effect=fake_search)
 
 
-def _save_bagel_preference(api_client, *, selection: int = 1) -> None:
+def _save_preference(api_client, item: str, *, selection: int = 1, results=None) -> None:
     with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
         with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
             with patch("finch.api.ensure_fresh_user_token"):
-                with _patch_search():
+                with _patch_search(results):
                     api_client.post(
                         "/finch/cart/add",
-                        json={"item": "bagel", "chat_key": CHAT_KEY},
+                        json={"item": item, "chat_key": CHAT_KEY},
                         headers=AUTH_HEADERS,
                     )
                     api_client.post(
@@ -141,9 +152,38 @@ def _save_bagel_preference(api_client, *, selection: int = 1) -> None:
                     )
 
 
+class TestPreferenceListingFormat:
+    def test_empty_preferences_response(self, alias_db: Path):
+        text = format_preferences_list(db_path=alias_db)
+        assert "No saved Finch preferences yet." in text
+        assert 'Use "add bagels"' in text
+        assert "prefer 1" in text
+
+    def test_preferences_with_multiple_saved_items(self, api_client, alias_db: Path):
+        _save_preference(api_client, "bagel")
+        _save_preference(api_client, "bananas", results=BANANA_RESULTS)
+        text = format_preferences_list(db_path=alias_db)
+        assert "Saved Finch preferences:" in text
+        assert "- bagel → Thomas Plain Bagels (6 ct, $3.99)" in text
+        assert "- banana → Simple Truth Organic Bananas (bunch, $1.99)" in text
+
+    def test_aliases_shown_separately(self, api_client, alias_db: Path):
+        _save_preference(api_client, "bagel")
+        api_client.post(
+            "/finch/preferences/alias",
+            json={"from_key": "plain bagels", "to_key": "bagel"},
+            headers=AUTH_HEADERS,
+        )
+        text = format_preferences_list(db_path=alias_db)
+        assert "Saved Finch preferences:" in text
+        assert "- bagel → Thomas Plain Bagels" in text
+        assert "Aliases:" in text
+        assert "- plain bagels → bagel" in text
+
+
 class TestPreferenceNormalizationApi:
     def test_prefer_bagel_lookup_bagels(self, api_client, alias_db: Path):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         from finch.aliases import get_alias
 
         saved = get_alias("bagels", alias_db)
@@ -152,7 +192,7 @@ class TestPreferenceNormalizationApi:
         assert saved.upc == "0001111000001"
 
     def test_add_bagels_uses_bagel_preference(self, api_client, alias_db: Path):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
             mock_client = _mock_kroger_client()
             with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
@@ -170,14 +210,17 @@ class TestPreferenceNormalizationApi:
 
 class TestPreferenceManagementApi:
     def test_prefs_list_formatting(self, api_client):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         response = api_client.get("/finch/preferences", headers=AUTH_HEADERS)
         assert response.status_code == 200
         payload = response.json()
-        assert "bagel -> Thomas Plain Bagels" in payload["text"]
+        assert "Saved Finch preferences:" in payload["text"]
+        assert "- bagel → Thomas Plain Bagels (6 ct, $3.99)" in payload["text"]
+        assert payload["preferences"][0]["product_size"] == "6 ct"
+        assert payload["preferences"][0]["product_price"] == "$3.99"
 
     def test_pref_item_hit_and_miss(self, api_client):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         hit = api_client.get("/finch/preferences/bagels", headers=AUTH_HEADERS)
         assert hit.status_code == 200
         assert hit.json()["found"] is True
@@ -189,7 +232,7 @@ class TestPreferenceManagementApi:
         assert "add unknown-item" in miss.json()["text"].lower()
 
     def test_forget_removes_normalized_key(self, api_client, alias_db: Path):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         from finch.aliases import get_alias
 
         assert get_alias("bagel", alias_db) is not None
@@ -199,7 +242,7 @@ class TestPreferenceManagementApi:
         assert get_alias("bagel", alias_db) is None
 
     def test_change_creates_pending_despite_existing_preference(self, api_client):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
             with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
                 with patch("finch.api.ensure_fresh_user_token"):
@@ -217,7 +260,7 @@ class TestPreferenceManagementApi:
         assert pending.normalized_name == "bagel"
 
     def test_change_prefer_replaces_preference(self, api_client, alias_db: Path):
-        _save_bagel_preference(api_client)
+        _save_preference(api_client, "bagel")
         with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
             with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
                 with patch("finch.api.ensure_fresh_user_token"):
@@ -245,18 +288,28 @@ class TestPreferenceManagementApi:
 
 
 class TestTelegramPreferenceCommands:
+    def test_parse_preference_list_commands(self):
+        from finch_telegram.commands import PrefsCommand, parse_command
+
+        for text in (
+            "prefs",
+            "preferences",
+            "list prefs",
+            "list preferences",
+            "show prefs",
+            "show preferences",
+        ):
+            assert isinstance(parse_command(text), PrefsCommand), text
+
     def test_parse_preference_commands(self):
         from finch_telegram.commands import (
             AliasPrefCommand,
             ChangePrefCommand,
             ForgetPrefCommand,
             PrefCommand,
-            PrefsCommand,
             parse_command,
         )
 
-        assert isinstance(parse_command("prefs"), PrefsCommand)
-        assert isinstance(parse_command("preferences"), PrefsCommand)
         pref = parse_command("pref bagels")
         assert isinstance(pref, PrefCommand)
         assert pref.item == "bagels"
@@ -267,10 +320,18 @@ class TestTelegramPreferenceCommands:
         assert isinstance(remove, ForgetPrefCommand)
         change = parse_command("change bagels")
         assert isinstance(change, ChangePrefCommand)
-        alias = parse_command("alias bagels to bagel")
+        alias = parse_command("alias plain bagels to bagel")
         assert isinstance(alias, AliasPrefCommand)
-        assert alias.new_key == "bagels"
+        assert alias.new_key == "plain bagels"
         assert alias.existing_key == "bagel"
+
+    def test_help_text_includes_preference_commands(self):
+        from finch_telegram.commands import HELP_TEXT
+
+        assert "prefs" in HELP_TEXT
+        assert "pref ITEM" in HELP_TEXT
+        assert "forget ITEM" in HELP_TEXT
+        assert "change ITEM" in HELP_TEXT
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.preferences_list")
@@ -284,18 +345,46 @@ class TestTelegramPreferenceCommands:
         from finch_telegram.telegram_client import InboundTextMessage
 
         mock_list.return_value = {
-            "text": "Saved preferences:\nbagel -> Thomas Plain Bagels",
+            "text": "Saved Finch preferences:\n- bagel → Thomas Plain Bagels (6 ct, $3.99)",
         }
         process_inbound(
             InboundTextMessage(
                 chat_id="111222333",
                 user_id="111222333",
-                text="prefs",
+                text="list prefs",
                 update_id=60,
             )
         )
         body = mock_send.call_args[0][1]
-        assert "bagel -> Thomas Plain Bagels" in body
+        assert "Saved Finch preferences:" in body
+        assert "Thomas Plain Bagels" in body
+
+    @patch("finch_telegram.handler.telegram_client.send_text_message")
+    @patch("finch_telegram.handler.finch_client.preference_get")
+    def test_pref_alias_lookup_handler(self, mock_get, mock_send, monkeypatch):
+        monkeypatch.setenv("FINCH_TELEGRAM_TEST_MODE", "1")
+        monkeypatch.setenv("FINCH_TELEGRAM_BOT_TOKEN", "test-telegram-bot-token")
+        monkeypatch.setenv("FINCH_TELEGRAM_ALLOWED_USER_IDS", "111222333")
+        monkeypatch.setenv("FINCH_API_KEY", "test-fin-api-key")
+
+        from finch_telegram.handler import process_inbound
+        from finch_telegram.telegram_client import InboundTextMessage
+
+        mock_get.return_value = {
+            "found": True,
+            "text": "bagel → Thomas Plain Bagels (6 ct, $3.99)",
+        }
+        process_inbound(
+            InboundTextMessage(
+                chat_id="111222333",
+                user_id="111222333",
+                text="pref plain bagels",
+                update_id=62,
+            )
+        )
+        mock_get.assert_called_once_with("plain bagels")
+        body = mock_send.call_args[0][1]
+        assert "Thomas Plain Bagels" in body
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.preference_change")

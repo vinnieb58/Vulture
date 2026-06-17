@@ -47,11 +47,11 @@ from finch.trip_ledger import (
     undo_last_trip_item,
 )
 from finch.pending_selection import clear_pending_selection, get_pending_selection
-from finch.aliases import delete_aliases_matching_normalized, get_all_aliases, lookup_alias
+from finch.aliases import delete_aliases_matching_normalized, lookup_alias
 from finch.preferences import (
     alias_preference_key,
+    build_preferences_list,
     forget_preference,
-    format_preferences_list,
     get_preference_text,
     preference_to_dict,
     prepare_change_preference,
@@ -410,18 +410,8 @@ def create_app() -> FastAPI:
 
     @application.get("/finch/preferences", dependencies=[Depends(require_finch_key)])
     def finch_preferences_list() -> dict[str, Any]:
-        entries = get_all_aliases()
-        pinned = [
-            preference_to_dict(entry)
-            for entry in entries
-            if entry.notes and "Pinned via" in entry.notes
-        ]
-        pinned.sort(key=lambda item: item["alias_key"])
-        return {
-            "ok": True,
-            "preferences": pinned,
-            "text": format_preferences_list(),
-        }
+        payload = build_preferences_list()
+        return {"ok": True, **payload}
 
     @application.get("/finch/preferences/{item}", dependencies=[Depends(require_finch_key)])
     def finch_preference_get(item: str) -> dict[str, Any]:

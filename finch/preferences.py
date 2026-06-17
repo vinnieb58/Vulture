@@ -8,6 +8,7 @@ from typing import Any
 from finch.aliases import (
     delete_aliases_matching_normalized,
     get_all_aliases,
+    get_all_preference_redirects,
     lookup_alias,
     set_preference_redirect,
 )
@@ -21,21 +22,84 @@ from finch.models import AliasEntry
 from finch.parser import parse_grocery_text
 from finch.preference_norm import normalize_preference_key
 
+_EMPTY_PREFS_TEXT = (
+    'No saved Finch preferences yet.\n'
+    'Use "add bagels", then reply "prefer 1" to save one.'
+)
+
+
+def _is_user_pinned(entry: AliasEntry) -> bool:
+    return bool(entry.notes and "Pinned via" in entry.notes)
+
+
+def _format_product_detail(entry: AliasEntry) -> str:
+    detail = entry.display_name
+    extras: list[str] = []
+    if entry.product_size:
+        extras.append(entry.product_size)
+    if entry.product_price:
+        extras.append(entry.product_price)
+    if extras:
+        detail = f"{detail} ({', '.join(extras)})"
+    return detail
+
+
+def format_preference_line(entry: AliasEntry) -> str:
+    return f"- {entry.alias_key} → {_format_product_detail(entry)}"
+
+
+def format_alias_line(from_key: str, to_key: str) -> str:
+    return f"- {from_key} → {to_key}"
+
+
+def _collect_preferences_data(
+    db_path: Path | None = None,
+) -> tuple[list[AliasEntry], list[tuple[str, str]]]:
+    entries = get_all_aliases(db_path)
+    pinned = sorted(
+        (entry for entry in entries if _is_user_pinned(entry)),
+        key=lambda item: item.alias_key,
+    )
+    redirects = get_all_preference_redirects(db_path)
+    return pinned, redirects
+
+
+def build_preferences_list(*, db_path: Path | None = None) -> dict[str, Any]:
+    """Build structured preference list data for API and Telegram formatting."""
+    pinned, redirects = _collect_preferences_data(db_path)
+    return {
+        "preferences": [preference_to_dict(entry) for entry in pinned],
+        "aliases": [{"from_key": src, "to_key": dst} for src, dst in redirects],
+        "text": _format_preferences_text(pinned, redirects),
+    }
+
 
 def format_preferences_list(*, db_path: Path | None = None) -> str:
-    """Return saved preferences as readable lines: key -> display_name."""
-    entries = get_all_aliases(db_path)
-    pinned = [
-        entry
-        for entry in entries
-        if entry.notes and "Pinned via" in entry.notes
-    ]
-    if not pinned:
-        return "No saved preferences yet.\nUse add <item>, then prefer 1 after a search."
+    """Return saved preferences in a family-friendly readable format."""
+    pinned, redirects = _collect_preferences_data(db_path)
+    return _format_preferences_text(pinned, redirects)
 
-    lines = ["Saved preferences:"]
-    for entry in sorted(pinned, key=lambda item: item.alias_key):
-        lines.append(f"{entry.alias_key} -> {entry.display_name}")
+
+def _format_preferences_text(
+    pinned: list[AliasEntry],
+    redirects: list[tuple[str, str]],
+) -> str:
+    if not pinned and not redirects:
+        return _EMPTY_PREFS_TEXT
+
+    lines: list[str] = []
+    if pinned:
+        lines.append("Saved Finch preferences:")
+        for entry in pinned:
+            lines.append(format_preference_line(entry))
+
+    if redirects:
+        if lines:
+            lines.append("")
+        lines.append("Aliases:")
+        for from_key, to_key in redirects:
+            lines.append(format_alias_line(from_key, to_key))
+
     return "\n".join(lines)
 
 
@@ -49,9 +113,9 @@ def get_preference_text(item: str, *, db_path: Path | None = None) -> str:
     if entry is None:
         return (
             f"No saved preference for {item!r}.\n"
-            f"Try add {item} to search Kroger and prefer 1 to save one."
+            f'Try add {item} to search Kroger and reply "prefer 1" to save one.'
         )
-    return f"{entry.alias_key} -> {entry.display_name}"
+    return format_preference_line(entry).lstrip("- ")
 
 
 def forget_preference(item: str, *, db_path: Path | None = None) -> str:
@@ -84,7 +148,7 @@ def alias_preference_key(
     if target is None:
         return (
             f"No saved preference for {existing_key!r}.\n"
-            f"Save one first with add {existing_key} and prefer 1."
+            f'Save one first with add {existing_key} and reply "prefer 1".'
         )
 
     set_preference_redirect(from_key, target.alias_key, db_path=db_path)
@@ -135,4 +199,6 @@ def preference_to_dict(entry: AliasEntry) -> dict[str, Any]:
         "upc": entry.upc,
         "search_term": entry.search_term,
         "notes": entry.notes,
+        "product_size": entry.product_size,
+        "product_price": entry.product_price,
     }

@@ -46,13 +46,15 @@ def init_db(db_path: Path | None = None) -> None:
     path = _resolve_db_path(db_path)
     with _connect(path) as conn:
         conn.executescript(_SCHEMA)
-
-
-def _canonical_key(alias_key: str) -> str:
-    return normalize_preference_key(alias_key)
+        for column in ("product_size", "product_price"):
+            try:
+                conn.execute(f"ALTER TABLE aliases ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                pass
 
 
 def _row_to_entry(row: sqlite3.Row) -> AliasEntry:
+    keys = set(row.keys())
     return AliasEntry(
         alias_key=row["alias_key"],
         display_name=row["display_name"],
@@ -60,7 +62,13 @@ def _row_to_entry(row: sqlite3.Row) -> AliasEntry:
         upc=row["upc"],
         search_term=row["search_term"],
         notes=row["notes"],
+        product_size=row["product_size"] if "product_size" in keys else None,
+        product_price=row["product_price"] if "product_price" in keys else None,
     )
+
+
+def _canonical_key(alias_key: str) -> str:
+    return normalize_preference_key(alias_key)
 
 
 def load_aliases_from_yaml(yaml_path: Path | None = None) -> list[AliasEntry]:
@@ -176,6 +184,17 @@ def get_preference_redirect(
             (key,),
         ).fetchone()
     return str(row["to_key"]) if row else None
+
+
+def get_all_preference_redirects(db_path: Path | None = None) -> list[tuple[str, str]]:
+    """Return saved preference key aliases as (from_key, to_key) pairs."""
+    path = _resolve_db_path(db_path)
+    init_db(path)
+    with _connect(path) as conn:
+        rows = conn.execute(
+            "SELECT from_key, to_key FROM preference_key_redirects ORDER BY from_key"
+        ).fetchall()
+    return [(str(row["from_key"]), str(row["to_key"])) for row in rows]
 
 
 def set_preference_redirect(
@@ -305,19 +324,24 @@ def upsert_alias(entry: AliasEntry, db_path: Path | None = None) -> AliasEntry:
         upc=entry.upc,
         search_term=entry.search_term,
         notes=entry.notes,
+        product_size=entry.product_size,
+        product_price=entry.product_price,
     )
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT INTO aliases (
-                alias_key, display_name, kroger_product_id, upc, search_term, notes
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                alias_key, display_name, kroger_product_id, upc, search_term, notes,
+                product_size, product_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(alias_key) DO UPDATE SET
                 display_name=excluded.display_name,
                 kroger_product_id=excluded.kroger_product_id,
                 upc=excluded.upc,
                 search_term=excluded.search_term,
-                notes=excluded.notes
+                notes=excluded.notes,
+                product_size=excluded.product_size,
+                product_price=excluded.product_price
             """,
             (
                 stored.alias_key,
@@ -326,6 +350,8 @@ def upsert_alias(entry: AliasEntry, db_path: Path | None = None) -> AliasEntry:
                 stored.upc,
                 stored.search_term,
                 stored.notes,
+                stored.product_size,
+                stored.product_price,
             ),
         )
     return stored

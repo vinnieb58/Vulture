@@ -142,10 +142,10 @@ HELP_TEXT = """Finch grocery commands:
 • add eggs again / force add eggs
 • add-list eggs, milk
 • 2 eggs
-• prefs / preferences
-• pref bagels
-• forget bagels / remove preference bagels
-• change bagels
+• prefs / preferences / list prefs / show preferences — list saved preferences
+• pref ITEM — show one preference
+• forget ITEM — remove one
+• change ITEM — pick a new preferred product
 • alias bagels to bagel
 • history / added today / what did finch add
 • reset trip / new grocery trip
@@ -211,7 +211,14 @@ def parse_command(message: str) -> Command | None:
         return ResetTripCommand()
     if lower == "undo last":
         return UndoLastCommand()
-    if lower in ("prefs", "preferences"):
+    if lower in (
+        "prefs",
+        "preferences",
+        "list prefs",
+        "list preferences",
+        "show prefs",
+        "show preferences",
+    ):
         return PrefsCommand()
     match = _ALIAS_PREF_RE.match(text)
     if match:
