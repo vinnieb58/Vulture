@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from kestrel.live_refresh import RefreshMetadata
 from kestrel.summarize import IntervalSummary, PeakInterval
 
 
@@ -27,6 +28,7 @@ def build_status_snapshot(
     *,
     provider: str,
     last_updated: str | None = None,
+    refresh: RefreshMetadata | None = None,
 ) -> dict[str, Any]:
     """
     Build a dashboard-safe Kestrel status object.
@@ -51,4 +53,6 @@ def build_status_snapshot(
         "top_intervals": [_interval_dict(peak) for peak in top],
         "daily_totals": _daily_totals_list(summary.daily_totals),
     }
+    if refresh is not None:
+        snapshot.update(refresh.to_dict())
     return snapshot

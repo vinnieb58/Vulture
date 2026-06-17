@@ -27,6 +27,7 @@ from kestrel.models import (
     normalize_account_identifier,
     utc_now_iso,
 )
+from kestrel.redact import describe_payload_shape, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,20 @@ class SmartMeterTexasError(Exception):
     """Safe, user-facing SMT fetch/import error (no secrets in message)."""
 
 
+class SMTDataLagError(SmartMeterTexasError):
+    """TDSP has not published interval data for the requested day yet."""
+
+
+TDSP_NO_DATA_PATTERN = re.compile(
+    r"(?i)no energy data received from the respective tdsp"
+)
+
+
+def is_tdsp_no_data_message(message: str) -> bool:
+    """Return True when SMT indicates unpublished/lagged TDSP interval data."""
+    return bool(TDSP_NO_DATA_PATTERN.search(message))
+
+
 class SmartMeterTexasClient:
     """Probe-quality portal API client (read-only)."""
 
@@ -172,13 +187,21 @@ class SmartMeterTexasClient:
         )
         response.raise_for_status()
         payload = response.json()
-        return parse_interval_synch_payload(
-            payload,
-            day=day,
-            tz_name=self._config.timezone,
-            account_id=esiid,
-            raw_source="smt_portal_api",
-        )
+        try:
+            return parse_interval_synch_payload(
+                payload,
+                day=day,
+                tz_name=self._config.timezone,
+                account_id=esiid,
+                raw_source="smt_portal_api",
+            )
+        except SmartMeterTexasError:
+            log.warning(
+                "Interval payload parse failed for %s; shape=%s",
+                day.isoformat(),
+                describe_payload_shape(payload),
+            )
+            raise
 
     def _ensure_authenticated(self) -> None:
         if not self._token:
@@ -250,6 +273,108 @@ def fetch_intervals(
         cursor += timedelta(days=1)
 
     return intervals
+
+
+@dataclass(frozen=True)
+class FetchIntervalsResult:
+    """Per-day API fetch outcome for live refresh (tolerates TDSP data lag)."""
+
+    intervals: list[EnergyInterval]
+    data_lag_days: list[date]
+    failed_days: list[date]
+    failed_messages: list[str]
+
+
+def fetch_intervals_by_day(
+    config: KestrelConfig,
+    *,
+    start: date,
+    end: date,
+    account_id: str | None = None,
+) -> FetchIntervalsResult:
+    """
+    Fetch intervals day-by-day, treating TDSP no-data as lag rather than fatal.
+
+    Real per-day failures are recorded in ``failed_days``; unpublished days go to
+    ``data_lag_days``. Setup/auth errors still raise ``SmartMeterTexasError``.
+    """
+    client = SmartMeterTexasClient(config)
+    client.authenticate()
+
+    esiid = account_id or config.smt_account_id
+    meter_number: str | None = None
+    if not esiid:
+        meters = client.list_meters()
+        if not meters:
+            raise SmartMeterTexasError(
+                "No meters found on Smart Meter Texas account. "
+                "Set KESTREL_SMT_ACCOUNT_ID to your ESIID."
+            )
+        if len(meters) > 1:
+            log.warning(
+                "Multiple meters found; using the first meter. "
+                "Set KESTREL_SMT_ACCOUNT_ID to select a specific ESIID."
+            )
+        esiid = str(meters[0].get("esiid", "")).strip()
+        meter_number = str(meters[0].get("meterNumber", "")).strip() or None
+        if not esiid:
+            raise SmartMeterTexasError("Could not determine ESIID from Smart Meter Texas meter list.")
+
+    account_hash = hash_identifier(esiid)
+    meter_hash = hash_identifier(meter_number) if meter_number else None
+
+    if end < start:
+        raise SmartMeterTexasError("End date must be on or after start date.")
+
+    intervals: list[EnergyInterval] = []
+    data_lag_days: list[date] = []
+    failed_days: list[date] = []
+    failed_messages: list[str] = []
+    cursor = start
+    while cursor <= end:
+        try:
+            day_rows = client.fetch_day_intervals(esiid, cursor)
+        except SMTDataLagError as exc:
+            data_lag_days.append(cursor)
+            log.info(
+                "No published SMT data for %s (TDSP lag): %s",
+                cursor.isoformat(),
+                redact_text(str(exc)),
+            )
+        except SmartMeterTexasError as exc:
+            failed_days.append(cursor)
+            failed_messages.append(redact_text(str(exc)))
+            log.warning("SMT fetch failed for %s: %s", cursor.isoformat(), redact_text(str(exc)))
+        except requests.RequestException as exc:
+            failed_days.append(cursor)
+            failed_messages.append(redact_text(f"network error: {type(exc).__name__}"))
+            log.warning(
+                "SMT network error for %s: %s",
+                cursor.isoformat(),
+                redact_text(f"{type(exc).__name__}"),
+            )
+        else:
+            for row in day_rows:
+                intervals.append(
+                    EnergyInterval(
+                        provider=row.provider,
+                        start_ts=row.start_ts,
+                        end_ts=row.end_ts,
+                        kwh=row.kwh,
+                        meter_id_hash=meter_hash or row.meter_id_hash,
+                        account_id_hash=account_hash,
+                        raw_source=row.raw_source,
+                        created_at=utc_now_iso(),
+                    )
+                )
+        cursor += timedelta(days=1)
+
+    return FetchIntervalsResult(
+        intervals=intervals,
+        data_lag_days=data_lag_days,
+        failed_days=failed_days,
+        failed_messages=failed_messages,
+    )
 
 
 def import_csv_file(
@@ -328,11 +453,25 @@ def parse_interval_synch_payload(
     raw_source: str = "smt_portal_api",
 ) -> list[EnergyInterval]:
     data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise SmartMeterTexasError(
+            "Smart Meter Texas interval response missing data object. "
+            f"Shape: {describe_payload_shape(payload)}"
+        )
     if data.get("errorCode"):
         message = str(data.get("errorMessage") or "unknown error")
-        raise SmartMeterTexasError(f"Smart Meter Texas interval error: {message}")
+        if is_tdsp_no_data_message(message):
+            raise SMTDataLagError(
+                "Smart Meter Texas has no published interval data for this day yet (TDSP lag)."
+            )
+        raise SmartMeterTexasError(f"Smart Meter Texas interval error: {redact_text(message)}")
 
     energy_entries = data.get("energyData") or []
+    if energy_entries and not isinstance(energy_entries, list):
+        raise SmartMeterTexasError(
+            f"Smart Meter Texas interval response has unexpected energyData type. "
+            f"Shape: {describe_payload_shape(payload)}"
+        )
     consumption = next((entry for entry in energy_entries if entry.get("RT") == "C"), None)
     if consumption is None and energy_entries:
         consumption = energy_entries[0]
