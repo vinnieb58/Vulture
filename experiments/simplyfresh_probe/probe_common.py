@@ -404,11 +404,10 @@ def click_order_now(page: Page, log: logging.Logger) -> bool:
 
 
 def discover_profile_cards(page: Page) -> list[dict[str, str]]:
-    """Return profile card texts that include Select profile (exclude create-new)."""
+    """Return raw profile card texts that include Select profile (exclude create-new)."""
     raw: list[dict[str, str]] = page.evaluate(
         """() => {
         const cards = [];
-        const seen = new Set();
         const blocks = document.querySelectorAll('div, section, article, li, [class*="card" i]');
         for (const el of blocks) {
           const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
@@ -416,12 +415,9 @@ def discover_profile_cards(page: Page) -> list[dict[str, str]]:
           if (!/select profile/i.test(text)) continue;
           if (/create a new profile/i.test(text) && !/classroom:/i.test(text)) continue;
           if (!/classroom:|school:/i.test(text)) continue;
-          const key = text.slice(0, 120);
-          if (seen.has(key)) continue;
-          seen.add(key);
           cards.push({ text });
         }
-        return cards.slice(0, 10);
+        return cards.slice(0, 20);
     }"""
     )
     filtered: list[dict[str, str]] = []
@@ -429,8 +425,47 @@ def discover_profile_cards(page: Page) -> list[dict[str, str]]:
         text = card.get("text", "")
         if CREATE_PROFILE_PATTERN.search(text) and "Classroom:" not in text:
             continue
-        filtered.append(card)
+        filtered.append({"text": text})
     return filtered
+
+
+def normalize_profile_card_text(text: str) -> str:
+    """Normalize profile card text for deduplication (whitespace + heading noise)."""
+    lines: list[str] = []
+    for raw_line in re.split(r"[\r\n]+", text):
+        line = " ".join(raw_line.split()).strip()
+        if not line:
+            continue
+        if PROFILE_CHOOSER_HEADING.search(line):
+            continue
+        if SELECT_PROFILE_PATTERN.fullmatch(line):
+            continue
+        lines.append(line.lower())
+    return "|".join(lines)
+
+
+def profile_card_signature(text: str) -> str:
+    """Stable identity key for a logical profile (name, classroom, school)."""
+    return normalize_profile_card_text(text)
+
+
+def deduplicate_profile_cards(cards: list[dict[str, str]]) -> list[dict[str, str]]:
+    """
+    Collapse nested duplicate containers into one logical profile per signature.
+
+    When parent and child nodes share the same profile content, keep the shorter
+    text (inner container that directly owns Select profile).
+    """
+    by_signature: dict[str, dict[str, str]] = {}
+    for card in cards:
+        text = card.get("text", "")
+        signature = profile_card_signature(text)
+        if not signature:
+            continue
+        existing = by_signature.get(signature)
+        if existing is None or len(text) < len(existing["text"]):
+            by_signature[signature] = {"text": text, "signature": signature}
+    return list(by_signature.values())
 
 
 def _profile_card_matches(card_text: str, config: ProfileConfig) -> bool:
@@ -442,16 +477,75 @@ def _profile_card_matches(card_text: str, config: ProfileConfig) -> bool:
     return True
 
 
+def _click_select_profile_for_card(
+    page: Page,
+    card: dict[str, str],
+    config: ProfileConfig,
+    log: logging.Logger,
+) -> bool:
+    """Click Select profile on the innermost container matching the deduplicated card."""
+    anchor = config.profile_name or config.school
+    if not anchor:
+        for line in card.get("text", "").split("\n"):
+            line = line.strip()
+            if line and not SELECT_PROFILE_PATTERN.search(line) and ":" not in line:
+                anchor = line
+                break
+    if not anchor:
+        anchor = card.get("text", "")[:40]
+
+    containers = page.locator("div, section, article, li").filter(
+        has_text=re.compile(re.escape(anchor[:40]), re.I)
+    )
+    count = min(containers.count(), 30)
+    best_idx: int | None = None
+    best_len = 10**9
+    for idx in range(count):
+        item = containers.nth(idx)
+        try:
+            if not item.is_visible():
+                continue
+            text = (item.inner_text(timeout=500) or "").strip()
+            if not SELECT_PROFILE_PATTERN.search(text):
+                continue
+            if config.profile_name and config.profile_name.lower() not in text.lower():
+                continue
+            if config.school and config.school.lower() not in text.lower():
+                continue
+            if len(text) < best_len:
+                best_len = len(text)
+                best_idx = idx
+        except Exception:
+            continue
+
+    if best_idx is None:
+        return False
+
+    btn = containers.nth(best_idx).get_by_role("button", name=SELECT_PROFILE_PATTERN).first
+    if _is_control_disabled(btn):
+        log.error("Select profile button is disabled")
+        return False
+    log.info("Clicking Select profile on innermost matching container (%d chars)", best_len)
+    btn.click(timeout=5000)
+    human_pause()
+    return True
+
+
 def select_checkout_profile(page: Page, config: ProfileConfig, log: logging.Logger) -> bool:
     """On 'Who are you ordering for?' click Select profile for one/matching card."""
     if not is_profile_chooser_page(page):
         log.info("Profile chooser not detected; skipping profile selection")
         return True
 
-    cards = discover_profile_cards(page)
-    log.info("Profile cards detected: %d", len(cards))
+    raw_cards = discover_profile_cards(page)
+    log.info("Raw profile matches: %d", len(raw_cards))
+    for card in raw_cards:
+        log.info("  raw preview: %s", card.get("text", "")[:120])
+
+    cards = deduplicate_profile_cards(raw_cards)
+    log.info("Deduplicated profile matches: %d", len(cards))
     for card in cards:
-        log.info("  card preview: %s", card.get("text", "")[:120])
+        log.info("  deduped preview: %s", card.get("text", "")[:120])
 
     if not cards:
         log.error("Profile chooser visible but no profile cards found")
@@ -461,41 +555,27 @@ def select_checkout_profile(page: Page, config: ProfileConfig, log: logging.Logg
     if config.profile_name or config.school:
         if len(eligible) != 1:
             log.error(
-                "Expected exactly one profile matching filters (name=%r school=%r); found %d",
+                "Expected exactly one deduplicated profile matching filters "
+                "(name=%r school=%r); found %d",
                 config.profile_name,
                 config.school,
                 len(eligible),
             )
             return False
-        target_text = eligible[0]["text"]
+        target = eligible[0]
     elif len(cards) == 1:
-        target_text = cards[0]["text"]
+        target = cards[0]
     else:
         log.error(
-            "Multiple profile cards (%d) — pass --profile-name and/or --school",
+            "Multiple deduplicated profile cards (%d) — pass --profile-name and/or --school",
             len(cards),
         )
         return False
 
-    anchor = config.profile_name or config.school
-    if not anchor:
-        anchor = target_text.split("\n")[0].strip()[:40]
-
-    try:
-        container = page.locator("div, section, article, li").filter(
-            has_text=re.compile(re.escape(anchor[:30]), re.I)
-        ).first
-        btn = container.get_by_role("button", name=SELECT_PROFILE_PATTERN).first
-        if _is_control_disabled(btn):
-            log.error("Select profile button is disabled")
-            return False
-        log.info("Clicking Select profile for %r", anchor)
-        btn.click(timeout=5000)
-        human_pause()
+    if _click_select_profile_for_card(page, target, config, log):
         return True
-    except Exception as exc:
-        log.warning("Card-scoped Select profile failed (%s); trying global button", exc)
 
+    log.warning("Innermost Select profile click failed; trying single global button")
     buttons = page.get_by_role("button", name=SELECT_PROFILE_PATTERN)
     count = buttons.count()
     if count == 1:
