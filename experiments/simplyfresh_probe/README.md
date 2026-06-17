@@ -1,6 +1,10 @@
-# Simply Fresh Kitchen Probe
+# Sparrow v0 — Simply Fresh Kitchen probe
 
-**This is a feasibility probe, not meal-order automation.**
+> **Service name:** [Sparrow](../../docs/current/SPARROW_MEAL_ORDERING.md)  
+> **Implementation path:** `experiments/simplyfresh_probe/` (legacy directory name)  
+> **Status:** Manual experiment only — no systemd, no scheduled runs.
+
+**This is a feasibility / dry-run probe, not production meal-order automation.**
 
 Household experiment for The Aviary ecosystem (Raven server). The goal is to learn whether Playwright/Chromium can load [The Simply Fresh Kitchen](https://new.thesimplyfreshkitchen.com/), authenticate, and reach account/order/calendar areas **without placing orders**.
 
