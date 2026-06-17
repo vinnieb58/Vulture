@@ -143,6 +143,8 @@ def read_kestrel_status() -> dict[str, Any]:
         "warning": None,
         "generated_at": None,
         "range": None,
+        "range_start": None,
+        "range_end": None,
         "interval_count": None,
         "total_kwh": None,
         "peak_interval_kwh": None,
@@ -186,6 +188,10 @@ def read_kestrel_status() -> dict[str, Any]:
 
     range_start = clean.get("range_start")
     range_end = clean.get("range_end")
+    if range_start is not None:
+        result["range_start"] = str(range_start)
+    if range_end is not None:
+        result["range_end"] = str(range_end)
     result["range"] = _format_range(
         str(range_start) if range_start else None,
         str(range_end) if range_end else None,
