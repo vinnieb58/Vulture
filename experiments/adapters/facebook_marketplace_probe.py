@@ -7,6 +7,12 @@ or touch the production adapter registry.
 Goal: determine whether public Facebook Marketplace search pages yield
 parseable listing data without a logged-in session.
 
+The production adapter is experimental but enabled in selected default
+vertical profiles for this single-user Raven deployment. Public SSR access
+is fragile and often reports login_wall/captcha_checkpoint. No login, cookies,
+sessions, or CAPTCHA bypass are implemented. If Facebook becomes noisy or
+blocked, remove it from default profiles but leave the adapter available.
+
 Usage:
     python experiments/adapters/facebook_marketplace_probe.py --query "steam deck" --location "Houston, TX" --limit 5
     python experiments/adapters/facebook_marketplace_probe.py --query "macbook screen" --location "Houston, TX" --limit 5

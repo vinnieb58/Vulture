@@ -207,6 +207,7 @@ class TestM2SataStorageHunt:
 class TestStorageSourceSelection:
     _COMPUTER_PARTS_SOURCES = [
         "craigslist",
+        "facebook_marketplace",
         "mercari",
         "offerup",
         "microcenter",
