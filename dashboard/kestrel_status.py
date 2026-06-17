@@ -86,6 +86,8 @@ def _parse_top_intervals(raw: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         end_ts = clean.get("end_ts")
         est_kw = clean.get("estimated_peak_kw")
+        if not isinstance(est_kw, (int, float)):
+            est_kw = clean.get("estimated_kw")
         parsed.append(
             {
                 "start_ts": str(start_ts),
@@ -99,6 +101,16 @@ def _parse_top_intervals(raw: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _parse_daily_totals(raw: dict[str, Any]) -> dict[str, float]:
     daily = raw.get("daily_totals")
+    if isinstance(daily, list):
+        totals: dict[str, float] = {}
+        for item in daily:
+            if not isinstance(item, dict):
+                continue
+            day = item.get("date") or item.get("day")
+            kwh = item.get("kwh")
+            if day and isinstance(kwh, (int, float)):
+                totals[str(day)] = float(kwh)
+        return dict(sorted(totals.items()))
     if not isinstance(daily, dict):
         return {}
     return {
@@ -204,6 +216,9 @@ def read_kestrel_status() -> dict[str, Any]:
         interval_count=result["interval_count"],
         total_kwh=result["total_kwh"],
     ):
+        result["state"] = "available"
+        result["headline"] = "Energy data available"
+    elif clean.get("status") == "available":
         result["state"] = "available"
         result["headline"] = "Energy data available"
     elif result["interval_count"] == 0:

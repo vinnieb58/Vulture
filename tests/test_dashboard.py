@@ -579,6 +579,42 @@ class TestKestrelStatusReader:
         assert "/secret/path.db" not in str(snap)
 
 
+    def test_read_kestrel_status_parses_list_daily_totals(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text(
+            """{
+  "status": "available",
+  "interval_count": 2,
+  "total_kwh": 2.4,
+  "daily_totals": [
+    {"date": "2026-06-15", "kwh": 6.25},
+    {"date": "2026-06-16", "kwh": 5.0}
+  ]
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["daily_totals"]["2026-06-15"] == pytest.approx(6.25)
+        assert snap["daily_totals"]["2026-06-16"] == pytest.approx(5.0)
+
+    def test_read_kestrel_status_accepts_estimated_kw_in_top_intervals(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text(
+            """{
+  "interval_count": 1,
+  "total_kwh": 1.5,
+  "top_intervals": [
+    {"start_ts": "2026-06-15T18:00:00+00:00", "end_ts": "2026-06-15T18:15:00+00:00", "kwh": 1.5, "estimated_kw": 6.0}
+  ]
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["top_intervals"][0]["estimated_peak_kw"] == pytest.approx(6.0)
+
+
 class TestNestCardComputation:
     """Unit tests for the Nest overview card summary logic in app.py."""
 
