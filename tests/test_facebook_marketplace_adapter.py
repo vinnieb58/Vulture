@@ -181,6 +181,30 @@ class TestFacebookMarketplaceRegistry:
         assert sites == ["facebook_marketplace", "craigslist"]
 
 
+class TestFacebookMarketplaceAdapterKwargs:
+    def test_accepts_common_hunt_kwargs_without_raising(self):
+        html = (FIXTURES / "search_ssr_sample.html").read_text(encoding="utf-8")
+        with patch(
+            "adapters.facebook_marketplace._fetch_search_html",
+            return_value=(
+                html,
+                "https://www.facebook.com/marketplace/houston/search/?query=steam+deck",
+                "Facebook Marketplace",
+                "houston",
+            ),
+        ):
+            result = search_facebook_marketplace(
+                "steam deck",
+                city="Houston, TX",
+                limit=5,
+                max_price=500,
+                min_price=50,
+                radius=25,
+                condition="used",
+            )
+        assert len(result) >= 2
+
+
 class TestFacebookMarketplaceGracefulFailure:
     @patch("adapters.facebook_marketplace._fetch_search_html", return_value=(None, None, None, None))
     def test_fetch_failure_returns_empty_list(self, _fetch):
