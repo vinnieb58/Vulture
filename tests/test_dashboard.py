@@ -31,6 +31,7 @@ from parsers import (  # noqa: E402
 )
 import app as dashboard_app  # noqa: E402
 from db_readers import read_db_snapshot  # noqa: E402
+from kestrel_status import read_kestrel_status  # noqa: E402
 from host_status import (  # noqa: E402
     ServiceStatus,
     _check_service,
@@ -181,6 +182,111 @@ class TestDashboardHTTP:
         response = self._stub_host(client)
         assert response.status_code == 200
         assert "Network" in response.text
+
+    def test_nest_home_shows_kestrel_energy_card(self, client):
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Kestrel Energy" in response.text
+
+    def test_nest_home_missing_kestrel_status_shows_friendly_state(self, client, tmp_path, monkeypatch):
+        missing_status = tmp_path / "missing" / "kestrel_status.json"
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", missing_status)
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "No energy data yet" in response.text
+        assert "Kestrel Energy" in response.text
+
+    def test_nest_home_renders_valid_kestrel_status(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_status.json"
+        status_path.write_text(
+            """{
+  "probe": "smart_meter_texas",
+  "generated_at": "2026-06-16T12:00:00+00:00",
+  "interval_count": 96,
+  "range_start": "2026-06-09T00:00:00+00:00",
+  "range_end": "2026-06-16T00:00:00+00:00",
+  "total_kwh": 42.5,
+  "peak_interval": {"start_ts": "2026-06-15T18:00:00+00:00", "end_ts": "2026-06-15T18:15:00+00:00", "kwh": 2.5, "estimated_peak_kw": 10.0},
+  "estimated_peak_kw": 10.0,
+  "missing_interval_count": 3,
+  "top_intervals": [
+    {"start_ts": "2026-06-15T18:00:00+00:00", "end_ts": "2026-06-15T18:15:00+00:00", "kwh": 2.5, "estimated_peak_kw": 10.0},
+    {"start_ts": "2026-06-14T19:00:00+00:00", "end_ts": "2026-06-14T19:15:00+00:00", "kwh": 2.1, "estimated_peak_kw": 8.4}
+  ],
+  "daily_totals": {"2026-06-15": 6.25, "2026-06-16": 5.0}
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        text = response.text
+        assert "Energy data available" in text
+        assert "42.5000" in text
+        assert "2.5000" in text
+        assert "10.0000" in text
+        assert "Missing intervals" in text
+        assert "2026-06-15T18:00:00+00:00" in text
+        assert "Daily totals" in text
+        assert "2026-06-15" in text
+        assert "2026-06-16T12:00:00+00:00" in text
+
+    def test_nest_home_handles_invalid_kestrel_json_safely(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_status.json"
+        status_path.write_text("{not valid json", encoding="utf-8")
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Energy status unavailable" in response.text
+        assert "Kestrel Energy" in response.text
+
+    def test_nest_home_does_not_display_sensitive_kestrel_fields(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_status.json"
+        status_path.write_text(
+            """{
+  "generated_at": "2026-06-16T12:00:00+00:00",
+  "interval_count": 4,
+  "total_kwh": 1.5,
+  "estimated_peak_kw": 4.0,
+  "account_id": "secret-account",
+  "meter_id": "secret-meter",
+  "account_id_hash": "abc123hash",
+  "meter_id_hash": "def456hash",
+  "esiid": "123456789012345678",
+  "raw_source": "csv:/home/vinnie/secret.csv",
+  "db_path": "/app/data/kestrel/kestrel.db",
+  "top_intervals": [
+    {"start_ts": "2026-06-15T18:00:00+00:00", "kwh": 1.5, "raw_source": "hidden"}
+  ]
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        text = response.text
+        for forbidden in (
+            "secret-account",
+            "secret-meter",
+            "abc123hash",
+            "def456hash",
+            "123456789012345678",
+            "raw_source",
+            "secret.csv",
+            "kestrel.db",
+        ):
+            assert forbidden not in text
+
+    def test_nest_home_shows_estimated_peak_kw_label(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_status.json"
+        status_path.write_text(
+            '{"interval_count": 1, "total_kwh": 1.0, "estimated_peak_kw": 4.0}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        response = self._stub_host(client)
+        assert response.status_code == 200
+        assert "Est. peak kW (15-min)" in response.text
 
     def test_nest_home_shows_navigation(self, client):
         response = self._stub_host(client)
@@ -434,6 +540,79 @@ class TestHostCommands:
                             result = _scheduler_freshness([])
         assert result["status"] in ("fresh", "stale", "seen")
         assert "journal" in result["detail"]
+
+
+class TestKestrelStatusReader:
+    def test_read_kestrel_status_missing_file(self, tmp_path, monkeypatch):
+        missing = tmp_path / "nope.json"
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", missing)
+        snap = read_kestrel_status()
+        assert snap["state"] == "no_data"
+        assert snap["headline"] == "No energy data yet"
+        assert snap["warning"] is not None
+
+    def test_read_kestrel_status_invalid_json(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text("{bad", encoding="utf-8")
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["state"] == "error"
+        assert snap["warning"] is not None
+
+    def test_read_kestrel_status_strips_sensitive_fields(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text(
+            """{
+  "interval_count": 2,
+  "total_kwh": 2.0,
+  "account_id_hash": "hidden",
+  "meter_id_hash": "hidden",
+  "raw_source": "hidden",
+  "db_path": "/secret/path.db"
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["state"] == "available"
+        assert "hidden" not in str(snap)
+        assert "/secret/path.db" not in str(snap)
+
+
+    def test_read_kestrel_status_parses_list_daily_totals(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text(
+            """{
+  "status": "available",
+  "interval_count": 2,
+  "total_kwh": 2.4,
+  "daily_totals": [
+    {"date": "2026-06-15", "kwh": 6.25},
+    {"date": "2026-06-16", "kwh": 5.0}
+  ]
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["daily_totals"]["2026-06-15"] == pytest.approx(6.25)
+        assert snap["daily_totals"]["2026-06-16"] == pytest.approx(5.0)
+
+    def test_read_kestrel_status_accepts_estimated_kw_in_top_intervals(self, tmp_path, monkeypatch):
+        path = tmp_path / "kestrel_status.json"
+        path.write_text(
+            """{
+  "interval_count": 1,
+  "total_kwh": 1.5,
+  "top_intervals": [
+    {"start_ts": "2026-06-15T18:00:00+00:00", "end_ts": "2026-06-15T18:15:00+00:00", "kwh": 1.5, "estimated_kw": 6.0}
+  ]
+}""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", path)
+        snap = read_kestrel_status()
+        assert snap["top_intervals"][0]["estimated_peak_kw"] == pytest.approx(6.0)
 
 
 class TestNestCardComputation:

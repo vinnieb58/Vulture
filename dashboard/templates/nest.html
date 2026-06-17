@@ -570,17 +570,84 @@
         </div>
       </div>
 
-      {# ── Household (placeholder) ───────────────────────────── #}
-      <div class="card card-placeholder">
+      {# ── Kestrel Energy (read-only) ───────────────────────── #}
+      {% set kc = nest.kestrel %}
+      {% set ks = kc.style %}
+      <div class="card status-{{ ks }}">
         <div class="card-header">
-          <span class="card-title">Household</span>
-          <span class="status-badge unknown">—</span>
+          <span class="card-title">Kestrel Energy</span>
+          <span class="status-badge {{ ks }}">{{ kc.status }}</span>
         </div>
-        <div class="card-headline">Coming later</div>
+        <div class="card-headline {{ ks }}">{{ kc.headline }}</div>
         <div class="card-details">
+          {% if kc.range %}
           <div class="detail-row">
-            <span>Placeholder for household integrations</span>
+            <span>Range</span>
+            <strong>{{ kc.range }}</strong>
           </div>
+          {% endif %}
+          {% if kc.total_kwh is not none %}
+          <div class="detail-row">
+            <span>Total kWh</span>
+            <strong>{{ "%.4f"|format(kc.total_kwh) }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.peak_interval_kwh is not none %}
+          <div class="detail-row">
+            <span>Peak 15-min kWh</span>
+            <strong>{{ "%.4f"|format(kc.peak_interval_kwh) }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.estimated_peak_kw is not none %}
+          <div class="detail-row">
+            <span>Est. peak kW (15-min)</span>
+            <strong>{{ "%.4f"|format(kc.estimated_peak_kw) }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.missing_interval_count is not none %}
+          <div class="detail-row">
+            <span>Missing intervals</span>
+            <strong>{{ kc.missing_interval_count }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.interval_count is not none %}
+          <div class="detail-row detail-row-muted">
+            <span>Intervals</span>
+            <strong>{{ kc.interval_count }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.generated_at %}
+          <div class="detail-row detail-row-muted">
+            <span>Last updated</span>
+            <strong>{{ kc.generated_at }}</strong>
+          </div>
+          {% endif %}
+          {% if kc.top_intervals %}
+          <div class="peaks-section">
+            <div class="detail-row peaks-header">
+              <span>Top intervals</span>
+            </div>
+            {% for interval in kc.top_intervals %}
+            <div class="detail-row detail-row-muted">
+              <span>{{ interval.start_ts }}</span>
+              <strong>{{ "%.4f"|format(interval.kwh) }} kWh</strong>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if kc.daily_totals %}
+          <div class="peaks-section">
+            <div class="detail-row peaks-header">
+              <span>Daily totals</span>
+            </div>
+            {% for day, kwh in kc.daily_totals.items() %}
+            <div class="detail-row detail-row-muted">
+              <span>{{ day }}</span>
+              <strong>{{ "%.4f"|format(kwh) }} kWh</strong>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
         </div>
       </div>
 

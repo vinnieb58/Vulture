@@ -35,6 +35,7 @@ from kestrel.smart_meter_texas import (  # noqa: E402
     fetch_intervals,
     import_csv_file,
 )
+from kestrel.status_snapshot import build_status_snapshot
 from kestrel.storage import fetch_intervals as load_stored_intervals  # noqa: E402
 from kestrel.storage import upsert_intervals  # noqa: E402
 from kestrel.summarize import summarize_intervals, top_intervals  # noqa: E402
@@ -190,30 +191,24 @@ def main() -> int:
         anomaly_top_n=5,
     )
 
+    top5 = top_intervals(stored, 5)
     _print_summary(
         summary,
         imported=imported,
         inserted=inserted,
         skipped=skipped,
-        top5=top_intervals(stored, 5),
+        top5=top5,
     )
 
     status_path = config.data_dir / "kestrel_status.json"
     status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_snapshot = build_status_snapshot(
+        summary,
+        top5,
+        provider=PROVIDER_SMART_METER_TEXAS,
+    )
     status_path.write_text(
-        json.dumps(
-            {
-                "probe": "smart_meter_texas",
-                "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                "interval_count": summary.interval_count,
-                "total_kwh": summary.total_kwh,
-                "estimated_peak_kw": summary.estimated_peak_kw,
-                "missing_interval_count": summary.missing_interval_count,
-                "db_path": str(config.db_path),
-            },
-            indent=2,
-        )
-        + "\n",
+        json.dumps(status_snapshot, indent=2) + "\n",
         encoding="utf-8",
     )
     log.info("Wrote status snapshot to %s", status_path)
