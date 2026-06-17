@@ -7,8 +7,10 @@ Does NOT modify Vulture scheduler, Crow commands, or hunt runtime.
 
 Usage:
     python experiments/kestrel/smart_meter_texas_probe.py --import-csv /path/to/export.csv
-    python experiments/kestrel/smart_meter_texas_probe.py --days 7
-    python experiments/kestrel/smart_meter_texas_probe.py --from 2026-06-01 --to 2026-06-16
+    python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 7
+    python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --from 2026-06-01 --to 2026-06-16
+    python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 2 --dry-run
+    python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --debug-safe
     python experiments/kestrel/smart_meter_texas_probe.py --summary-only
 """
 
@@ -30,6 +32,13 @@ from kestrel.config import (  # noqa: E402
     load_config,
     setup_logging,
 )
+from kestrel.live_refresh import (  # noqa: E402
+    LiveRefreshResult,
+    RefreshMetadata,
+    build_csv_import_metadata,
+    load_refresh_metadata_from_status,
+    run_live_refresh,
+)
 from kestrel.smart_meter_texas import (  # noqa: E402
     SmartMeterTexasError,
     fetch_intervals,
@@ -47,6 +56,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from", dest="from_date", metavar="DATE", help="Start date YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", metavar="DATE", help="End date YYYY-MM-DD (inclusive)")
     parser.add_argument("--import-csv", metavar="PATH", help="Import a Smart Meter Texas CSV export")
+    parser.add_argument(
+        "--live-refresh",
+        action="store_true",
+        help="Log into Smart Meter Texas and fetch recent interval data (API, then browser fallback)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --live-refresh: fetch and summarize without writing to SQLite",
+    )
+    parser.add_argument(
+        "--debug-safe",
+        action="store_true",
+        help="With --live-refresh: save redacted browser debug artifacts under data/kestrel/debug/",
+    )
     parser.add_argument(
         "--summary-only",
         action="store_true",
@@ -87,14 +111,42 @@ def _resolve_range(args: argparse.Namespace, config) -> tuple[date | None, date 
     return start, end
 
 
-def _print_summary(summary, *, imported: int, inserted: int, skipped: int, top5) -> None:
+def _requires_live_access(args: argparse.Namespace) -> bool:
+    if args.import_csv or args.summary_only:
+        return False
+    return args.live_refresh or not args.import_csv
+
+
+def _print_summary(
+    summary,
+    *,
+    imported: int,
+    inserted: int,
+    skipped: int,
+    top5,
+    refresh: RefreshMetadata | None = None,
+    live_result: LiveRefreshResult | None = None,
+) -> None:
     print("")
     print("Kestrel Smart Meter Texas summary")
     print("--------------------------------")
+    if live_result is not None:
+        print(f"Attempted range      : {live_result.attempted_start} -> {live_result.attempted_end}")
+        print(f"Intervals fetched    : {len(live_result.intervals)}")
     print(f"Intervals in summary : {summary.interval_count}")
     print(f"Intervals imported   : {imported}")
     print(f"Rows inserted        : {inserted}")
     print(f"Rows skipped (dupes) : {skipped}")
+    if live_result and live_result.min_interval_ts and live_result.max_interval_ts:
+        print(f"Fetched min interval : {live_result.min_interval_ts}")
+        print(f"Fetched max interval : {live_result.max_interval_ts}")
+        print(f"Fetched total kWh    : {live_result.fetched_total_kwh:.4f}")
+        if live_result.fetched_peak:
+            peak = live_result.fetched_peak
+            print(
+                f"Fetched peak interval: {peak.kwh:.4f} kWh "
+                f"({peak.start_ts} -> {peak.end_ts})"
+            )
     if summary.range_start and summary.range_end:
         print(f"Range                : {summary.range_start} -> {summary.range_end}")
     print(f"Total kWh            : {summary.total_kwh:.4f}")
@@ -109,6 +161,16 @@ def _print_summary(summary, *, imported: int, inserted: int, skipped: int, top5)
             "(from 15-minute interval data; not instantaneous demand)"
         )
     print(f"Missing intervals    : {summary.missing_interval_count}")
+    if refresh is not None:
+        print("")
+        print("Last refresh status")
+        print("-------------------")
+        print(f"Attempt at           : {refresh.attempt_at}")
+        print(f"Success at           : {refresh.success_at or '—'}")
+        print(f"Source               : {refresh.source or '—'}")
+        print(f"Status               : {refresh.status}")
+        if refresh.message:
+            print(f"Message              : {refresh.message}")
     print("")
     print("Top 5 intervals:")
     for rank, peak in enumerate(top5, start=1):
@@ -120,10 +182,19 @@ def _print_summary(summary, *, imported: int, inserted: int, skipped: int, top5)
 
 def main() -> int:
     args = parse_args()
+
+    if args.dry_run and not args.live_refresh:
+        print("ERROR: --dry-run requires --live-refresh.", file=sys.stderr)
+        return 1
+    if args.debug_safe and not args.live_refresh:
+        print("ERROR: --debug-safe requires --live-refresh.", file=sys.stderr)
+        return 1
+
+    live_access = _requires_live_access(args)
     try:
         config = load_config(
-            require_enabled=not args.import_csv and not args.summary_only,
-            require_credentials=not args.import_csv and not args.summary_only,
+            require_enabled=live_access,
+            require_credentials=live_access,
         )
     except KestrelConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -131,12 +202,16 @@ def main() -> int:
 
     log = setup_logging(config.log_level)
     start, end = _resolve_range(args, config)
+    status_path = config.data_dir / "kestrel_status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
 
     imported = 0
     inserted = 0
     skipped = 0
     range_start_dt: datetime | None = None
     range_end_dt: datetime | None = None
+    refresh_metadata: RefreshMetadata | None = load_refresh_metadata_from_status(status_path)
+    live_result: LiveRefreshResult | None = None
 
     if args.import_csv:
         try:
@@ -150,7 +225,36 @@ def main() -> int:
             return 1
         imported = len(intervals)
         inserted, skipped = upsert_intervals(config.db_path, intervals)
+        refresh_metadata = build_csv_import_metadata(
+            imported=imported,
+            inserted=inserted,
+            skipped=skipped,
+        )
         log.info("Imported %s intervals from CSV (%s inserted, %s skipped)", imported, inserted, skipped)
+    elif args.live_refresh:
+        assert start is not None and end is not None
+        range_start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+        range_end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        live_result = run_live_refresh(
+            config,
+            start=start,
+            end=end,
+            dry_run=args.dry_run,
+            debug_safe=args.debug_safe,
+        )
+        refresh_metadata = live_result.metadata
+        imported = len(live_result.intervals)
+        inserted = live_result.inserted
+        skipped = live_result.skipped
+        if live_result.metadata.status != "ok":
+            print(f"ERROR: Live refresh {live_result.metadata.status}.", file=sys.stderr)
+            if live_result.metadata.message:
+                print(f"  {live_result.metadata.message}", file=sys.stderr)
+            print(
+                "TIP: Export a 15-minute interval CSV from the Smart Meter Texas dashboard and run "
+                "with --import-csv /path/to/export.csv",
+                file=sys.stderr,
+            )
     elif not args.summary_only:
         assert start is not None and end is not None
         range_start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
@@ -198,20 +302,24 @@ def main() -> int:
         inserted=inserted,
         skipped=skipped,
         top5=top5,
+        refresh=refresh_metadata,
+        live_result=live_result,
     )
 
-    status_path = config.data_dir / "kestrel_status.json"
-    status_path.parent.mkdir(parents=True, exist_ok=True)
     status_snapshot = build_status_snapshot(
         summary,
         top5,
         provider=PROVIDER_SMART_METER_TEXAS,
+        refresh=refresh_metadata,
     )
     status_path.write_text(
         json.dumps(status_snapshot, indent=2) + "\n",
         encoding="utf-8",
     )
-    log.info("Wrote status snapshot to %s", status_path)
+    log.info("Wrote status snapshot")
+
+    if live_result is not None and live_result.metadata.status != "ok":
+        return 1
     return 0
 
 

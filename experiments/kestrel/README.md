@@ -7,7 +7,7 @@ Kestrel is independent from the Vulture hunt scheduler and Crow Discord bot.
 ## What is supported in v0
 
 - Flexible **CSV import** from SMT dashboard exports (`--import-csv`)
-- Probe-quality **live fetch** via the residential portal JSON API (username/password; may break if SMT changes)
+- Probe-quality **live refresh** via portal JSON API with Playwright CSV fallback (`--live-refresh`)
 - SQLite storage with upsert dedupe on `(provider, start_ts, end_ts)`
 - Summaries: total kWh, peak 15-minute interval, estimated peak kW, daily totals, hourly shape, missing intervals, top intervals
 - Status snapshot at `data/kestrel/kestrel_status.json` after each probe run
@@ -15,7 +15,7 @@ Kestrel is independent from the Vulture hunt scheduler and Crow Discord bot.
 ## Not implemented yet
 
 - Official registered SMT API (`services.smartmetertexas.net`) integration
-- Browser automation / Playwright export path
+- Browser automation / Playwright export path (probe-quality fallback only; not scheduled integration)
 - Automations, billing projections, breaker-level assumptions, smart-home control
 - Discord/Crow commands or Nest dashboard cards
 - systemd timer / scheduled collection
@@ -51,18 +51,30 @@ source .venv/bin/activate
 python experiments/kestrel/smart_meter_texas_probe.py --import-csv ~/imports/smt_15min.csv
 ```
 
-## Live probe (experimental)
+## Live refresh (v0)
 
 ```bash
 cd /home/vinnieb58/projects/vulture
 source .venv/bin/activate
 # Ensure KESTREL_ENABLED=true and SMT credentials in .env
-python experiments/kestrel/smart_meter_texas_probe.py --days 7
-python experiments/kestrel/smart_meter_texas_probe.py --from 2026-06-01 --to 2026-06-16
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 7
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --from 2026-06-01 --to 2026-06-16
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 2 --dry-run
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --debug-safe
 python experiments/kestrel/smart_meter_texas_probe.py --summary-only
 ```
 
-If live fetch fails, use CSV import. The portal JSON endpoints are unofficial and may rate-limit or change.
+`--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then falls back to a probe-quality Playwright CSV export. MFA/CAPTCHA blocks fail clearly without bypass attempts.
+
+If live refresh fails, use CSV import. The portal JSON endpoints are unofficial and may rate-limit or change.
+
+## Legacy live probe (experimental)
+
+```bash
+python experiments/kestrel/smart_meter_texas_probe.py --days 7
+```
+
+Same API path as `--live-refresh` but without refresh status tracking or browser fallback.
 
 ## Data storage
 

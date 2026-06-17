@@ -322,7 +322,22 @@
           <strong>{{ kestrel.generated_at }}</strong>
         </div>
         {% endif %}
+        {% if kestrel.last_refresh_success_at %}
+        <div class="summary-item">
+          <span>Last live refresh</span>
+          <strong>{{ kestrel.last_refresh_success_at }}{% if kestrel.last_refresh_source %} ({{ kestrel.last_refresh_source }}){% endif %}</strong>
+        </div>
+        {% endif %}
+        {% if kestrel.last_refresh_status and kestrel.last_refresh_status != 'ok' %}
+        <div class="summary-item">
+          <span>Refresh status</span>
+          <strong>{{ kestrel.last_refresh_status }}</strong>
+        </div>
+        {% endif %}
       </div>
+      {% if kestrel.warning %}
+      <div class="summary-headline" style="margin-top:0.75rem;color:var(--warn);">{{ kestrel.warning }}</div>
+      {% endif %}
     </div>
 
     <div class="cards">

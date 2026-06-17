@@ -30,6 +30,6 @@ experiments/debug/
 experiments/simplyfresh_probe/.auth/
 experiments/simplyfresh_probe/artifacts/
 
-# Kestrel probe runtime data (SQLite, status JSON)
+# Kestrel probe runtime data (SQLite, status JSON, debug artifacts)
 data/kestrel/
 *.trace.zip

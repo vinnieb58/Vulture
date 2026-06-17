@@ -382,6 +382,15 @@ def format_kestrel_detail_display(
         "peak_interval_7": peak_display,
         "missing_interval_count": format_count(status.get("missing_interval_count")),
         "generated_at": generated_at_display,
+        "last_refresh_status": status.get("last_refresh_status"),
+        "last_refresh_source": status.get("last_refresh_source"),
+        "last_refresh_message": status.get("last_refresh_message"),
+        "last_refresh_success_at": (
+            format_timestamp_friendly(str(status["last_refresh_success_at"]), tz_name=tz_name, now=now)
+            if status.get("last_refresh_success_at")
+            else None
+        ),
+        "warning": status.get("warning"),
         "charts": {
             "daily_30": daily_30,
             "daily_full": daily_full,

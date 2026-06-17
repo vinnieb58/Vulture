@@ -27,6 +27,7 @@ from kestrel.models import (
     normalize_account_identifier,
     utc_now_iso,
 )
+from kestrel.redact import describe_payload_shape, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -172,13 +173,21 @@ class SmartMeterTexasClient:
         )
         response.raise_for_status()
         payload = response.json()
-        return parse_interval_synch_payload(
-            payload,
-            day=day,
-            tz_name=self._config.timezone,
-            account_id=esiid,
-            raw_source="smt_portal_api",
-        )
+        try:
+            return parse_interval_synch_payload(
+                payload,
+                day=day,
+                tz_name=self._config.timezone,
+                account_id=esiid,
+                raw_source="smt_portal_api",
+            )
+        except SmartMeterTexasError:
+            log.warning(
+                "Interval payload parse failed for %s; shape=%s",
+                day.isoformat(),
+                describe_payload_shape(payload),
+            )
+            raise
 
     def _ensure_authenticated(self) -> None:
         if not self._token:
@@ -328,11 +337,21 @@ def parse_interval_synch_payload(
     raw_source: str = "smt_portal_api",
 ) -> list[EnergyInterval]:
     data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise SmartMeterTexasError(
+            "Smart Meter Texas interval response missing data object. "
+            f"Shape: {describe_payload_shape(payload)}"
+        )
     if data.get("errorCode"):
-        message = str(data.get("errorMessage") or "unknown error")
+        message = redact_text(str(data.get("errorMessage") or "unknown error"))
         raise SmartMeterTexasError(f"Smart Meter Texas interval error: {message}")
 
     energy_entries = data.get("energyData") or []
+    if energy_entries and not isinstance(energy_entries, list):
+        raise SmartMeterTexasError(
+            f"Smart Meter Texas interval response has unexpected energyData type. "
+            f"Shape: {describe_payload_shape(payload)}"
+        )
     consumption = next((entry for entry in energy_entries if entry.get("RT") == "C"), None)
     if consumption is None and energy_entries:
         consumption = energy_entries[0]

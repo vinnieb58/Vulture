@@ -25,9 +25,25 @@ _SENSITIVE_KEYS = frozenset({
     "db_path",
     "smt_username",
     "smt_password",
+    "token",
+    "cookie",
+    "cookies",
 })
 
 _HASH_KEY_PATTERN = re.compile(r".*hash.*", re.IGNORECASE)
+_BEARER = re.compile(r"(?i)\bbearer\s+\S+")
+_ESIID = re.compile(r"\b\d{15,22}\b")
+_ENV_SECRET = re.compile(r"(?i)\b(PASSWORD|USERNAME|TOKEN|SECRET)\s*=\s*\S+")
+
+
+def _redact_message(text: str | None) -> str | None:
+    if not text:
+        return text
+    result = text
+    result = _BEARER.sub("Bearer [REDACTED]", result)
+    result = _ENV_SECRET.sub(r"\1=[REDACTED]", result)
+    result = _ESIID.sub("[REDACTED_ESIID]", result)
+    return result
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -152,6 +168,11 @@ def read_kestrel_status() -> dict[str, Any]:
         "missing_interval_count": None,
         "top_intervals": [],
         "daily_totals": {},
+        "last_refresh_attempt_at": None,
+        "last_refresh_success_at": None,
+        "last_refresh_source": None,
+        "last_refresh_status": None,
+        "last_refresh_message": None,
     }
 
     if not KESTREL_STATUS_PATH.exists():
@@ -217,6 +238,25 @@ def read_kestrel_status() -> dict[str, Any]:
 
     result["top_intervals"] = _parse_top_intervals(clean)
     result["daily_totals"] = _parse_daily_totals(clean)
+
+    for field in (
+        "last_refresh_attempt_at",
+        "last_refresh_success_at",
+        "last_refresh_source",
+        "last_refresh_status",
+        "last_refresh_message",
+    ):
+        value = clean.get(field)
+        if value is not None:
+            if field == "last_refresh_message":
+                result[field] = _redact_message(str(value))
+            else:
+                result[field] = str(value)
+
+    if result.get("last_refresh_status") == "failed":
+        result["warning"] = result.get("last_refresh_message") or "Last live refresh failed"
+    elif result.get("last_refresh_status") == "unsupported":
+        result["warning"] = result.get("last_refresh_message") or "Live refresh is not supported"
 
     if _has_energy_data(
         interval_count=result["interval_count"],
