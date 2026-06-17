@@ -255,6 +255,11 @@ def read_kestrel_status() -> dict[str, Any]:
 
     if result.get("last_refresh_status") == "failed":
         result["warning"] = result.get("last_refresh_message") or "Last live refresh failed"
+    elif result.get("last_refresh_status") == "partial":
+        result["warning"] = (
+            result.get("last_refresh_message")
+            or "Latest interval data unavailable (likely TDSP lag)"
+        )
     elif result.get("last_refresh_status") == "unsupported":
         result["warning"] = result.get("last_refresh_message") or "Live refresh is not supported"
 

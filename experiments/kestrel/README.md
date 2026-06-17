@@ -66,6 +66,8 @@ python experiments/kestrel/smart_meter_texas_probe.py --summary-only
 
 `--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then falls back to a probe-quality Playwright CSV export. MFA/CAPTCHA blocks fail clearly without bypass attempts.
 
+By default, `--live-refresh --days N` excludes the current local day (America/Chicago) because SMT interval data may lag 24–48 hours. Use `--include-current-day` to request today's unpublished data.
+
 If live refresh fails, use CSV import. The portal JSON endpoints are unofficial and may rate-limit or change.
 
 ## Legacy live probe (experimental)

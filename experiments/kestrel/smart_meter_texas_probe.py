@@ -33,10 +33,12 @@ from kestrel.config import (  # noqa: E402
     setup_logging,
 )
 from kestrel.live_refresh import (  # noqa: E402
+    COMPLETED_RANGE_NOTE,
     LiveRefreshResult,
     RefreshMetadata,
     build_csv_import_metadata,
     load_refresh_metadata_from_status,
+    resolve_live_refresh_days_range,
     run_live_refresh,
 )
 from kestrel.smart_meter_texas import (  # noqa: E402
@@ -72,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         help="With --live-refresh: save redacted browser debug artifacts under data/kestrel/debug/",
     )
     parser.add_argument(
+        "--include-current-day",
+        action="store_true",
+        help="With --live-refresh --days: include the current local day (may be unpublished)",
+    )
+    parser.add_argument(
         "--summary-only",
         action="store_true",
         help="Summarize existing SQLite data without fetching or importing",
@@ -92,9 +99,11 @@ def _parse_cli_date(value: str, label: str) -> date:
         raise SystemExit(f"Invalid {label} date {value!r}; use YYYY-MM-DD.") from exc
 
 
-def _resolve_range(args: argparse.Namespace, config) -> tuple[date | None, date | None]:
+def _resolve_range(
+    args: argparse.Namespace, config
+) -> tuple[date | None, date | None, str | None]:
     if args.summary_only or args.import_csv:
-        return None, None
+        return None, None, None
 
     if args.from_date or args.to_date:
         if not args.from_date or not args.to_date:
@@ -103,12 +112,21 @@ def _resolve_range(args: argparse.Namespace, config) -> tuple[date | None, date 
         end = _parse_cli_date(args.to_date, "end")
         if end < start:
             raise SystemExit("End date must be on or after start date.")
-        return start, end
+        return start, end, None
 
     lookback = args.days if args.days is not None else config.lookback_days
+    if args.live_refresh:
+        start, end = resolve_live_refresh_days_range(
+            days=lookback,
+            timezone=config.timezone,
+            include_current_day=args.include_current_day,
+        )
+        note = None if args.include_current_day else COMPLETED_RANGE_NOTE
+        return start, end, note
+
     end = date.today()
     start = end - timedelta(days=lookback - 1)
-    return start, end
+    return start, end, None
 
 
 def _requires_live_access(args: argparse.Namespace) -> bool:
@@ -189,6 +207,9 @@ def main() -> int:
     if args.debug_safe and not args.live_refresh:
         print("ERROR: --debug-safe requires --live-refresh.", file=sys.stderr)
         return 1
+    if args.include_current_day and not args.live_refresh:
+        print("ERROR: --include-current-day requires --live-refresh.", file=sys.stderr)
+        return 1
 
     live_access = _requires_live_access(args)
     try:
@@ -201,7 +222,7 @@ def main() -> int:
         return 1
 
     log = setup_logging(config.log_level)
-    start, end = _resolve_range(args, config)
+    start, end, range_note = _resolve_range(args, config)
     status_path = config.data_dir / "kestrel_status.json"
     status_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -233,6 +254,8 @@ def main() -> int:
         log.info("Imported %s intervals from CSV (%s inserted, %s skipped)", imported, inserted, skipped)
     elif args.live_refresh:
         assert start is not None and end is not None
+        if range_note:
+            print(range_note)
         range_start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
         range_end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
         live_result = run_live_refresh(
@@ -246,7 +269,7 @@ def main() -> int:
         imported = len(live_result.intervals)
         inserted = live_result.inserted
         skipped = live_result.skipped
-        if live_result.metadata.status != "ok":
+        if live_result.metadata.status in ("failed", "unsupported"):
             print(f"ERROR: Live refresh {live_result.metadata.status}.", file=sys.stderr)
             if live_result.metadata.message:
                 print(f"  {live_result.metadata.message}", file=sys.stderr)
@@ -255,6 +278,8 @@ def main() -> int:
                 "with --import-csv /path/to/export.csv",
                 file=sys.stderr,
             )
+        elif live_result.metadata.status == "partial" and live_result.metadata.message:
+            print(f"WARNING: {live_result.metadata.message}", file=sys.stderr)
     elif not args.summary_only:
         assert start is not None and end is not None
         range_start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
@@ -318,7 +343,7 @@ def main() -> int:
     )
     log.info("Wrote status snapshot")
 
-    if live_result is not None and live_result.metadata.status != "ok":
+    if live_result is not None and live_result.metadata.status in ("failed", "unsupported"):
         return 1
     return 0
 

@@ -44,6 +44,16 @@ def _detect_interactive_blocker(page_text: str) -> str | None:
     return None
 
 
+def _safe_browser_error_label(exc: Exception) -> str:
+    text = redact_text(str(exc))
+    if "ERR_HTTP2_PROTOCOL_ERROR" in text or "net::" in text:
+        return "navigation error"
+    name = type(exc).__name__
+    if "Timeout" in name or "timeout" in text.lower():
+        return "navigation timeout"
+    return name
+
+
 def fetch_intervals_via_browser(
     config: KestrelConfig,
     *,
@@ -51,6 +61,7 @@ def fetch_intervals_via_browser(
     end: date,
     account_id: str | None = None,
     debug_dir: Path | None = None,
+    debug_safe: bool = False,
 ) -> list[EnergyInterval]:
     """
     Log into the SMT portal with Playwright and download the official CSV export.
@@ -65,6 +76,36 @@ def fetch_intervals_via_browser(
             "Use --import-csv or install playwright."
         )
 
+    try:
+        return _fetch_intervals_via_browser_impl(
+            config,
+            start=start,
+            end=end,
+            account_id=account_id,
+            debug_dir=debug_dir,
+            debug_safe=debug_safe,
+        )
+    except SmartMeterTexasError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        label = _safe_browser_error_label(exc)
+        if debug_safe:
+            log.exception("Browser fallback error")
+        else:
+            log.warning("Browser fallback failed: %s", label)
+        raise SmartMeterTexasError(f"Browser fallback failed: {label}") from None
+
+
+def _fetch_intervals_via_browser_impl(
+    config: KestrelConfig,
+    *,
+    start: date,
+    end: date,
+    account_id: str | None = None,
+    debug_dir: Path | None = None,
+    debug_safe: bool = False,
+) -> list[EnergyInterval]:
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
@@ -74,63 +115,81 @@ def fetch_intervals_via_browser(
 
     start_str = start.strftime("%m/%d/%Y")
     end_str = end.strftime("%m/%d/%Y")
+    page = None
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=config.headless)
-        try:
-            context = browser.new_context(accept_downloads=True)
-            page = context.new_page()
-            page.set_default_timeout(45_000)
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=config.headless)
+            try:
+                context = browser.new_context(accept_downloads=True)
+                page = context.new_page()
+                page.set_default_timeout(45_000)
 
-            log.info("Opening Smart Meter Texas login page")
-            page.goto(_LOGIN_URL, wait_until="domcontentloaded")
+                log.info("Opening Smart Meter Texas login page")
+                page.goto(_LOGIN_URL, wait_until="domcontentloaded")
 
-            body_text = page.inner_text("body")
-            blocker = _detect_interactive_blocker(body_text)
-            if blocker:
-                raise SmartMeterTexasError(
-                    f"Smart Meter Texas browser login blocked: {blocker}. "
-                    "Use manual CSV import instead."
+                body_text = page.inner_text("body")
+                blocker = _detect_interactive_blocker(body_text)
+                if blocker:
+                    raise SmartMeterTexasError(
+                        f"Smart Meter Texas browser login blocked: {blocker}. "
+                        "Use manual CSV import instead."
+                    )
+
+                username_field = page.locator(
+                    'input[name="username"], input[id*="user" i], input[type="text"]'
+                ).first
+                password_field = page.locator('input[type="password"]').first
+                username_field.fill(config.smt_username)
+                password_field.fill(config.smt_password)
+
+                submit = page.locator(
+                    'button[type="submit"], input[type="submit"], button:has-text("Log In"), '
+                    'button:has-text("Sign In")'
+                ).first
+                submit.click()
+                page.wait_for_load_state("networkidle", timeout=45_000)
+
+                post_login_text = page.inner_text("body")
+                blocker = _detect_interactive_blocker(post_login_text)
+                if blocker:
+                    if debug_dir is not None:
+                        _save_debug_artifact(page, debug_dir, "post_login_blocker")
+                    raise SmartMeterTexasError(
+                        f"Smart Meter Texas browser login blocked: {blocker}. "
+                        "Use manual CSV import instead."
+                    )
+
+                if "login" in page.url.lower() and "password" in post_login_text.lower():
+                    raise SmartMeterTexasError(
+                        "Smart Meter Texas browser login failed. Check credentials in .env."
+                    )
+
+                csv_text = _download_interval_csv(
+                    page,
+                    start_str=start_str,
+                    end_str=end_str,
+                    debug_dir=debug_dir,
                 )
-
-            username_field = page.locator(
-                'input[name="username"], input[id*="user" i], input[type="text"]'
-            ).first
-            password_field = page.locator('input[type="password"]').first
-            username_field.fill(config.smt_username)
-            password_field.fill(config.smt_password)
-
-            submit = page.locator(
-                'button[type="submit"], input[type="submit"], button:has-text("Log In"), '
-                'button:has-text("Sign In")'
-            ).first
-            submit.click()
-            page.wait_for_load_state("networkidle", timeout=45_000)
-
-            post_login_text = page.inner_text("body")
-            blocker = _detect_interactive_blocker(post_login_text)
-            if blocker:
-                if debug_dir is not None:
-                    _save_debug_artifact(page, debug_dir, "post_login_blocker")
-                raise SmartMeterTexasError(
-                    f"Smart Meter Texas browser login blocked: {blocker}. "
-                    "Use manual CSV import instead."
-                )
-
-            if "login" in page.url.lower() and "password" in post_login_text.lower():
-                raise SmartMeterTexasError(
-                    "Smart Meter Texas browser login failed. Check credentials in .env."
-                )
-
-            csv_text = _download_interval_csv(page, start_str=start_str, end_str=end_str, debug_dir=debug_dir)
-        except PlaywrightTimeoutError as exc:
-            if debug_dir is not None:
-                _save_debug_artifact(page, debug_dir, "timeout")
-            raise SmartMeterTexasError(
-                "Smart Meter Texas browser export timed out. Portal layout may have changed."
-            ) from exc
-        finally:
-            browser.close()
+            finally:
+                browser.close()
+    except SmartMeterTexasError:
+        raise
+    except PlaywrightTimeoutError as exc:
+        if debug_dir is not None and page is not None:
+            _save_debug_artifact(page, debug_dir, "timeout")
+        if debug_safe:
+            log.exception("Browser fallback timeout")
+        raise SmartMeterTexasError(
+            "Browser fallback failed: navigation timeout"
+        ) from None
+    except PlaywrightError as exc:
+        if debug_dir is not None and page is not None:
+            _save_debug_artifact(page, debug_dir, "playwright_error")
+        label = _safe_browser_error_label(exc)
+        if debug_safe:
+            log.exception("Browser fallback navigation error")
+        raise SmartMeterTexasError(f"Browser fallback failed: {label}") from None
 
     intervals = parse_csv_content(
         csv_text,

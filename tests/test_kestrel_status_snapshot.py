@@ -148,3 +148,24 @@ class TestBuildStatusSnapshot:
         )
         assert snapshot["last_refresh_source"] == "live_api"
         assert snapshot["last_refresh_status"] == "ok"
+
+    def test_partial_refresh_status(self) -> None:
+        rows = [
+            _interval("2026-06-01T05:00:00+00:00", "2026-06-01T05:15:00+00:00", 0.5),
+        ]
+        summary = summarize_intervals(rows)
+        from kestrel.live_refresh import RefreshMetadata
+
+        snapshot = build_status_snapshot(
+            summary,
+            top_intervals(rows, 1),
+            provider=PROVIDER_SMART_METER_TEXAS,
+            refresh=RefreshMetadata(
+                attempt_at="2026-06-17T12:00:00+00:00",
+                success_at="2026-06-17T12:00:01+00:00",
+                source="live_api",
+                status="partial",
+                message="Fetched 96 intervals; latest day unavailable (likely TDSP lag)",
+            ),
+        )
+        assert snapshot["last_refresh_status"] == "partial"

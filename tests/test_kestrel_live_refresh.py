@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -14,14 +15,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kestrel.config import KestrelConfig, KestrelConfigError, PROVIDER_SMART_METER_TEXAS, load_config
 from kestrel.live_refresh import (
+    COMPLETED_RANGE_NOTE,
     RefreshMetadata,
     build_csv_import_metadata,
     load_refresh_metadata_from_status,
+    resolve_live_refresh_days_range,
     run_live_refresh,
 )
 from kestrel.models import EnergyInterval, hash_identifier
 from kestrel.redact import describe_payload_shape, redact_text
-from kestrel.smart_meter_texas import parse_interval_synch_payload
+from kestrel.smart_meter_texas import (
+    FetchIntervalsResult,
+    SMTDataLagError,
+    is_tdsp_no_data_message,
+    parse_interval_synch_payload,
+)
 from kestrel.status_snapshot import build_status_snapshot
 from kestrel.storage import upsert_intervals
 from kestrel.summarize import summarize_intervals, top_intervals
@@ -93,6 +101,69 @@ class TestIntervalSynchNormalization:
             {k: getattr(intervals[0], k) for k in intervals[0].__dataclass_fields__}
         )
 
+    def test_tdsp_no_data_message_is_detected(self) -> None:
+        message = "No Energy Data received from the respective TDSP"
+        assert is_tdsp_no_data_message(message)
+
+    def test_tdsp_no_data_raises_data_lag_error(self) -> None:
+        payload = {
+            "data": {
+                "errorCode": "1",
+                "errorMessage": "No Energy Data received from the respective TDSP",
+            }
+        }
+        with pytest.raises(SMTDataLagError, match="TDSP lag"):
+            parse_interval_synch_payload(
+                payload,
+                day=date(2026, 6, 17),
+                tz_name="America/Chicago",
+            )
+
+
+class TestCompletedDateRange:
+    def test_days_excludes_current_america_chicago_date(self) -> None:
+        fixed_now = datetime(2026, 6, 17, 15, 0, tzinfo=ZoneInfo("America/Chicago"))
+        with patch("kestrel.live_refresh.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            start, end = resolve_live_refresh_days_range(
+                days=2,
+                timezone="America/Chicago",
+                include_current_day=False,
+            )
+        assert end == date(2026, 6, 16)
+        assert start == date(2026, 6, 15)
+
+    def test_include_current_day_uses_today(self) -> None:
+        fixed_now = datetime(2026, 6, 17, 15, 0, tzinfo=ZoneInfo("America/Chicago"))
+        with patch("kestrel.live_refresh.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            start, end = resolve_live_refresh_days_range(
+                days=2,
+                timezone="America/Chicago",
+                include_current_day=True,
+            )
+        assert end == date(2026, 6, 17)
+        assert start == date(2026, 6, 16)
+
+    def test_completed_range_note_is_safe(self) -> None:
+        assert "password" not in COMPLETED_RANGE_NOTE.lower()
+        assert "24-48" in COMPLETED_RANGE_NOTE
+
+
+def _fetch_result(
+    intervals: list[EnergyInterval],
+    *,
+    data_lag_days: list[date] | None = None,
+    failed_days: list[date] | None = None,
+    failed_messages: list[str] | None = None,
+) -> FetchIntervalsResult:
+    return FetchIntervalsResult(
+        intervals=intervals,
+        data_lag_days=data_lag_days or [],
+        failed_days=failed_days or [],
+        failed_messages=failed_messages or [],
+    )
+
 
 class TestLiveRefresh:
     def _sample_intervals(self) -> list[EnergyInterval]:
@@ -121,14 +192,20 @@ class TestLiveRefresh:
         config = _config(tmp_path)
         intervals = self._sample_intervals()
 
-        with patch("kestrel.live_refresh.fetch_intervals", return_value=intervals):
+        with patch(
+            "kestrel.live_refresh.fetch_intervals_by_day",
+            return_value=_fetch_result(intervals),
+        ):
             first = run_live_refresh(config, start=date(2026, 6, 15), end=date(2026, 6, 15))
         assert first.metadata.status == "ok"
         assert first.metadata.source == "live_api"
         assert first.inserted == 2
         assert first.skipped == 0
 
-        with patch("kestrel.live_refresh.fetch_intervals", return_value=intervals):
+        with patch(
+            "kestrel.live_refresh.fetch_intervals_by_day",
+            return_value=_fetch_result(intervals),
+        ):
             second = run_live_refresh(config, start=date(2026, 6, 15), end=date(2026, 6, 15))
         assert second.inserted == 0
         assert second.skipped == 2
@@ -136,7 +213,10 @@ class TestLiveRefresh:
     def test_dry_run_skips_db_write(self, tmp_path: Path) -> None:
         config = _config(tmp_path)
         intervals = self._sample_intervals()
-        with patch("kestrel.live_refresh.fetch_intervals", return_value=intervals):
+        with patch(
+            "kestrel.live_refresh.fetch_intervals_by_day",
+            return_value=_fetch_result(intervals),
+        ):
             result = run_live_refresh(
                 config,
                 start=date(2026, 6, 15),
@@ -154,8 +234,12 @@ class TestLiveRefresh:
 
         with (
             patch(
-                "kestrel.live_refresh.fetch_intervals",
-                side_effect=SmartMeterTexasError("API unavailable"),
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                return_value=_fetch_result(
+                    [],
+                    failed_days=[date(2026, 6, 15)],
+                    failed_messages=["API unavailable"],
+                ),
             ),
             patch(
                 "kestrel.live_refresh.fetch_intervals_via_browser",
@@ -167,14 +251,44 @@ class TestLiveRefresh:
         assert result.metadata.source == "live_browser"
         assert result.metadata.status == "ok"
 
-    def test_both_paths_fail_returns_unsupported(self, tmp_path: Path) -> None:
+    def test_tdsp_lag_on_newest_day_does_not_trigger_browser(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        intervals = self._sample_intervals()
+        with (
+            patch(
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                return_value=_fetch_result(intervals, data_lag_days=[date(2026, 6, 16)]),
+            ),
+            patch("kestrel.live_refresh.fetch_intervals_via_browser") as browser_mock,
+        ):
+            result = run_live_refresh(config, start=date(2026, 6, 15), end=date(2026, 6, 16))
+        browser_mock.assert_not_called()
+        assert result.metadata.status == "partial"
+        assert result.inserted == 2
+        assert "TDSP lag" in (result.metadata.message or "")
+
+    def test_all_days_data_lag_fails_without_browser(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        with (
+            patch(
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                return_value=_fetch_result([], data_lag_days=[date(2026, 6, 16), date(2026, 6, 17)]),
+            ),
+            patch("kestrel.live_refresh.fetch_intervals_via_browser") as browser_mock,
+        ):
+            result = run_live_refresh(config, start=date(2026, 6, 16), end=date(2026, 6, 17))
+        browser_mock.assert_not_called()
+        assert result.metadata.status == "failed"
+        assert "TDSP lag" in (result.metadata.message or "")
+
+    def test_both_paths_fail_returns_failed(self, tmp_path: Path) -> None:
         config = _config(tmp_path)
         from kestrel.smart_meter_texas import SmartMeterTexasError
 
         with (
             patch(
-                "kestrel.live_refresh.fetch_intervals",
-                side_effect=SmartMeterTexasError("API unavailable"),
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                side_effect=SmartMeterTexasError("API setup unavailable"),
             ),
             patch(
                 "kestrel.live_refresh.fetch_intervals_via_browser",
@@ -186,6 +300,34 @@ class TestLiveRefresh:
         assert result.inserted == 0
         assert "CAPTCHA" in (result.metadata.message or "")
         assert "secret-password" not in (result.metadata.message or "")
+
+    def test_browser_navigation_error_is_safe_without_debug(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        config = _config(tmp_path)
+
+        class FakeNavError(Exception):
+            pass
+
+        with (
+            patch(
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                return_value=_fetch_result(
+                    [],
+                    failed_days=[date(2026, 6, 15)],
+                    failed_messages=["network error"],
+                ),
+            ),
+            patch(
+                "kestrel.live_refresh.fetch_intervals_via_browser",
+                side_effect=FakeNavError("Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = run_live_refresh(config, start=date(2026, 6, 15), end=date(2026, 6, 15))
+        assert result.metadata.status == "failed"
+        assert "navigation error" in (result.metadata.message or "").lower()
+        assert "Traceback" not in caplog.text
 
     def test_missing_credentials_returns_failed_without_db_write(self, tmp_path: Path) -> None:
         config = _config(tmp_path, with_credentials=False)

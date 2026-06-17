@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from kestrel.config import KestrelConfig
 from kestrel.models import EnergyInterval, utc_now_iso
-from kestrel.redact import describe_payload_shape, redact_text
-from kestrel.smart_meter_texas import SmartMeterTexasError, fetch_intervals
+from kestrel.redact import redact_text
+from kestrel.smart_meter_texas import (
+    FetchIntervalsResult,
+    SmartMeterTexasError,
+    fetch_intervals_by_day,
+)
 from kestrel.smt_browser import fetch_intervals_via_browser
 from kestrel.storage import upsert_intervals
 from kestrel.summarize import PeakInterval, peak_interval, total_kwh
@@ -19,7 +24,12 @@ from kestrel.summarize import PeakInterval, peak_interval, total_kwh
 log = logging.getLogger(__name__)
 
 RefreshSource = Literal["csv_import", "live_api", "live_browser"]
-RefreshStatus = Literal["ok", "failed", "unsupported"]
+RefreshStatus = Literal["ok", "partial", "failed", "unsupported"]
+
+COMPLETED_RANGE_NOTE = (
+    "Note: SMT 15-minute interval data may lag 24-48 hours. "
+    "Default --days range excludes the current local day."
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,55 @@ class LiveRefreshResult:
     fetched_peak: PeakInterval | None
 
 
+def resolve_live_refresh_days_range(
+    *,
+    days: int,
+    timezone: str,
+    include_current_day: bool = False,
+) -> tuple[date, date]:
+    """Return a completed-date lookback range in the configured local timezone."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    tz = ZoneInfo(timezone)
+    today_local = datetime.now(tz).date()
+    end = today_local if include_current_day else today_local - timedelta(days=1)
+    start = end - timedelta(days=days - 1)
+    return start, end
+
+
+def _format_day_list(days: list[date]) -> str:
+    return ", ".join(day.isoformat() for day in days)
+
+
+def _should_try_browser(fetch_result: FetchIntervalsResult | None) -> bool:
+    """Browser fallback is only for real API path failures, not TDSP data lag."""
+    if fetch_result is None:
+        return True
+    if fetch_result.intervals:
+        return False
+    if fetch_result.data_lag_days and not fetch_result.failed_days:
+        return False
+    return bool(fetch_result.failed_days)
+
+
+def _browser_error_message(exc: Exception, *, debug_safe: bool) -> str:
+    if debug_safe:
+        log.exception("Browser fallback error")
+    else:
+        log.warning("Browser fallback failed: %s", _safe_browser_error_label(exc))
+    return f"Browser fallback failed: {_safe_browser_error_label(exc)}"
+
+
+def _safe_browser_error_label(exc: Exception) -> str:
+    text = redact_text(str(exc))
+    if "ERR_HTTP2_PROTOCOL_ERROR" in text or "net::" in text:
+        return "navigation error"
+    name = type(exc).__name__
+    if "Timeout" in name or "timeout" in text.lower():
+        return "navigation timeout"
+    return name
+
+
 def run_live_refresh(
     config: KestrelConfig,
     *,
@@ -63,9 +122,10 @@ def run_live_refresh(
     debug_safe: bool = False,
 ) -> LiveRefreshResult:
     """
-    Attempt live refresh via portal API, then browser CSV export.
+    Attempt live refresh via portal API, then browser CSV export for real failures.
 
-    Preserves the existing DB on failure. Upserts only on success (unless dry_run).
+    TDSP data lag on the newest requested day imports partial data without browser
+    fallback. Preserves the existing DB on total failure.
     """
     attempt_at = utc_now_iso()
     debug_dir = None
@@ -75,46 +135,56 @@ def run_live_refresh(
     intervals: list[EnergyInterval] = []
     source: RefreshSource | None = None
     error_messages: list[str] = []
+    fetch_result: FetchIntervalsResult | None = None
+    status: RefreshStatus = "failed"
 
     try:
-        intervals = fetch_intervals(config, start=start, end=end)
+        fetch_result = fetch_intervals_by_day(config, start=start, end=end)
+        intervals = fetch_result.intervals
         source = "live_api"
         log.info("Live API fetch returned %s intervals", len(intervals))
     except SmartMeterTexasError as exc:
         safe_msg = redact_text(str(exc))
         error_messages.append(f"API: {safe_msg}")
-        log.warning("Live API fetch failed: %s", safe_msg)
-    except Exception as exc:  # noqa: BLE001 — probe boundary; preserve DB
-        safe_msg = redact_text(str(exc))
-        error_messages.append(f"API: unexpected error ({type(exc).__name__})")
-        log.exception("Unexpected live API error")
+        log.warning("Live API setup failed: %s", safe_msg)
 
-    if not intervals:
+    if intervals:
+        if fetch_result and fetch_result.data_lag_days:
+            status = "partial"
+        else:
+            status = "ok"
+    elif fetch_result and fetch_result.data_lag_days and not fetch_result.failed_days:
+        status = "failed"
+        error_messages.append(
+            "No published interval data for requested range (likely TDSP lag 24-48 hours)"
+        )
+    elif _should_try_browser(fetch_result):
         try:
             intervals = fetch_intervals_via_browser(
                 config,
                 start=start,
                 end=end,
                 debug_dir=debug_dir,
+                debug_safe=debug_safe,
             )
             source = "live_browser"
+            status = "ok"
             log.info("Browser fetch returned %s intervals", len(intervals))
         except SmartMeterTexasError as exc:
             safe_msg = redact_text(str(exc))
-            error_messages.append(f"Browser: {safe_msg}")
-            log.warning("Browser fetch failed: %s", safe_msg)
+            error_messages.append(safe_msg)
+            log.warning("%s", safe_msg)
         except Exception as exc:  # noqa: BLE001
-            error_messages.append(f"Browser: unexpected error ({type(exc).__name__})")
-            log.exception("Unexpected browser fetch error")
+            error_messages.append(_browser_error_message(exc, debug_safe=debug_safe))
 
     if not intervals:
         combined = "; ".join(error_messages) if error_messages else "No data source available"
-        status: RefreshStatus = "unsupported" if not error_messages else "failed"
+        final_status: RefreshStatus = "unsupported" if not error_messages else status
         metadata = RefreshMetadata(
             attempt_at=attempt_at,
             success_at=None,
             source=None,
-            status=status,
+            status=final_status,
             message=redact_text(combined)[:500],
         )
         return LiveRefreshResult(
@@ -147,6 +217,11 @@ def run_live_refresh(
         f"Fetched {len(intervals)} intervals for {start.isoformat()}..{end.isoformat()}; "
         f"inserted {inserted}, skipped {skipped} duplicates"
     )
+    if status == "partial" and fetch_result and fetch_result.data_lag_days:
+        lag_days = _format_day_list(fetch_result.data_lag_days)
+        message += (
+            f". Latest requested day(s) unavailable (likely TDSP lag 24-48 hours): {lag_days}"
+        )
     if dry_run:
         message = f"Dry run: {message}"
 
@@ -154,7 +229,7 @@ def run_live_refresh(
         attempt_at=attempt_at,
         success_at=success_at,
         source=source,
-        status="ok",
+        status=status,
         message=redact_text(message),
     )
     return LiveRefreshResult(
@@ -186,14 +261,6 @@ def build_csv_import_metadata(*, imported: int, inserted: int, skipped: int) -> 
     )
 
 
-def log_unexpected_api_payload(payload: object) -> None:
-    """Log a safe response-shape summary when the portal API shape changes."""
-    log.warning(
-        "Unexpected Smart Meter Texas API response shape: %s",
-        describe_payload_shape(payload),
-    )
-
-
 def load_refresh_metadata_from_status(status_path: Path) -> RefreshMetadata | None:
     """Load prior refresh fields from an existing status JSON file."""
     if not status_path.is_file():
@@ -217,6 +284,6 @@ def load_refresh_metadata_from_status(status_path: Path) -> RefreshMetadata | No
         attempt_at=str(attempt_at),
         success_at=str(raw["last_refresh_success_at"]) if raw.get("last_refresh_success_at") else None,
         source=source if source in ("csv_import", "live_api", "live_browser") else None,
-        status=status if status in ("ok", "failed", "unsupported") else "failed",
+        status=status if status in ("ok", "partial", "failed", "unsupported") else "failed",
         message=redact_text(str(raw["last_refresh_message"])) if raw.get("last_refresh_message") else None,
     )

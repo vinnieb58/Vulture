@@ -328,7 +328,7 @@
           <strong>{{ kestrel.last_refresh_success_at }}{% if kestrel.last_refresh_source %} ({{ kestrel.last_refresh_source }}){% endif %}</strong>
         </div>
         {% endif %}
-        {% if kestrel.last_refresh_status and kestrel.last_refresh_status != 'ok' %}
+        {% if kestrel.last_refresh_status and kestrel.last_refresh_status not in ('ok',) %}
         <div class="summary-item">
           <span>Refresh status</span>
           <strong>{{ kestrel.last_refresh_status }}</strong>
