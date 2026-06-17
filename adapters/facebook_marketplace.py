@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from experiments.adapters.facebook_marketplace_probe import (
     BLOCKER_CAPTCHA,
@@ -224,6 +225,7 @@ def search_facebook_marketplace(
     query: str,
     city: str | None = None,
     limit: int = 25,
+    **kwargs: Any,
 ) -> list[Listing]:
     """
     Search Facebook Marketplace and return up to *limit* ``Listing`` objects.
@@ -234,7 +236,15 @@ def search_facebook_marketplace(
     When login/CAPTCHA blockers are detected, logs a warning. Returns any SSR
     listings extracted from the page when present; otherwise returns ``[]``.
     Never raises.
+
+    Extra keyword arguments (e.g. ``max_price``, ``min_price``, ``radius``,
+    ``condition``) are accepted for hunt fan-out compatibility and ignored.
     """
+    if kwargs:
+        log.debug(
+            "facebook_marketplace: ignoring unsupported adapter kwargs: %s",
+            sorted(kwargs.keys()),
+        )
     location = city or "Houston, TX"
     cap = max(1, min(limit, 50))
 
