@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head><title>Facebook Marketplace</title></head>
+<body>
+<script type="application/json">
+{
+  "marketplace_search": {
+    "feed_units": {
+      "edges": [
+        {
+          "node": {
+            "listing": {
+              "id": "1234567890123456",
+              "marketplace_listing_title": "Valve Steam Deck OLED 1TB",
+              "listing_price": {
+                "formatted_amount": "$425",
+                "amount": "425.00",
+                "amount_with_offset_in_currency": "42500"
+              },
+              "location": {
+                "reverse_geocode": {
+                  "city": "Houston",
+                  "state": "TX",
+                  "city_page": {
+                    "display_name": "Houston, Texas"
+                  }
+                }
+              },
+              "primary_listing_photo": {
+                "image": {
+                  "uri": "https://scontent.xx.fbcdn.net/v/example-steam-deck.jpg"
+                }
+              }
+            }
+          }
+        },
+        {
+          "node": {
+            "listing": {
+              "id": "2345678901234567",
+              "marketplace_listing_title": "Steam Deck LCD 64GB",
+              "listing_price": {
+                "formatted_amount": "$250",
+                "amount": "250.00"
+              },
+              "location": {
+                "reverse_geocode": {
+                  "city": "Houston",
+                  "state": "TX"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "page_info": {
+        "end_cursor": "cursor-example"
+      }
+    }
+  },
+  "params": {
+    "location_id": "houston",
+    "query": "steam deck"
+  }
+}
+</script>
+<a href="/marketplace/item/1234567890123456/">Steam Deck OLED 1TB</a>
+<span>$425</span>
+</body>
+</html>
