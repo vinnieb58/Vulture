@@ -329,6 +329,29 @@ class TestLiveRefresh:
         assert "navigation error" in (result.metadata.message or "").lower()
         assert "Traceback" not in caplog.text
 
+    def test_no_browser_fallback_skips_browser_on_api_failure(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        with (
+            patch(
+                "kestrel.live_refresh.fetch_intervals_by_day",
+                return_value=_fetch_result(
+                    [],
+                    failed_days=[date(2026, 6, 15)],
+                    failed_messages=["API unavailable"],
+                ),
+            ),
+            patch("kestrel.live_refresh.fetch_intervals_via_browser") as browser_mock,
+        ):
+            result = run_live_refresh(
+                config,
+                start=date(2026, 6, 15),
+                end=date(2026, 6, 15),
+                no_browser_fallback=True,
+            )
+        browser_mock.assert_not_called()
+        assert result.metadata.status == "failed"
+        assert "Browser fallback disabled" in (result.metadata.message or "")
+
     def test_missing_credentials_returns_failed_without_db_write(self, tmp_path: Path) -> None:
         config = _config(tmp_path, with_credentials=False)
         result = run_live_refresh(config, start=date(2026, 6, 15), end=date(2026, 6, 15))

@@ -1,0 +1,18 @@
+[Unit]
+Description=Kestrel Smart Meter Texas live refresh (oneshot, API only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vinnieb58
+Group=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python3 experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 3 --no-browser-fallback
+NoNewPrivileges=true
+TimeoutStartSec=180
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
