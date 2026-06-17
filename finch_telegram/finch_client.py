@@ -111,3 +111,30 @@ def trip_reset() -> dict[str, Any]:
 
 def trip_undo_last() -> dict[str, Any]:
     return _request("POST", "/finch/trip/undo-last")
+
+
+def preferences_list() -> dict[str, Any]:
+    return _request("GET", "/finch/preferences")
+
+
+def preference_get(item: str) -> dict[str, Any]:
+    return _request("GET", f"/finch/preferences/{item}")
+
+
+def preference_delete(item: str) -> dict[str, Any]:
+    return _request("DELETE", f"/finch/preferences/{item}")
+
+
+def preference_change(item: str, *, chat_key: str, source: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"item": item, "chat_key": chat_key}
+    if source:
+        body["source"] = source
+    return _request("POST", "/finch/preferences/change", json=body)
+
+
+def preference_alias(new_key: str, existing_key: str) -> dict[str, Any]:
+    return _request(
+        "POST",
+        "/finch/preferences/alias",
+        json={"from_key": new_key, "to_key": existing_key},
+    )

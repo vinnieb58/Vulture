@@ -116,6 +116,49 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
             return commands.format_error(exc.detail)
         return str(payload.get("message") or "Undo complete.")
 
+    if isinstance(command, commands.PrefsCommand):
+        try:
+            payload = finch_client.preferences_list()
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return commands.format_preferences_response(payload)
+
+    if isinstance(command, commands.PrefCommand):
+        try:
+            payload = finch_client.preference_get(command.item)
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return commands.format_preference_get_response(payload)
+
+    if isinstance(command, commands.ForgetPrefCommand):
+        try:
+            payload = finch_client.preference_delete(command.item)
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return commands.format_preference_delete_response(payload)
+
+    if isinstance(command, commands.ChangePrefCommand):
+        try:
+            payload = finch_client.preference_change(
+                command.item,
+                chat_key=chat_key,
+                source="telegram",
+            )
+        except finch_client.FinchApiError as exc:
+            if exc.status_code == 403:
+                return commands.format_cart_blocked(exc.detail)
+            return commands.format_error(exc.detail)
+        if payload.get("needs_choice"):
+            return commands.format_needs_choice_response(payload)
+        return commands.format_error("Unexpected change response.")
+
+    if isinstance(command, commands.AliasPrefCommand):
+        try:
+            payload = finch_client.preference_alias(command.new_key, command.existing_key)
+        except finch_client.FinchApiError as exc:
+            return commands.format_error(exc.detail)
+        return commands.format_preference_alias_response(payload)
+
     return None
 
 

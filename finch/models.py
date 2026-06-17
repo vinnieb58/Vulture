@@ -35,6 +35,8 @@ class AliasEntry:
     upc: str | None = None
     search_term: str | None = None
     notes: str | None = None
+    product_size: str | None = None
+    product_price: str | None = None
 
 
 @dataclass(frozen=True)

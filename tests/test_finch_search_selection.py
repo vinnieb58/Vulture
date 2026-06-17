@@ -137,13 +137,13 @@ class TestSearchSelectionApi:
         assert response.status_code == 200
         payload = response.json()
         assert payload["needs_choice"] is True
-        assert payload["normalized_name"] == "bagels"
+        assert payload["normalized_name"] == "bagel"
         assert len(payload["results"]) == 2
         assert payload["results"][0]["description"] == "Plain Bagels 6 ct"
         assert payload["results"][0]["price"] == "$3.99"
         pending = get_pending_selection(CHAT_KEY)
         assert pending is not None
-        assert pending.normalized_name == "bagels"
+        assert pending.normalized_name == "bagel"
 
     def test_choose_one_adds_selected_item(self, api_client):
         with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
@@ -198,7 +198,7 @@ class TestSearchSelectionApi:
 
         from finch.aliases import get_alias
 
-        saved = get_alias("bagels", alias_db)
+        saved = get_alias("bagel", alias_db)
         assert saved is not None
         assert saved.upc == "0001111000001"
 
@@ -208,11 +208,11 @@ class TestSearchSelectionApi:
 
         upsert_alias(
             AliasEntry(
-                alias_key="bagels",
+                alias_key="bagel",
                 display_name="Plain Bagels 6 ct",
                 kroger_product_id="bagel-1",
                 upc="0001111000001",
-                search_term="bagels",
+                search_term="bagel",
                 notes="test",
             ),
             alias_db,
@@ -364,7 +364,7 @@ class TestSearchSelectionApi:
         assert response.status_code == 200
         payload = response.json()
         assert payload["needs_choice"] is True
-        assert payload["normalized_name"] == "bagels"
+        assert payload["normalized_name"] == "bagel"
         assert len(payload.get("partial_outcomes") or []) == 1
         assert mock_client.add_to_cart.call_count == 1
 

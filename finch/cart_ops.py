@@ -20,6 +20,7 @@ from finch.token_store import (
     resolve_user_access_token,
     save_tokens_from_response,
 )
+from finch.preference_norm import normalize_preference_key
 from finch.trip_ledger import (
     find_trip_duplicate,
     format_duplicate_message,
