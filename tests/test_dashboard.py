@@ -222,14 +222,16 @@ class TestDashboardHTTP:
         assert response.status_code == 200
         text = response.text
         assert "Energy data available" in text
-        assert "42.5000" in text
-        assert "2.5000" in text
-        assert "10.0000" in text
+        assert "42.50" in text
+        assert "2.50" in text
+        assert "10.00" in text
         assert "Missing intervals" in text
-        assert "2026-06-15T18:00:00+00:00" in text
+        assert "Mon 6/15, 1:00–1:15 PM" in text
+        assert "Mon 6/15 — 6.25 kWh" in text
+        assert "→" in text
         assert "Daily totals" in text
-        assert "2026-06-15" in text
-        assert "2026-06-16T12:00:00+00:00" in text
+        assert "2026-06-15T18:00:00+00:00" not in text
+        assert "2026-06-16T12:00:00+00:00" not in text
 
     def test_nest_home_handles_invalid_kestrel_json_safely(self, client, tmp_path, monkeypatch):
         status_path = tmp_path / "kestrel_status.json"

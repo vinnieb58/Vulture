@@ -34,6 +34,7 @@ from host_status import (
     get_storage_status,
     status_display_class,
 )
+from kestrel_formatting import format_kestrel_card_display
 from kestrel_status import read_kestrel_status
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_metrics_history import sample_and_get_peaks
@@ -245,19 +246,12 @@ def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
         "no_data": "unknown",
         "error": "fail",
     }
+    display = format_kestrel_card_display(kestrel)
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
-        "generated_at": kestrel.get("generated_at"),
-        "range": kestrel.get("range"),
-        "interval_count": kestrel.get("interval_count"),
-        "total_kwh": kestrel.get("total_kwh"),
-        "peak_interval_kwh": kestrel.get("peak_interval_kwh"),
-        "estimated_peak_kw": kestrel.get("estimated_peak_kw"),
-        "missing_interval_count": kestrel.get("missing_interval_count"),
-        "top_intervals": kestrel.get("top_intervals") or [],
-        "daily_totals": kestrel.get("daily_totals") or {},
+        **display,
     }
 
 
