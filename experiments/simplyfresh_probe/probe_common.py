@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from playwright.sync_api import Page
+    from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 except ImportError:
     Page = Any  # type: ignore[misc, assignment]
+    PlaywrightTimeout = Exception  # type: ignore[misc, assignment]
 
 PROBE_DIR = Path(__file__).resolve().parent
 ARTIFACTS_DIR = PROBE_DIR / "artifacts"
@@ -22,6 +25,7 @@ AUTH_DIR = PROBE_DIR / ".auth"
 STORAGE_STATE_PATH = AUTH_DIR / "simplyfresh_storage_state.json"
 
 START_URL = "https://new.thesimplyfreshkitchen.com/"
+PROFILE_URL = f"{START_URL.rstrip('/')}/profile"
 
 VIEWPORT = {"width": 1440, "height": 900}
 USER_AGENT = (
@@ -33,12 +37,28 @@ LOCALE = "en-US"
 TIMEZONE = "America/Chicago"
 NAV_TIMEOUT_MS = 60_000
 ACTION_DELAY_S = 1.0
+MEAL_CALENDAR_WAIT_MS = 15_000
 
-ORDER_LINK_PATTERNS = [
-    re.compile(r"place\s*order", re.I),
-    re.compile(r"order\s*now", re.I),
-    re.compile(r"order\s*meals", re.I),
+ORDER_NOW_PATTERNS = [
+    re.compile(r"^order\s*now$", re.I),
+    re.compile(r"\border\s*now\b", re.I),
 ]
+
+PLACE_ORDER_FALLBACK_PATTERNS = [
+    re.compile(r"place\s*order", re.I),
+]
+
+PROFILE_CHOOSER_HEADING = re.compile(r"who\s+are\s+you\s+ordering\s+for", re.I)
+MEAL_CALENDAR_HEADING = re.compile(r"choose\s+your\s+meals", re.I)
+SELECT_PROFILE_PATTERN = re.compile(r"select\s*profile", re.I)
+CREATE_PROFILE_PATTERN = re.compile(r"create\s*a\s*new\s*profile", re.I)
+NEXT_BUTTON_PATTERN = re.compile(r"^next$", re.I)
+
+DATE_ROW_PATTERN = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{1,2},\s+\d{4}\b",
+    re.I,
+)
 
 FORBIDDEN_CONTROL_PATTERNS = [
     re.compile(r"\bsubmit\b", re.I),
@@ -67,6 +87,20 @@ MONTH_NAME_PATTERN = re.compile(
     r"September|October|November|December)\s+(\d{4})\b",
     re.I,
 )
+
+
+@dataclass(frozen=True)
+class ProfileConfig:
+    profile_name: Optional[str] = None
+    school: Optional[str] = None
+
+
+@dataclass
+class NavigationResult:
+    ok: bool = False
+    profile_chooser_seen: bool = False
+    profile_selected: bool = False
+    meal_calendar_reached: bool = False
 
 
 def setup_logging(name: str) -> logging.Logger:
@@ -101,6 +135,13 @@ def safe_filename(label: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", label).strip("_").lower()
 
 
+def get_visible_text(page: Page) -> str:
+    try:
+        return page.inner_text("body")
+    except Exception:
+        return page.content()
+
+
 def capture_named(page: Page, run_dir: Path, base_name: str, probe_dir: Path, log: logging.Logger) -> None:
     png_path = run_dir / f"{base_name}.png"
     html_path = run_dir / f"{base_name}.html"
@@ -116,9 +157,79 @@ def capture_named(page: Page, run_dir: Path, base_name: str, probe_dir: Path, lo
         log.warning("HTML snapshot failed (%s): %s", base_name, exc)
 
 
+def collect_buttons_links_summary(page: Page) -> list[dict[str, Any]]:
+    """Collect visible buttons/links with disabled state for debug artifacts."""
+    raw: list[dict[str, Any]] = page.evaluate(
+        """() => {
+        const out = [];
+        const seen = new Set();
+        const nodes = document.querySelectorAll(
+          'a, button, [role="button"], input[type="button"], input[type="submit"]'
+        );
+        for (const el of nodes) {
+          if (!el.offsetParent && el.tagName !== 'BODY') continue;
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none') continue;
+          let text = (el.innerText || el.textContent || el.value || '').trim().replace(/\\s+/g, ' ');
+          if (!text) text = (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+          if (!text) continue;
+          const key = text + '|' + (el.getAttribute('href') || '');
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const disabled = el.disabled === true ||
+            el.getAttribute('aria-disabled') === 'true' ||
+            el.hasAttribute('disabled');
+          out.push({
+            text: text.slice(0, 200),
+            tag: el.tagName.toLowerCase(),
+            href: el.getAttribute('href') || null,
+            disabled,
+            role: el.getAttribute('role'),
+          });
+          if (out.length >= 200) break;
+        }
+        return out;
+    }"""
+    )
+    return raw
+
+
+def save_step_debug(
+    page: Page,
+    run_dir: Path,
+    step_prefix: str,
+    probe_dir: Path,
+    log: logging.Logger,
+) -> None:
+    """PNG/HTML plus visible_text, buttons summary, and current URL."""
+    capture_named(page, run_dir, step_prefix, probe_dir, log)
+    visible = get_visible_text(page)
+    (run_dir / "visible_text.txt").write_text(visible[:100_000], encoding="utf-8")
+    (run_dir / f"{step_prefix}_visible_text.txt").write_text(visible[:100_000], encoding="utf-8")
+    (run_dir / "current_url.txt").write_text(page.url, encoding="utf-8")
+    (run_dir / f"{step_prefix}_current_url.txt").write_text(page.url, encoding="utf-8")
+    summary = collect_buttons_links_summary(page)
+    (run_dir / "buttons_links_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / f"{step_prefix}_buttons_links_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+    log.info("Saved debug artifacts for step %s (url=%s)", step_prefix, page.url)
+
+
 def is_forbidden_control_text(text: str) -> bool:
     normalized = " ".join(text.split())
     return any(pattern.search(normalized) for pattern in FORBIDDEN_CONTROL_PATTERNS)
+
+
+def is_never_click_text(text: str) -> bool:
+    normalized = " ".join(text.split())
+    if CREATE_PROFILE_PATTERN.search(normalized):
+        return True
+    return is_forbidden_control_text(normalized)
 
 
 def find_forbidden_controls(page: Page) -> list[dict[str, str]]:
@@ -149,11 +260,7 @@ def find_forbidden_controls(page: Page) -> list[dict[str, str]]:
 
 def detect_autosave_markers(page: Page, previous_html: str) -> bool:
     current = page.content()
-    visible = ""
-    try:
-        visible = page.inner_text("body")
-    except Exception:
-        visible = current
+    visible = get_visible_text(page)
 
     for pattern in AUTOSAVE_MARKERS:
         if pattern.search(visible) and not pattern.search(previous_html):
@@ -162,12 +269,317 @@ def detect_autosave_markers(page: Page, previous_html: str) -> bool:
 
 
 def detect_month_label(page: Page) -> Optional[str]:
-    text = ""
-    try:
-        text = page.inner_text("body")
-    except Exception:
-        text = page.content()
+    text = get_visible_text(page)
+    date_match = DATE_ROW_PATTERN.search(text)
+    if date_match:
+        return date_match.group(0)
     match = MONTH_NAME_PATTERN.search(text)
     if match:
         return f"{match.group(1)} {match.group(2)}"
     return None
+
+
+def is_profile_chooser_page(page: Page) -> bool:
+    text = get_visible_text(page)
+    return bool(PROFILE_CHOOSER_HEADING.search(text))
+
+
+def is_meal_calendar_page(page: Page) -> bool:
+    text = get_visible_text(page)
+    if MEAL_CALENDAR_HEADING.search(text):
+        return True
+    if DATE_ROW_PATTERN.search(text) and discover_meal_card_labels(page):
+        return True
+    return False
+
+
+def wait_for_meal_calendar(page: Page, log: logging.Logger, timeout_ms: int = MEAL_CALENDAR_WAIT_MS) -> bool:
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        if is_meal_calendar_page(page):
+            log.info("Meal calendar detected (Choose your meals / meal cards)")
+            return True
+        human_pause(0.5)
+    log.error("Timed out waiting for meal calendar")
+    return False
+
+
+def _control_matches(text: str, patterns: list[re.Pattern[str]]) -> bool:
+    normalized = " ".join(text.split())
+    return any(p.search(normalized) for p in patterns)
+
+
+def _is_control_disabled(item: Any) -> bool:
+    try:
+        if not item.is_visible():
+            return True
+        disabled = item.get_attribute("disabled")
+        if disabled is not None:
+            return True
+        aria = item.get_attribute("aria-disabled")
+        if aria and aria.lower() == "true":
+            return True
+        return bool(item.evaluate("el => el.disabled === true"))
+    except Exception:
+        return False
+
+
+def click_visible_control(
+    page: Page,
+    patterns: list[re.Pattern[str]],
+    log: logging.Logger,
+    *,
+    purpose: str,
+) -> bool:
+    """Click first visible enabled control matching patterns; skip forbidden/create-profile."""
+    selectors = "a, button, [role='button'], input[type='button']"
+    loc = page.locator(selectors)
+    count = min(loc.count(), 200)
+
+    candidates: list[tuple[int, str, int]] = []
+    for idx in range(count):
+        item = loc.nth(idx)
+        try:
+            if not item.is_visible():
+                continue
+            text = (item.inner_text(timeout=300) or item.get_attribute("value") or "").strip()
+            if not text:
+                text = (item.get_attribute("aria-label") or "").strip()
+            if not text or not _control_matches(text, patterns):
+                continue
+            if is_never_click_text(text):
+                log.info("NEVER_CLICK_SKIPPED: %r (%s)", text, purpose)
+                continue
+            if NEXT_BUTTON_PATTERN.match(text.strip()) and _is_control_disabled(item):
+                log.info("DISABLED_NEXT_SKIPPED (%s)", purpose)
+                continue
+            priority = 0 if re.match(r"^order\s*now$", text.strip(), re.I) else 1
+            candidates.append((priority, text, idx))
+        except Exception:
+            continue
+
+    candidates.sort(key=lambda c: (c[0], len(c[1])))
+    for _priority, text, idx in candidates:
+        item = loc.nth(idx)
+        if _is_control_disabled(item):
+            log.info("DISABLED_CONTROL_SKIPPED: %r (%s)", text, purpose)
+            continue
+        log.info("Clicking %r (%s)", text, purpose)
+        try:
+            item.click(timeout=5000)
+            human_pause()
+            return True
+        except Exception as exc:
+            log.warning("Could not click %r: %s", text, exc)
+    return False
+
+
+def click_order_now(page: Page, log: logging.Logger) -> bool:
+    """Prefer green Order Now; fall back to nav Place Order only if Order Now absent."""
+    if click_visible_control(page, ORDER_NOW_PATTERNS, log, purpose="order_now"):
+        return True
+    log.info("Order Now not found; trying Place Order fallback")
+    return click_visible_control(page, PLACE_ORDER_FALLBACK_PATTERNS, log, purpose="place_order_fallback")
+
+
+def discover_profile_cards(page: Page) -> list[dict[str, str]]:
+    """Return profile card texts that include Select profile (exclude create-new)."""
+    raw: list[dict[str, str]] = page.evaluate(
+        """() => {
+        const cards = [];
+        const seen = new Set();
+        const blocks = document.querySelectorAll('div, section, article, li, [class*="card" i]');
+        for (const el of blocks) {
+          const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+          if (!text || text.length > 800 || text.length < 20) continue;
+          if (!/select profile/i.test(text)) continue;
+          if (/create a new profile/i.test(text) && !/classroom:/i.test(text)) continue;
+          if (!/classroom:|school:/i.test(text)) continue;
+          const key = text.slice(0, 120);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          cards.push({ text });
+        }
+        return cards.slice(0, 10);
+    }"""
+    )
+    filtered: list[dict[str, str]] = []
+    for card in raw:
+        text = card.get("text", "")
+        if CREATE_PROFILE_PATTERN.search(text) and "Classroom:" not in text:
+            continue
+        filtered.append(card)
+    return filtered
+
+
+def _profile_card_matches(card_text: str, config: ProfileConfig) -> bool:
+    hay = card_text.lower()
+    if config.profile_name and config.profile_name.lower() not in hay:
+        return False
+    if config.school and config.school.lower() not in hay:
+        return False
+    return True
+
+
+def select_checkout_profile(page: Page, config: ProfileConfig, log: logging.Logger) -> bool:
+    """On 'Who are you ordering for?' click Select profile for one/matching card."""
+    if not is_profile_chooser_page(page):
+        log.info("Profile chooser not detected; skipping profile selection")
+        return True
+
+    cards = discover_profile_cards(page)
+    log.info("Profile cards detected: %d", len(cards))
+    for card in cards:
+        log.info("  card preview: %s", card.get("text", "")[:120])
+
+    if not cards:
+        log.error("Profile chooser visible but no profile cards found")
+        return False
+
+    eligible = [c for c in cards if _profile_card_matches(c["text"], config)]
+    if config.profile_name or config.school:
+        if len(eligible) != 1:
+            log.error(
+                "Expected exactly one profile matching filters (name=%r school=%r); found %d",
+                config.profile_name,
+                config.school,
+                len(eligible),
+            )
+            return False
+        target_text = eligible[0]["text"]
+    elif len(cards) == 1:
+        target_text = cards[0]["text"]
+    else:
+        log.error(
+            "Multiple profile cards (%d) — pass --profile-name and/or --school",
+            len(cards),
+        )
+        return False
+
+    anchor = config.profile_name or config.school
+    if not anchor:
+        anchor = target_text.split("\n")[0].strip()[:40]
+
+    try:
+        container = page.locator("div, section, article, li").filter(
+            has_text=re.compile(re.escape(anchor[:30]), re.I)
+        ).first
+        btn = container.get_by_role("button", name=SELECT_PROFILE_PATTERN).first
+        if _is_control_disabled(btn):
+            log.error("Select profile button is disabled")
+            return False
+        log.info("Clicking Select profile for %r", anchor)
+        btn.click(timeout=5000)
+        human_pause()
+        return True
+    except Exception as exc:
+        log.warning("Card-scoped Select profile failed (%s); trying global button", exc)
+
+    buttons = page.get_by_role("button", name=SELECT_PROFILE_PATTERN)
+    count = buttons.count()
+    if count == 1:
+        if _is_control_disabled(buttons.first):
+            log.error("Select profile button is disabled")
+            return False
+        buttons.first.click(timeout=5000)
+        human_pause()
+        return True
+
+    log.error("Could not click Select profile (buttons=%d)", count)
+    return False
+
+
+def navigate_to_meal_calendar(
+    page: Page,
+    run_dir: Path,
+    config: ProfileConfig,
+    log: logging.Logger,
+) -> NavigationResult:
+    """
+    Logged-in flow: home or /profile -> Order Now -> profile chooser -> meal calendar.
+    """
+    result = NavigationResult()
+    if not page_looks_logged_in(page) or page_has_login_form(page):
+        log.error("Not logged in — run probe_simplyfresh.py --manual-login first")
+        return result
+
+    clicked_order = False
+    for url in (START_URL, PROFILE_URL):
+        log.info("Step: loading %s", url)
+        page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        human_pause()
+        save_step_debug(page, run_dir, "landing", PROBE_DIR, log)
+        if click_order_now(page, log):
+            clicked_order = True
+            break
+
+    if not clicked_order:
+        log.error("Could not find Order Now or Place Order on home/profile")
+        save_step_debug(page, run_dir, "order_now_failed", PROBE_DIR, log)
+        return result
+
+    human_pause()
+    save_step_debug(page, run_dir, "after_order_now", PROBE_DIR, log)
+
+    if is_profile_chooser_page(page):
+        result.profile_chooser_seen = True
+        if not select_checkout_profile(page, config, log):
+            save_step_debug(page, run_dir, "select_profile_failed", PROBE_DIR, log)
+            return result
+        result.profile_selected = True
+        human_pause()
+        save_step_debug(page, run_dir, "after_select_profile", PROBE_DIR, log)
+
+    if not wait_for_meal_calendar(page, log):
+        save_step_debug(page, run_dir, "meal_calendar_timeout", PROBE_DIR, log)
+        return result
+
+    result.meal_calendar_reached = True
+    result.ok = True
+    save_step_debug(page, run_dir, "after_meal_calendar", PROBE_DIR, log)
+    return result
+
+
+def discover_meal_card_labels(page: Page) -> list[str]:
+    """Meal card titles/descriptions visible on the calendar page."""
+    raw: list[str] = page.evaluate(
+        """() => {
+        const labels = [];
+        const seen = new Set();
+        const push = (text) => {
+          text = (text || '').trim().replace(/\\s+/g, ' ');
+          if (!text || text.length < 8 || text.length > 160) return;
+          if (seen.has(text)) return;
+          seen.add(text);
+          labels.push(text);
+        };
+        document.querySelectorAll(
+          '[class*="meal" i], [class*="menu" i], [class*="card" i], [class*="item" i], label, button'
+        ).forEach(el => {
+          const text = (el.innerText || el.textContent || '').trim();
+          if (!text) return;
+          const lines = text.split(/\\n+/).map(l => l.trim()).filter(Boolean);
+          if (lines.length === 0) return;
+          const title = lines[0];
+          if (/choose your meals|select profile|order now|classroom:|school:/i.test(title)) return;
+          if (/^\\d{1,2}$/.test(title)) return;
+          if (/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i.test(title)) return;
+          push(title);
+        });
+        return labels.slice(0, 30);
+    }"""
+    )
+    return raw
+
+
+# Late imports from feasibility probe to avoid circular imports at module load.
+def page_has_login_form(page: Page) -> bool:
+    from probe_simplyfresh import page_has_login_form as _fn
+
+    return _fn(page)
+
+
+def page_looks_logged_in(page: Page) -> bool:
+    from probe_simplyfresh import page_looks_logged_in as _fn
+
+    return _fn(page)

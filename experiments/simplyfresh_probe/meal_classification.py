@@ -57,6 +57,10 @@ def classify_meal_option(label: str) -> MealClass:
     if not text:
         return "uncertain"
 
+    # Simply Fresh vegetarian meals are often prefixed with "V-" (e.g. V-Grilled Tofu).
+    if re.match(r"^V-", text):
+        return "vegetarian"
+
     for pattern in VEGETARIAN_PATTERNS:
         if pattern.search(text):
             return "vegetarian"

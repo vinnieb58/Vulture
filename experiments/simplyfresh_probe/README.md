@@ -62,19 +62,21 @@ Confirm `login_successful: true`, `calendar_detected: true`, and `meal_options_d
 
 ```bash
 cd /home/vinnieb58/projects/vulture
-.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless
+.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless \
+  --profile-name "Vincent Bergeron" --school "MEADOW MONTESSORI SCHOOL"
 ```
 
-Review `calendar_map.json` and `before_order_page.*` in the run artifacts.
+Review `calendar_map.json`, `after_order_now.*`, `after_select_profile.*`, `visible_text.txt`, and `buttons_links_summary.json` in the run artifacts.
 
 ### 4. Meal-selection probe — dry-run select (max 3 weekdays)
 
 ```bash
 cd /home/vinnieb58/projects/vulture
-.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless
+.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless \
+  --profile-name "Vincent Bergeron" --school "MEADOW MONTESSORI SCHOOL"
 ```
 
-Selects non-vegetarian meals only. Never clicks submit, checkout, pay, confirm, or finalize. Stops on `AUTOSAVE_RISK_DETECTED` unless you pass `--continue-after-autosave`.
+Selects non-vegetarian meals only (e.g. skips `V-Grilled Tofu`, prefers `Baked Chicken Breast`). Never clicks submit, checkout, pay, confirm, or finalize. Stops on `AUTOSAVE_RISK_DETECTED` unless you pass `--continue-after-autosave`.
 
 ### 5. Review artifacts before any future promotion
 
@@ -150,18 +152,37 @@ At the end of each run:
 
 **Still a probe** — maps the order calendar and can attempt non-vegetarian meal picks for up to N weekdays. Never clicks submit, save order, checkout, pay, confirm, or finalize.
 
+### Logged-in navigation flow
+
+1. Load home (`/`) or profile (`/profile`) with saved session.
+2. Click green **Order Now** / **ORDER NOW** (profile reminder box or home hero). Fall back to nav **Place Order** only if Order Now is absent.
+3. On checkout **Who are you ordering for?** — click **Select profile** for the configured child (never **Create a new profile**, never disabled **Next**).
+4. Wait for **Choose your meals** calendar with date row, day circles, and meal cards.
+5. Optionally dry-run select non-vegetarian meal cards (classify by card title/description).
+
+Optional filters (required when multiple profiles exist):
+
+| Flag | Example |
+|------|---------|
+| `--profile-name` | `"Vincent Bergeron"` |
+| `--school` | `"MEADOW MONTESSORI SCHOOL"` |
+
+If omitted and exactly one profile card exists, that profile is selected automatically.
+
 ### Commands
 
 Inspect only (map calendar; no meal option clicks):
 
 ```bash
-python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless
+python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless \
+  --profile-name "Vincent Bergeron" --school "MEADOW MONTESSORI SCHOOL"
 ```
 
 First safe dry run (default max 3 weekdays):
 
 ```bash
-python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless
+python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless \
+  --profile-name "Vincent Bergeron" --school "MEADOW MONTESSORI SCHOOL"
 ```
 
 Full visible month (only after reviewing artifacts):
@@ -176,6 +197,11 @@ If `AUTOSAVE_RISK_DETECTED` appears after the first selection, the run stops unl
 
 Under `artifacts/<run-id>/`:
 
+- `after_order_now.png` / `.html` — after clicking Order Now
+- `after_select_profile.png` / `.html` — after profile chooser (if shown)
+- `visible_text.txt` — latest page text snapshot
+- `buttons_links_summary.json` — visible controls with disabled state
+- `current_url.txt` — latest URL
 - `before_order_page.png` / `.html`
 - `calendar_map.json`
 - `each_day_before_*` / `each_day_after_*` (dry-run-select)
@@ -183,7 +209,8 @@ Under `artifacts/<run-id>/`:
 
 ### Meal selection report fields
 
-- `logged_in`, `order_page_reached`, `month_detected`
+- `logged_in`, `order_page_reached`, `profile_chooser_seen`, `profile_selected`, `meal_calendar_reached`
+- `month_detected`
 - `days_detected`, `selectable_days_detected`, `days_attempted`, `days_selected`, `days_skipped`, `uncertain_days`
 - `vegetarian_options_detected`, `non_vegetarian_options_detected`
 - `forbidden_controls_detected`, `autosave_risk_detected`, `recommended_next_step`
