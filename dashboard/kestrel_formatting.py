@@ -143,35 +143,94 @@ def format_daily_total_display(
     return f"{_format_day_short(noon_local)} — {format_kwh(kwh)} kWh"
 
 
+def format_day_chart_label(day: str, *, tz_name: str = KESTREL_DISPLAY_TZ) -> str:
+    parsed_day = date.fromisoformat(day)
+    noon_local = datetime(
+        parsed_day.year,
+        parsed_day.month,
+        parsed_day.day,
+        12,
+        0,
+        tzinfo=ZoneInfo(tz_name),
+    )
+    return f"{noon_local.strftime('%b')} {parsed_day.day}"
+
+
+def format_hour_chart_label(hour: int) -> str:
+    if hour == 0:
+        return "12 AM"
+    if hour < 12:
+        return f"{hour} AM"
+    if hour == 12:
+        return "12 PM"
+    return f"{hour - 12} PM"
+
+
+def format_average_daily_label(day_count: int, requested_days: int) -> str:
+    if day_count <= 0:
+        return f"Avg daily (last {requested_days} days)"
+    if day_count < requested_days:
+        plural = "s" if day_count != 1 else ""
+        return f"Avg daily (last {day_count} day{plural})"
+    return f"Avg daily (last {requested_days} days)"
+
+
+def format_average_daily_display(
+    avg: dict[str, Any] | Any | None,
+    *,
+    requested_days: int,
+) -> dict[str, str | None]:
+    if avg is None:
+        return {
+            "label": format_average_daily_label(0, requested_days),
+            "value": None,
+        }
+    if isinstance(avg, dict):
+        day_count = int(avg.get("day_count", 0))
+        kwh = avg.get("kwh")
+    else:
+        day_count = int(getattr(avg, "day_count", 0))
+        kwh = getattr(avg, "kwh", None)
+    return {
+        "label": format_average_daily_label(day_count, requested_days),
+        "value": format_kwh(kwh) if isinstance(kwh, (int, float)) else None,
+    }
+
+
 def format_kestrel_card_display(
     kestrel: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
     *,
     tz_name: str = KESTREL_DISPLAY_TZ,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Return display-ready strings for the Kestrel Nest card."""
-    top_intervals = []
-    for interval in kestrel.get("top_intervals") or []:
-        if not isinstance(interval, dict):
+    metrics = metrics or {}
+    recent_daily_totals = []
+    for row in metrics.get("recent_daily_totals") or []:
+        if not isinstance(row, dict):
             continue
-        top_intervals.append(
-            {
-                **interval,
-                "display": format_top_interval_display(interval, tz_name=tz_name),
-            }
-        )
+        day = row.get("day")
+        kwh = row.get("kwh")
+        if day and isinstance(kwh, (int, float)):
+            recent_daily_totals.append(
+                {
+                    "day": str(day),
+                    "kwh": float(kwh),
+                    "display": format_daily_total_display(str(day), float(kwh), tz_name=tz_name),
+                }
+            )
 
-    daily_totals = []
-    for day, kwh in (kestrel.get("daily_totals") or {}).items():
-        if not isinstance(kwh, (int, float)):
-            continue
-        daily_totals.append(
-            {
-                "day": str(day),
-                "kwh": float(kwh),
-                "display": format_daily_total_display(str(day), float(kwh), tz_name=tz_name),
-            }
-        )
+    peak_interval_7 = metrics.get("peak_interval_7")
+    peak_interval_7_display = None
+    if peak_interval_7 is not None:
+        peak_dict = {
+            "start_ts": peak_interval_7.start_ts,
+            "end_ts": peak_interval_7.end_ts,
+            "kwh": peak_interval_7.kwh,
+            "estimated_peak_kw": peak_interval_7.estimated_peak_kw,
+        }
+        peak_interval_7_display = format_top_interval_display(peak_dict, tz_name=tz_name)
 
     generated_at = kestrel.get("generated_at")
     generated_at_display = None
@@ -182,6 +241,9 @@ def format_kestrel_card_display(
             now=now,
         )
 
+    avg_7 = format_average_daily_display(metrics.get("avg_daily_7"), requested_days=7)
+    avg_30 = format_average_daily_display(metrics.get("avg_daily_30"), requested_days=30)
+
     return {
         "range": format_range_display(
             str(kestrel["range_start"]) if kestrel.get("range_start") else None,
@@ -190,11 +252,142 @@ def format_kestrel_card_display(
             now=now,
         ),
         "total_kwh": format_kwh(kestrel.get("total_kwh")),
-        "peak_interval_kwh": format_kwh(kestrel.get("peak_interval_kwh")),
-        "estimated_peak_kw": format_kwh(kestrel.get("estimated_peak_kw")),
         "missing_interval_count": format_count(kestrel.get("missing_interval_count")),
-        "interval_count": format_count(kestrel.get("interval_count")),
         "generated_at": generated_at_display,
-        "top_intervals": top_intervals,
-        "daily_totals": daily_totals,
+        "peak_interval_7": peak_interval_7_display,
+        "avg_daily_7": avg_7,
+        "avg_daily_30": avg_30,
+        "recent_daily_totals": recent_daily_totals,
+    }
+
+
+def format_kestrel_detail_display(
+    status: dict[str, Any],
+    metrics: dict[str, Any],
+    *,
+    tz_name: str = KESTREL_DISPLAY_TZ,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return display-ready strings and chart payloads for the /kestrel page."""
+    range_start = metrics.get("range_start") or status.get("range_start")
+    range_end = metrics.get("range_end") or status.get("range_end")
+    peak_7 = metrics.get("peak_interval_7")
+    peak_display = None
+    if peak_7 is not None:
+        peak_display = format_top_interval_display(
+            {
+                "start_ts": peak_7.start_ts,
+                "end_ts": peak_7.end_ts,
+                "kwh": peak_7.kwh,
+                "estimated_peak_kw": peak_7.estimated_peak_kw,
+            },
+            tz_name=tz_name,
+        )
+
+    generated_at = status.get("generated_at")
+    generated_at_display = None
+    if generated_at:
+        generated_at_display = format_timestamp_friendly(
+            str(generated_at),
+            tz_name=tz_name,
+            now=now,
+        )
+
+    total_kwh = metrics.get("total_kwh")
+    if total_kwh is None and status.get("total_kwh") is not None:
+        total_kwh = status.get("total_kwh")
+
+    avg_7 = format_average_daily_display(metrics.get("avg_daily_7"), requested_days=7)
+    avg_30 = format_average_daily_display(metrics.get("avg_daily_30"), requested_days=30)
+
+    daily_30 = [
+        {
+            "label": format_day_chart_label(row["day"], tz_name=tz_name),
+            "kwh": row["kwh"],
+        }
+        for row in metrics.get("daily_30") or []
+        if isinstance(row, dict) and row.get("day") is not None
+    ]
+    daily_full = [
+        {
+            "label": format_day_chart_label(row["day"], tz_name=tz_name),
+            "kwh": row["kwh"],
+        }
+        for row in metrics.get("daily_full") or []
+        if isinstance(row, dict) and row.get("day") is not None
+    ]
+    hourly_30 = [
+        {
+            "label": format_hour_chart_label(int(row["hour"])),
+            "kwh": row["kwh"],
+        }
+        for row in metrics.get("hourly_30") or []
+        if isinstance(row, dict) and row.get("hour") is not None
+    ]
+    top_intervals_30 = []
+    for peak in metrics.get("top_intervals_30") or []:
+        top_intervals_30.append(
+            {
+                "display": format_top_interval_display(
+                    {
+                        "start_ts": peak.start_ts,
+                        "end_ts": peak.end_ts,
+                        "kwh": peak.kwh,
+                        "estimated_peak_kw": peak.estimated_peak_kw,
+                    },
+                    tz_name=tz_name,
+                ),
+                "kwh": peak.kwh,
+            }
+        )
+
+    monthly_totals = []
+    for row in metrics.get("monthly_totals") or []:
+        if not isinstance(row, dict):
+            continue
+        month = str(row.get("month", ""))
+        kwh = row.get("kwh")
+        if not month or not isinstance(kwh, (int, float)):
+            continue
+        year, month_num = month.split("-", 1)
+        label = datetime(int(year), int(month_num), 1, tzinfo=ZoneInfo(tz_name)).strftime("%b %Y")
+        monthly_totals.append(
+            {
+                "label": label,
+                "kwh": float(kwh),
+                "display": f"{label} — {format_kwh(float(kwh))} kWh",
+            }
+        )
+
+    has_data = bool(
+        metrics.get("available")
+        and (
+            total_kwh
+            or daily_30
+            or status.get("state") == "available"
+        )
+    )
+
+    return {
+        "has_data": has_data,
+        "range": format_range_display(
+            str(range_start) if range_start else None,
+            str(range_end) if range_end else None,
+            tz_name=tz_name,
+            now=now,
+        ),
+        "total_kwh": format_kwh(total_kwh) if isinstance(total_kwh, (int, float)) else None,
+        "avg_daily_7": avg_7,
+        "avg_daily_30": avg_30,
+        "peak_interval_7": peak_display,
+        "missing_interval_count": format_count(status.get("missing_interval_count")),
+        "generated_at": generated_at_display,
+        "charts": {
+            "daily_30": daily_30,
+            "daily_full": daily_full,
+            "hourly_30": hourly_30,
+            "top_intervals_30": top_intervals_30,
+            "monthly_totals": monthly_totals,
+        },
+        "show_monthly": bool(metrics.get("show_monthly")),
     }

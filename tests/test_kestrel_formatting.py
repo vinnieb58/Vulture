@@ -69,27 +69,20 @@ class TestKestrelFormatting:
                 "range_start": "2026-06-09T00:00:00+00:00",
                 "range_end": "2026-06-16T00:00:00+00:00",
                 "total_kwh": 42.5,
-                "estimated_peak_kw": 10.0,
                 "missing_interval_count": 3,
-                "interval_count": 96,
-                "top_intervals": [
-                    {
-                        "start_ts": "2026-06-15T18:00:00+00:00",
-                        "end_ts": "2026-06-15T18:15:00+00:00",
-                        "kwh": 2.5,
-                        "estimated_peak_kw": 10.0,
-                    }
-                ],
-                "daily_totals": {"2026-06-15": 6.25},
+            },
+            {
+                "recent_daily_totals": [{"day": "2026-06-15", "kwh": 6.25}],
+                "avg_daily_7": {"kwh": 6.25, "day_count": 1, "requested_days": 7},
+                "avg_daily_30": {"kwh": 6.25, "day_count": 1, "requested_days": 30},
             },
             now=FIXED_NOW,
         )
         assert display["total_kwh"] == "42.50"
-        assert display["estimated_peak_kw"] == "10.00"
         assert display["missing_interval_count"] == "3"
-        assert display["interval_count"] == "96"
-        assert "1:00–1:15 PM" in display["top_intervals"][0]["display"]
-        assert display["daily_totals"][0]["display"] == "Mon 6/15 — 6.25 kWh"
+        assert display["recent_daily_totals"][0]["display"] == "Mon 6/15 — 6.25 kWh"
+        assert display["avg_daily_7"]["value"] == "6.25"
+        assert display["avg_daily_7"]["label"] == "Avg daily (last 1 day)"
 
     def test_format_kestrel_card_no_raw_iso_in_display_fields(self):
         display = format_kestrel_card_display(
@@ -97,23 +90,16 @@ class TestKestrelFormatting:
                 "range_start": "2026-06-09T00:00:00+00:00",
                 "range_end": "2026-06-16T00:00:00+00:00",
                 "generated_at": "2026-06-16T12:00:00+00:00",
-                "top_intervals": [
-                    {
-                        "start_ts": "2026-06-15T18:00:00+00:00",
-                        "end_ts": "2026-06-15T18:15:00+00:00",
-                        "kwh": 2.5,
-                        "estimated_peak_kw": 10.0,
-                    }
-                ],
-                "daily_totals": {"2026-06-15": 6.25},
+            },
+            {
+                "recent_daily_totals": [{"day": "2026-06-15", "kwh": 6.25}],
             },
             now=FIXED_NOW,
         )
         display_fields = [
             display["range"],
             display["generated_at"],
-            display["top_intervals"][0]["display"],
-            display["daily_totals"][0]["display"],
+            display["recent_daily_totals"][0]["display"],
         ]
         rendered = " | ".join(display_fields)
         assert "2026-06-15T18:00:00+00:00" not in rendered

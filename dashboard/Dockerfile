@@ -25,11 +25,13 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py db_readers.py log_readers.py kestrel_status.py kestrel_formatting.py vulture_runtime.py storage_probe.py storage_config.py raven_metrics_history.py ./
+COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py db_readers.py log_readers.py kestrel_status.py kestrel_formatting.py kestrel_metrics.py vulture_runtime.py storage_probe.py storage_config.py raven_metrics_history.py ./
 COPY templates/ templates/
+COPY static/ static/
 
 ENV VULTURE_DB_PATH=/app/data/vulture.db \
     VULTURE_LOG_PATH=/app/logs/vulture.log \
+    KESTREL_DB_PATH=/app/data/kestrel/kestrel.db \
     DASHBOARD_HOST_ROOT=/host/root \
     DASHBOARD_HOST_PROC=/host/proc \
     DASHBOARD_BUILD_GIT_COMMIT=${BUILD_GIT_COMMIT} \
