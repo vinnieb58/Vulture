@@ -39,12 +39,13 @@ from probe_common import (
     detect_autosave_markers,
     detect_month_label,
     discover_meal_card_labels,
-    ensure_profile_chooser_overlay_closed,
+    ensure_calendar_ui_unblocked,
     find_forbidden_controls,
     human_pause,
     is_forbidden_control_text,
     is_meal_calendar_page,
     load_storage_state_path,
+    meal_selection_modal_open,
     navigate_to_meal_calendar,
     new_run_id,
     profile_chooser_overlay_open,
@@ -266,16 +267,14 @@ def get_selected_meal_label(options: list[dict[str, str]]) -> Optional[str]:
 
 
 def click_calendar_day(page: Page, day: CalendarDay) -> bool:
-    overlay = ensure_profile_chooser_overlay_closed(page, log)
-    if not overlay.closed:
+    if not ensure_calendar_ui_unblocked(page, log):
         log.error(
-            "Cannot click day %r — profile chooser overlay still open (active_count=%d)",
+            "Cannot click day %r — blocking overlay/modal still open",
             day.label,
-            overlay.active_count_after,
         )
         return False
-    if profile_chooser_overlay_open(page):
-        log.error("Cannot click day %r — Chooser__options--active still visible", day.label)
+    if profile_chooser_overlay_open(page) or meal_selection_modal_open(page):
+        log.error("Cannot click day %r — chooser overlay or modal still visible", day.label)
         return False
 
     label = day.label
@@ -367,6 +366,20 @@ def log_day_summary(day: CalendarDay) -> None:
         day.meal_options,
         day.skip_reason,
     )
+
+
+def close_ui_after_meal_selection(
+    page: Page,
+    run_dir: Path,
+    day_slug: str,
+) -> bool:
+    """Close profile overlay and meal modal after a successful day selection."""
+    if not ensure_calendar_ui_unblocked(page, log):
+        capture_named(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
+        save_step_debug(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
+        return False
+    save_step_debug(page, run_dir, f"modal_closed_after_{day_slug}", PROBE_DIR, log)
+    return True
 
 
 def build_recommendation(report: MealSelectionReport, mode: str) -> str:
@@ -599,6 +612,9 @@ def run_meal_probe(
                     )
                     report.days_selected += 1
                     capture_named(page, run_dir, f"each_day_after_{day_slug}", PROBE_DIR, log)
+                    if not close_ui_after_meal_selection(page, run_dir, day_slug):
+                        log.error("Stopping — modal/overlay still open after day %r", day.label)
+                        break
                     if not continue_after_autosave:
                         log.warning("Stopping after AUTOSAVE_RISK_DETECTED (use --continue-after-autosave to proceed)")
                         break
@@ -611,6 +627,9 @@ def run_meal_probe(
                 )
                 capture_named(page, run_dir, f"each_day_after_{day_slug}", PROBE_DIR, log)
                 log.info("Selected %r for day %r", choice.selected, day.label)
+                if not close_ui_after_meal_selection(page, run_dir, day_slug):
+                    log.error("Stopping — modal/overlay still open after day %r", day.label)
+                    break
 
             post_forbidden = find_forbidden_controls(page)
             for text in (f["text"] for f in post_forbidden):

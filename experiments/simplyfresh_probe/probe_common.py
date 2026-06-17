@@ -39,6 +39,17 @@ NAV_TIMEOUT_MS = 60_000
 ACTION_DELAY_S = 1.0
 MEAL_CALENDAR_WAIT_MS = 15_000
 CHOOSER_OVERLAY_ACTIVE_SELECTOR = ".Chooser__options--active"
+MODAL_ROOT_SELECTOR = ".Modal"
+MODAL_CONTENT_SELECTOR = ".Modal__content"
+
+SAFE_MODAL_CLOSE_PATTERNS = [
+    re.compile(r"^x$", re.I),
+    re.compile(r"^×$"),
+    re.compile(r"\bclose\b", re.I),
+    re.compile(r"^back$", re.I),
+    re.compile(r"\bcancel\b", re.I),
+    re.compile(r"\bdismiss\b", re.I),
+]
 
 ORDER_NOW_PATTERNS = [
     re.compile(r"^order\s*now$", re.I),
@@ -262,6 +273,25 @@ def is_never_click_text(text: str) -> bool:
     if CREATE_PROFILE_PATTERN.search(normalized):
         return True
     return is_forbidden_control_text(normalized)
+
+
+def is_safe_modal_close_text(text: str) -> bool:
+    """True for non-submit dismiss controls: X, close, back, cancel."""
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return False
+    if is_forbidden_control_text(normalized):
+        return False
+    return any(pattern.search(normalized) for pattern in SAFE_MODAL_CLOSE_PATTERNS)
+
+
+def is_safe_modal_close_aria(label: str) -> bool:
+    normalized = " ".join(label.split()).strip()
+    if not normalized:
+        return False
+    if is_forbidden_control_text(normalized):
+        return False
+    return bool(re.search(r"\b(close|dismiss|back|cancel)\b", normalized, re.I))
 
 
 def find_forbidden_controls(page: Page) -> list[dict[str, str]]:
@@ -728,6 +758,229 @@ def ensure_profile_chooser_overlay_closed(page: Page, log: logging.Logger) -> Ov
             active_count_after=0,
         )
     return close_profile_chooser_overlay(page, log)
+
+
+def count_visible_modals(page: Page) -> int:
+    """Count visible Modal / Modal__content overlays."""
+    seen: set[str] = set()
+    visible_count = 0
+    for selector in (MODAL_CONTENT_SELECTOR, MODAL_ROOT_SELECTOR):
+        loc = page.locator(selector)
+        for idx in range(min(loc.count(), 15)):
+            item = loc.nth(idx)
+            try:
+                if not item.is_visible():
+                    continue
+                handle = item.evaluate(
+                    "el => el.className + '|' + Math.round(el.getBoundingClientRect().x)"
+                )
+                if handle in seen:
+                    continue
+                seen.add(handle)
+                visible_count += 1
+            except Exception:
+                continue
+    return visible_count
+
+
+def meal_selection_modal_open(page: Page) -> bool:
+    return count_visible_modals(page) > 0
+
+
+def _click_safe_modal_dismiss_button(page: Page, log: logging.Logger) -> bool:
+    """Click X / close / back / cancel inside a visible modal (never submit/pay)."""
+    roots = page.locator(MODAL_ROOT_SELECTOR)
+    if roots.count() == 0:
+        roots = page.locator(MODAL_CONTENT_SELECTOR)
+
+    for root_idx in range(min(roots.count(), 5)):
+        modal = roots.nth(root_idx)
+        try:
+            if not modal.is_visible():
+                continue
+        except Exception:
+            continue
+
+        dedicated = modal.locator(
+            "button[aria-label*='close' i], [class*='close' i], [class*='Close' i]"
+        )
+        for idx in range(min(dedicated.count(), 10)):
+            btn = dedicated.nth(idx)
+            try:
+                if not btn.is_visible():
+                    continue
+                aria = (btn.get_attribute("aria-label") or "").strip()
+                text = (btn.inner_text(timeout=300) or "").strip()
+                label = text or aria
+                if label and is_forbidden_control_text(label):
+                    log.info("MODAL_FORBIDDEN_CLOSE_SKIPPED: %r", label)
+                    continue
+                if not label and not btn.get_attribute("class"):
+                    continue
+                if label and not (is_safe_modal_close_text(text) or is_safe_modal_close_aria(aria)):
+                    if "close" not in (btn.get_attribute("class") or "").lower():
+                        continue
+                log.info("Attempting modal close via safe_button: %r", label or "[close icon]")
+                btn.click(timeout=3000)
+                human_pause(0.5)
+                if not meal_selection_modal_open(page):
+                    return True
+            except Exception:
+                continue
+
+        candidates = modal.locator("button, a, [role='button']")
+        for idx in range(min(candidates.count(), 30)):
+            btn = candidates.nth(idx)
+            try:
+                if not btn.is_visible():
+                    continue
+                aria = (btn.get_attribute("aria-label") or "").strip()
+                text = (btn.inner_text(timeout=300) or "").strip()
+                if not (is_safe_modal_close_text(text) or is_safe_modal_close_aria(aria)):
+                    continue
+                label = text or aria
+                if is_forbidden_control_text(label):
+                    log.info("MODAL_FORBIDDEN_CLOSE_SKIPPED: %r", label)
+                    continue
+                log.info("Attempting modal close via safe_button: %r", label)
+                btn.click(timeout=3000)
+                human_pause(0.5)
+                if not meal_selection_modal_open(page):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def close_meal_selection_modal(page: Page, log: logging.Logger) -> OverlayCloseResult:
+    """
+    Close meal-selection Modal__content overlay after a day pick.
+
+    Tries: safe X/back/cancel, click outside/backdrop, Escape, wait hidden, verify.
+    """
+    active_before = count_visible_modals(page)
+    if active_before == 0:
+        log.info("modal_open_before_close: false")
+        log.info("modal_closed: true (strategy=none_needed)")
+        return OverlayCloseResult(
+            was_open=False,
+            closed=True,
+            strategy="none_needed",
+            active_count_before=0,
+            active_count_after=0,
+        )
+
+    log.info("modal_open_before_close: true (visible_count=%d)", active_before)
+
+    if _click_safe_modal_dismiss_button(page, log):
+        active_after = count_visible_modals(page)
+        log.info("modal_closed: true (strategy=safe_button)")
+        return OverlayCloseResult(
+            was_open=True,
+            closed=True,
+            strategy="safe_button",
+            active_count_before=active_before,
+            active_count_after=active_after,
+        )
+
+    outside_targets = [
+        page.locator(f"{MODAL_ROOT_SELECTOR}").first,
+        page.get_by_text(re.compile(r"choose your meals", re.I)),
+        page.locator("[class*='calendar' i]").first,
+        page.locator("body"),
+    ]
+    for target in outside_targets:
+        try:
+            if target.count() == 0:
+                continue
+            item = target.first
+            if not item.is_visible(timeout=500):
+                continue
+            log.info("Attempting modal close via click_outside")
+            item.click(timeout=3000, position={"x": 8, "y": 8})
+            human_pause(0.5)
+            active_after = count_visible_modals(page)
+            if active_after == 0:
+                log.info("modal_closed: true (strategy=click_outside)")
+                return OverlayCloseResult(
+                    was_open=True,
+                    closed=True,
+                    strategy="click_outside",
+                    active_count_before=active_before,
+                    active_count_after=active_after,
+                )
+        except Exception as exc:
+            log.debug("modal click_outside failed: %s", exc)
+
+    try:
+        log.info("Attempting modal close via escape")
+        page.keyboard.press("Escape")
+        human_pause(0.5)
+        active_after = count_visible_modals(page)
+        if active_after == 0:
+            log.info("modal_closed: true (strategy=escape)")
+            return OverlayCloseResult(
+                was_open=True,
+                closed=True,
+                strategy="escape",
+                active_count_before=active_before,
+                active_count_after=active_after,
+            )
+    except Exception as exc:
+        log.debug("modal escape failed: %s", exc)
+
+    try:
+        log.info("Attempting modal close via wait_hidden")
+        page.locator(MODAL_CONTENT_SELECTOR).first.wait_for(state="hidden", timeout=4000)
+        active_after = count_visible_modals(page)
+        log.info("modal_closed: true (strategy=wait_hidden)")
+        return OverlayCloseResult(
+            was_open=True,
+            closed=True,
+            strategy="wait_hidden",
+            active_count_before=active_before,
+            active_count_after=active_after,
+        )
+    except Exception as exc:
+        log.debug("modal wait_hidden failed: %s", exc)
+
+    active_after = count_visible_modals(page)
+    closed = active_after == 0
+    log.info(
+        "modal_closed: %s (strategy=verify_count visible_count=%d)",
+        str(closed).lower(),
+        active_after,
+    )
+    return OverlayCloseResult(
+        was_open=True,
+        closed=closed,
+        strategy="verify_count" if closed else None,
+        active_count_before=active_before,
+        active_count_after=active_after,
+    )
+
+
+def ensure_meal_selection_modal_closed(page: Page, log: logging.Logger) -> OverlayCloseResult:
+    """Ensure no visible Modal/Modal__content blocks the next calendar day click."""
+    if not meal_selection_modal_open(page):
+        log.info("modal_open_before_close: false")
+        log.info("modal_closed: true (strategy=already_closed)")
+        return OverlayCloseResult(
+            was_open=False,
+            closed=True,
+            strategy="already_closed",
+            active_count_after=0,
+        )
+    return close_meal_selection_modal(page, log)
+
+
+def ensure_calendar_ui_unblocked(page: Page, log: logging.Logger) -> bool:
+    """Close profile chooser overlay and meal modal before calendar interaction."""
+    overlay = ensure_profile_chooser_overlay_closed(page, log)
+    if not overlay.closed:
+        return False
+    modal = ensure_meal_selection_modal_closed(page, log)
+    return modal.closed
 
 
 def _page_is_loaded(page: Page) -> bool:
