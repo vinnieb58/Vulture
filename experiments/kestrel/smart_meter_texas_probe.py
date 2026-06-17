@@ -79,6 +79,11 @@ def parse_args() -> argparse.Namespace:
         help="With --live-refresh --days: include the current local day (may be unpublished)",
     )
     parser.add_argument(
+        "--no-browser-fallback",
+        action="store_true",
+        help="With --live-refresh: API only; do not use Playwright browser fallback",
+    )
+    parser.add_argument(
         "--summary-only",
         action="store_true",
         help="Summarize existing SQLite data without fetching or importing",
@@ -210,6 +215,9 @@ def main() -> int:
     if args.include_current_day and not args.live_refresh:
         print("ERROR: --include-current-day requires --live-refresh.", file=sys.stderr)
         return 1
+    if args.no_browser_fallback and not args.live_refresh:
+        print("ERROR: --no-browser-fallback requires --live-refresh.", file=sys.stderr)
+        return 1
 
     live_access = _requires_live_access(args)
     try:
@@ -264,6 +272,7 @@ def main() -> int:
             end=end,
             dry_run=args.dry_run,
             debug_safe=args.debug_safe,
+            no_browser_fallback=args.no_browser_fallback,
         )
         refresh_metadata = live_result.metadata
         imported = len(live_result.intervals)

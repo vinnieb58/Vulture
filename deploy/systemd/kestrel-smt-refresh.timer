@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Kestrel Smart Meter Texas refresh
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=kestrel-smt-refresh.service
+
+[Install]
+WantedBy=timers.target

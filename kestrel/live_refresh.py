@@ -120,6 +120,7 @@ def run_live_refresh(
     end: date,
     dry_run: bool = False,
     debug_safe: bool = False,
+    no_browser_fallback: bool = False,
 ) -> LiveRefreshResult:
     """
     Attempt live refresh via portal API, then browser CSV export for real failures.
@@ -158,7 +159,7 @@ def run_live_refresh(
         error_messages.append(
             "No published interval data for requested range (likely TDSP lag 24-48 hours)"
         )
-    elif _should_try_browser(fetch_result):
+    elif _should_try_browser(fetch_result) and not no_browser_fallback:
         try:
             intervals = fetch_intervals_via_browser(
                 config,
@@ -176,6 +177,9 @@ def run_live_refresh(
             log.warning("%s", safe_msg)
         except Exception as exc:  # noqa: BLE001
             error_messages.append(_browser_error_message(exc, debug_safe=debug_safe))
+    elif _should_try_browser(fetch_result) and no_browser_fallback:
+        error_messages.append("Browser fallback disabled")
+        log.info("Skipping browser fallback (--no-browser-fallback)")
 
     if not intervals:
         combined = "; ".join(error_messages) if error_messages else "No data source available"

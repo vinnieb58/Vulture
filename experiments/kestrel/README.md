@@ -11,14 +11,14 @@ Kestrel is independent from the Vulture hunt scheduler and Crow Discord bot.
 - SQLite storage with upsert dedupe on `(provider, start_ts, end_ts)`
 - Summaries: total kWh, peak 15-minute interval, estimated peak kW, daily totals, hourly shape, missing intervals, top intervals
 - Status snapshot at `data/kestrel/kestrel_status.json` after each probe run
+- Optional **daily systemd timer** for API-only refresh (`kestrel-smt-refresh.timer`)
 
 ## Not implemented yet
 
 - Official registered SMT API (`services.smartmetertexas.net`) integration
-- Browser automation / Playwright export path (probe-quality fallback only; not scheduled integration)
+- Browser automation in unattended/scheduled mode (timer uses API only)
 - Automations, billing projections, breaker-level assumptions, smart-home control
 - Discord/Crow commands or Nest dashboard cards
-- systemd timer / scheduled collection
 
 ## Environment variables
 
@@ -59,16 +59,29 @@ source .venv/bin/activate
 # Ensure KESTREL_ENABLED=true and SMT credentials in .env
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 7
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --from 2026-06-01 --to 2026-06-16
+python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 3 --no-browser-fallback
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --days 2 --dry-run
 python experiments/kestrel/smart_meter_texas_probe.py --live-refresh --debug-safe
 python experiments/kestrel/smart_meter_texas_probe.py --summary-only
 ```
 
-`--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then falls back to a probe-quality Playwright CSV export. MFA/CAPTCHA blocks fail clearly without bypass attempts.
+`--live-refresh` tries the residential portal JSON API first (`/api/adhoc/intervalsynch`), then optionally falls back to Playwright CSV export. MFA/CAPTCHA blocks fail clearly without bypass attempts. Use `--no-browser-fallback` for timer-safe API-only runs.
 
 By default, `--live-refresh --days N` excludes the current local day (America/Chicago) because SMT interval data may lag 24–48 hours. Use `--include-current-day` to request today's unpublished data.
 
 If live refresh fails, use CSV import. The portal JSON endpoints are unofficial and may rate-limit or change.
+
+## Daily systemd timer (v0)
+
+See `docs/current/KESTREL_OPERATIONS.md` for install, manual test, journal, and rollback commands.
+
+Quick install:
+
+```bash
+./scripts/install_kestrel_timer.sh --enable
+```
+
+The timer runs `kestrel-smt-refresh.service` daily (~08:30, API-only, last 3 completed days). Isolated from Vulture/Crow units.
 
 ## Legacy live probe (experimental)
 
