@@ -39,6 +39,7 @@ from probe_common import (
     detect_autosave_markers,
     detect_month_label,
     discover_meal_card_labels,
+    ensure_profile_chooser_overlay_closed,
     find_forbidden_controls,
     human_pause,
     is_forbidden_control_text,
@@ -46,6 +47,7 @@ from probe_common import (
     load_storage_state_path,
     navigate_to_meal_calendar,
     new_run_id,
+    profile_chooser_overlay_open,
     resolve_auth_storage_path,
     safe_filename,
     save_step_debug,
@@ -264,6 +266,18 @@ def get_selected_meal_label(options: list[dict[str, str]]) -> Optional[str]:
 
 
 def click_calendar_day(page: Page, day: CalendarDay) -> bool:
+    overlay = ensure_profile_chooser_overlay_closed(page, log)
+    if not overlay.closed:
+        log.error(
+            "Cannot click day %r — profile chooser overlay still open (active_count=%d)",
+            day.label,
+            overlay.active_count_after,
+        )
+        return False
+    if profile_chooser_overlay_open(page):
+        log.error("Cannot click day %r — Chooser__options--active still visible", day.label)
+        return False
+
     label = day.label
     try:
         page.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.I)).first.click(timeout=4000)

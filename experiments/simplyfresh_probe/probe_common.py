@@ -38,6 +38,7 @@ TIMEZONE = "America/Chicago"
 NAV_TIMEOUT_MS = 60_000
 ACTION_DELAY_S = 1.0
 MEAL_CALENDAR_WAIT_MS = 15_000
+CHOOSER_OVERLAY_ACTIVE_SELECTOR = ".Chooser__options--active"
 
 ORDER_NOW_PATTERNS = [
     re.compile(r"^order\s*now$", re.I),
@@ -102,6 +103,16 @@ class NavigationResult:
     profile_selected: bool = False
     meal_calendar_reached: bool = False
     login_required: bool = False
+    profile_overlay_close_strategy: str | None = None
+
+
+@dataclass
+class OverlayCloseResult:
+    was_open: bool = False
+    closed: bool = False
+    strategy: str | None = None
+    active_count_before: int = 0
+    active_count_after: int = 0
 
 
 def setup_logging(name: str) -> logging.Logger:
@@ -590,6 +601,135 @@ def select_checkout_profile(page: Page, config: ProfileConfig, log: logging.Logg
     return False
 
 
+def count_active_chooser_overlays(page: Page) -> int:
+    """Count visible active profile chooser dropdown overlays."""
+    loc = page.locator(CHOOSER_OVERLAY_ACTIVE_SELECTOR)
+    visible = 0
+    count = loc.count()
+    for idx in range(count):
+        try:
+            if loc.nth(idx).is_visible():
+                visible += 1
+        except Exception:
+            continue
+    return visible
+
+
+def profile_chooser_overlay_open(page: Page) -> bool:
+    return count_active_chooser_overlays(page) > 0
+
+
+def close_profile_chooser_overlay(page: Page, log: logging.Logger) -> OverlayCloseResult:
+    """
+    Close lingering profile chooser dropdown after Select profile.
+
+    Tries, in order: click outside calendar, Escape, wait for hidden, verify count.
+    """
+    active_before = count_active_chooser_overlays(page)
+    if active_before == 0:
+        log.info("profile_overlay_open_before_close: false")
+        log.info("profile_overlay_closed: true (strategy=none_needed)")
+        return OverlayCloseResult(
+            was_open=False,
+            closed=True,
+            strategy="none_needed",
+            active_count_before=0,
+            active_count_after=0,
+        )
+
+    log.info("profile_overlay_open_before_close: true (active_count=%d)", active_before)
+
+    outside_targets = [
+        page.get_by_text(re.compile(r"choose your meals", re.I)),
+        page.locator("[class*='calendar' i]").first,
+        page.locator("main").first,
+        page.locator("body"),
+    ]
+    for target in outside_targets:
+        try:
+            if target.count() == 0:
+                continue
+            item = target.first
+            if not item.is_visible(timeout=500):
+                continue
+            log.info("Attempting overlay close via click_outside")
+            item.click(timeout=3000, position={"x": 8, "y": 8})
+            human_pause(0.5)
+            active_after = count_active_chooser_overlays(page)
+            if active_after == 0:
+                log.info("profile_overlay_closed: true (strategy=click_outside)")
+                return OverlayCloseResult(
+                    was_open=True,
+                    closed=True,
+                    strategy="click_outside",
+                    active_count_before=active_before,
+                    active_count_after=active_after,
+                )
+        except Exception as exc:
+            log.debug("click_outside attempt failed: %s", exc)
+
+    try:
+        log.info("Attempting overlay close via escape")
+        page.keyboard.press("Escape")
+        human_pause(0.5)
+        active_after = count_active_chooser_overlays(page)
+        if active_after == 0:
+            log.info("profile_overlay_closed: true (strategy=escape)")
+            return OverlayCloseResult(
+                was_open=True,
+                closed=True,
+                strategy="escape",
+                active_count_before=active_before,
+                active_count_after=active_after,
+            )
+    except Exception as exc:
+        log.debug("escape attempt failed: %s", exc)
+
+    try:
+        log.info("Attempting overlay close via wait_hidden")
+        page.locator(CHOOSER_OVERLAY_ACTIVE_SELECTOR).first.wait_for(state="hidden", timeout=4000)
+        active_after = count_active_chooser_overlays(page)
+        log.info("profile_overlay_closed: true (strategy=wait_hidden)")
+        return OverlayCloseResult(
+            was_open=True,
+            closed=True,
+            strategy="wait_hidden",
+            active_count_before=active_before,
+            active_count_after=active_after,
+        )
+    except Exception as exc:
+        log.debug("wait_hidden attempt failed: %s", exc)
+
+    active_after = count_active_chooser_overlays(page)
+    closed = active_after == 0
+    log.info(
+        "profile_overlay_closed: %s (strategy=verify_count active_count=%d)",
+        str(closed).lower(),
+        active_after,
+    )
+    return OverlayCloseResult(
+        was_open=True,
+        closed=closed,
+        strategy="verify_count" if closed else None,
+        active_count_before=active_before,
+        active_count_after=active_after,
+    )
+
+
+def ensure_profile_chooser_overlay_closed(page: Page, log: logging.Logger) -> OverlayCloseResult:
+    """Ensure no active Chooser__options--active overlay blocks calendar clicks."""
+    if not profile_chooser_overlay_open(page):
+        log.info("profile_overlay_open_before_close: false")
+        log.info("profile_overlay_closed: true (strategy=already_closed)")
+        return OverlayCloseResult(
+            was_open=False,
+            closed=True,
+            strategy="already_closed",
+            active_count_after=0,
+        )
+    return close_profile_chooser_overlay(page, log)
+
+
 def _page_is_loaded(page: Page) -> bool:
     url = (page.url or "").lower()
     return not url.startswith("about:") and url not in ("", "about:blank")
@@ -664,6 +804,16 @@ def navigate_to_meal_calendar(
         result.profile_selected = True
         human_pause()
         save_step_debug(page, run_dir, "after_select_profile", PROBE_DIR, log)
+        overlay = ensure_profile_chooser_overlay_closed(page, log)
+        result.profile_overlay_close_strategy = overlay.strategy
+        if not overlay.closed:
+            log.error(
+                "Profile chooser overlay still open after close attempts (active_count=%d)",
+                overlay.active_count_after,
+            )
+            save_step_debug(page, run_dir, "profile_overlay_still_open", PROBE_DIR, log)
+            return result
+        save_step_debug(page, run_dir, "profile_overlay_closed", PROBE_DIR, log)
 
     if not wait_for_meal_calendar(page, log):
         save_step_debug(page, run_dir, "meal_calendar_timeout", PROBE_DIR, log)
