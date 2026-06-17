@@ -10,12 +10,37 @@ _Last updated: 2026-06-17_
 | **Method used** | Primary: `requests` + BeautifulSoup; escalation: `curl_cffi` (`--cffi`), Playwright (`--playwright`) |
 | **Parsing** | Prefer embedded `__NEXT_DATA__` JSON (`searchResult.itemStacks[].items`, filter `__typename == "Product"`); CSS fallback on `[data-item-id]` cards |
 | **Viable from cloud agent (2026-06-17)** | **No** — PerimeterX redirects to `/blocked` with title "Robot or human?" for requests, curl_cffi, and headless Playwright |
+| **Viable from Raven residential IP (2026-06-17)** | **No** — same PerimeterX block on all methods (see Raven validation below) |
 | **Parser viability** | **Yes** — unit-tested against `tests/fixtures/walmart_search_next_data_snippet.html` |
-| **Runtime recommendation** | **Remain probe-only** until repeated successful runs from Raven residential IP |
-| **Promote to experimental adapter?** | Not yet — do not register in `adapters/registry.py` or add to `engine/source_selection.py` profiles until Raven evidence |
+| **Runtime recommendation** | **Remain probe-only** — Raven residential validation confirmed blocking |
+| **Promote to experimental adapter?** | **No** — do not create `adapters/walmart.py`, do not register in `adapters/registry.py`, do not add to default source profiles |
 | **Known blocking** | PerimeterX bot wall on datacenter/cloud IPs; `/blocked?url=...` redirect; ~15 KB challenge shell |
 | **Rate limits** | Not observed (blocked before search results) |
 | **Location behavior** | Search JSON may include `fulfillmentSummary`, `fulfillmentBadge`, `availabilityStatusV2`; no zip/store URL param tested — treat as shipping/pickup text only |
+
+### Raven residential validation (2026-06-17)
+
+| Field | Value |
+|-------|-------|
+| **Date** | 2026-06-17 |
+| **Environment** | Raven residential IP |
+| **Methods tested** | `requests`, `curl_cffi` (`--cffi`), Playwright (`--playwright`) |
+| **Queries** | `steam deck`, `65 inch tv`, `rtx 4070` |
+| **Result** | **Blocked on all methods** — 0 extracted listings per query |
+| **Blocking indicators** | `/blocked` redirect, page title "Robot or human?", `px-captcha`, `_px` body markers |
+| **Failure behavior** | Safe empty results with warnings; no crashes |
+| **Runtime decision** | **Remain probe-only** |
+| **Promotion decision** | Do **not** create `adapters/walmart.py`; do **not** add to `adapters/registry.py`; do **not** add to default source profiles in `engine/source_selection.py` |
+
+Smoke commands used on Raven:
+
+```bash
+python experiments/adapters/walmart_probe.py --query "steam deck" --limit 5
+python experiments/adapters/walmart_probe.py --query "65 inch tv" --limit 5
+python experiments/adapters/walmart_probe.py --query "rtx 4070" --limit 5
+python experiments/adapters/walmart_probe.py --query "steam deck" --cffi --limit 5
+python experiments/adapters/walmart_probe.py --query "steam deck" --playwright --limit 5
+```
 
 ### Smoke usage
 
