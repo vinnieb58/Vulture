@@ -78,6 +78,36 @@ class SearchPendingCommand:
     kind: str = "search-pending"
 
 
+@dataclass(frozen=True)
+class PrefsCommand:
+    kind: str = "prefs"
+
+
+@dataclass(frozen=True)
+class PrefCommand:
+    item: str
+    kind: str = "pref"
+
+
+@dataclass(frozen=True)
+class ForgetPrefCommand:
+    item: str
+    kind: str = "forget-pref"
+
+
+@dataclass(frozen=True)
+class ChangePrefCommand:
+    item: str
+    kind: str = "change-pref"
+
+
+@dataclass(frozen=True)
+class AliasPrefCommand:
+    new_key: str
+    existing_key: str
+    kind: str = "alias-pref"
+
+
 Command = (
     StartCommand
     | HelpCommand
@@ -90,6 +120,11 @@ Command = (
     | ChooseReplyCommand
     | CancelPendingCommand
     | SearchPendingCommand
+    | PrefsCommand
+    | PrefCommand
+    | ForgetPrefCommand
+    | ChangePrefCommand
+    | AliasPrefCommand
 )
 
 _PENDING_PREFER_RE = re.compile(r"^prefer\s+(\d+)\s*$", re.IGNORECASE)
@@ -97,6 +132,8 @@ _PENDING_CHOOSE_RE = re.compile(r"^choose\s+(\d+)\s*$", re.IGNORECASE)
 _PENDING_DIGIT_RE = re.compile(r"^(\d+)\s*$")
 _PENDING_CANCEL_RE = re.compile(r"^(nvm|cancel)\s*$", re.IGNORECASE)
 _PENDING_SEARCH_RE = re.compile(r"^search\s+(.+)$", re.IGNORECASE)
+_ALIAS_PREF_RE = re.compile(r"^alias\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
+_REMOVE_PREF_RE = re.compile(r"^remove\s+preference\s+(.+)$", re.IGNORECASE)
 
 HELP_TEXT = """Finch grocery commands:
 • help
@@ -105,6 +142,11 @@ HELP_TEXT = """Finch grocery commands:
 • add eggs again / force add eggs
 • add-list eggs, milk
 • 2 eggs
+• prefs / preferences
+• pref bagels
+• forget bagels / remove preference bagels
+• change bagels
+• alias bagels to bagel
 • history / added today / what did finch add
 • reset trip / new grocery trip
 • undo last
@@ -169,6 +211,30 @@ def parse_command(message: str) -> Command | None:
         return ResetTripCommand()
     if lower == "undo last":
         return UndoLastCommand()
+    if lower in ("prefs", "preferences"):
+        return PrefsCommand()
+    match = _ALIAS_PREF_RE.match(text)
+    if match:
+        new_key = match.group(1).strip()
+        existing_key = match.group(2).strip()
+        if new_key and existing_key:
+            return AliasPrefCommand(new_key=new_key, existing_key=existing_key)
+    match = _REMOVE_PREF_RE.match(text)
+    if match:
+        item = match.group(1).strip()
+        return ForgetPrefCommand(item=item) if item else None
+    if lower.startswith("forget "):
+        payload = text[len("forget ") :].strip()
+        return ForgetPrefCommand(item=payload) if payload else None
+    if lower.startswith("change "):
+        payload = text[len("change ") :].strip()
+        return ChangePrefCommand(item=payload) if payload else None
+    if lower.startswith("preference "):
+        payload = text[len("preference ") :].strip()
+        return PrefCommand(item=payload) if payload else None
+    if lower.startswith("pref "):
+        payload = text[len("pref ") :].strip()
+        return PrefCommand(item=payload) if payload else None
     if lower == "preview":
         return None
     if lower.startswith("preview "):
@@ -338,3 +404,19 @@ def format_history_response(payload: dict[str, Any]) -> str:
 
 def format_error(message: str) -> str:
     return f"Finch error: {message}"
+
+
+def format_preferences_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("text") or "No saved preferences.")
+
+
+def format_preference_get_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("text") or "No saved preference.")
+
+
+def format_preference_delete_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("text") or "Preference removed.")
+
+
+def format_preference_alias_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("text") or "Preference alias saved.")

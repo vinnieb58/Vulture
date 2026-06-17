@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from finch.config import DATA_DIR
+from finch.preference_norm import normalize_preference_key
 
 TRIP_LEDGER_DB_PATH = Path(
     os.getenv("FINCH_TRIP_LEDGER_DB_PATH", str(DATA_DIR / "finch_trip_ledger.db"))
@@ -195,10 +196,10 @@ def find_trip_duplicate(
             """,
             (trip_id,),
         ).fetchall()
-    norm = normalized_name.strip().lower()
+    norm = normalize_preference_key(normalized_name)
     for row in rows:
         item = _row_to_item(row)
-        if item.normalized_name == norm:
+        if normalize_preference_key(item.normalized_name) == norm:
             return item
         if product_id and item.product_id and item.product_id == product_id:
             return item
@@ -232,7 +233,7 @@ def record_trip_add(
             """,
             (
                 trip_id,
-                normalized_name.strip().lower(),
+                normalize_preference_key(normalized_name),
                 display_name,
                 product_id,
                 upc,

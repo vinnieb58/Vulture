@@ -12,6 +12,7 @@ from finch.env_check import search_ready
 from finch.env_util import load_env
 from finch.kroger_client import KrogerError, KrogerProduct, load_kroger_client_from_env
 from finch.models import AliasEntry
+from finch.preference_norm import normalize_preference_key
 
 
 def format_product_line(index: int, product: KrogerProduct) -> str:
@@ -42,7 +43,7 @@ def product_to_alias(
     search_term: str,
 ) -> AliasEntry:
     return AliasEntry(
-        alias_key=alias_key.strip().lower(),
+        alias_key=normalize_preference_key(alias_key),
         display_name=product.description,
         kroger_product_id=product.product_id,
         upc=product.upc,

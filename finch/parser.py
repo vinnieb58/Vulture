@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from finch.models import GroceryIntent
+from finch.preference_norm import normalize_preference_key
 
 # Quantity prefix patterns: "2 eggs", "3x milk", "2 dozen eggs", "1/2 lb flank steak"
 _QUANTITY_RE = re.compile(
@@ -24,9 +25,7 @@ _SPLIT_RE = re.compile(r"[,;\n]+")
 
 
 def _normalize_name(name: str) -> str:
-    cleaned = name.strip().lower()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned
+    return normalize_preference_key(name)
 
 
 def _parse_quantity(raw: str | None) -> float:

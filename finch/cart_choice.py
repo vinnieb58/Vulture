@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from finch.aliases import upsert_alias
+from finch.aliases import delete_aliases_matching_normalized, upsert_alias
 from finch.cart_ops import (
     CartAttempt,
     CartResolveError,
@@ -28,6 +28,7 @@ from finch.pending_selection import (
     get_pending_selection,
     save_pending_selection,
 )
+from finch.preference_norm import normalize_preference_key
 from finch.preview import resolve_intent
 from finch.search import product_to_alias, run_search
 
@@ -223,9 +224,12 @@ def save_preference_from_pending(
 ) -> None:
     from finch.models import AliasEntry
 
+    canonical = normalize_preference_key(pending.normalized_name)
+    delete_aliases_matching_normalized(canonical, db_path=db_path)
+
     product = pending_result_to_product(result)
     entry = product_to_alias(
-        pending.normalized_name,
+        canonical,
         product,
         search_term=pending.search_query,
     )

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from finch.config import DATA_DIR
+from finch.preference_norm import normalize_preference_key
 
 PENDING_SELECTION_DB_PATH = Path(
     os.getenv("FINCH_PENDING_SELECTION_DB_PATH", str(DATA_DIR / "finch_pending_selection.db"))
@@ -183,7 +184,7 @@ def save_pending_selection(
             (
                 chat_key,
                 requested_item,
-                normalized_name.strip().lower(),
+                normalize_preference_key(normalized_name),
                 search_query,
                 max(1, int(quantity)),
                 payload,
@@ -194,7 +195,7 @@ def save_pending_selection(
     return PendingSelection(
         chat_key=chat_key,
         requested_item=requested_item,
-        normalized_name=normalized_name.strip().lower(),
+        normalized_name=normalize_preference_key(normalized_name),
         search_query=search_query,
         quantity=max(1, int(quantity)),
         results=results,
