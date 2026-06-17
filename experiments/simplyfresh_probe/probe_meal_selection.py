@@ -32,7 +32,6 @@ from probe_common import (
     NAV_TIMEOUT_MS,
     PROBE_DIR,
     ProfileConfig,
-    STORAGE_STATE_PATH,
     TIMEZONE,
     USER_AGENT,
     VIEWPORT,
@@ -47,6 +46,7 @@ from probe_common import (
     load_storage_state_path,
     navigate_to_meal_calendar,
     new_run_id,
+    resolve_auth_storage_path,
     safe_filename,
     save_step_debug,
     setup_logging,
@@ -414,9 +414,10 @@ def run_meal_probe(
     report = MealSelectionReport()
     mode = "inspect-only" if inspect_only else "dry-run-select"
 
-    storage_state = load_storage_state_path()
+    storage_state = load_storage_state_path(log)
     if not storage_state:
-        log.error("Missing storage state at %s", STORAGE_STATE_PATH)
+        auth_path = resolve_auth_storage_path()
+        log.error("Missing storage state at %s", auth_path)
         report.recommended_next_step = "Run probe_simplyfresh.py --manual-login first."
         print_report(report)
         return report
@@ -446,6 +447,11 @@ def run_meal_probe(
             if not nav.ok:
                 capture_named(page, run_dir, "navigation_failed", PROBE_DIR, log)
                 save_step_debug(page, run_dir, "navigation_failed", PROBE_DIR, log)
+                if nav.login_required:
+                    report.recommended_next_step = (
+                        "Session expired or login required — run "
+                        "probe_simplyfresh.py --manual-login to refresh storage state."
+                    )
                 print_report(report)
                 return report
 

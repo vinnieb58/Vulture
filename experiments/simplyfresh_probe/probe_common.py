@@ -101,6 +101,7 @@ class NavigationResult:
     profile_chooser_seen: bool = False
     profile_selected: bool = False
     meal_calendar_reached: bool = False
+    login_required: bool = False
 
 
 def setup_logging(name: str) -> logging.Logger:
@@ -121,10 +122,30 @@ def has_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def load_storage_state_path() -> Optional[str]:
-    if STORAGE_STATE_PATH.exists():
-        return str(STORAGE_STATE_PATH)
+def load_storage_state_path(log: logging.Logger | None = None) -> Optional[str]:
+    """Return absolute path to saved storage state, or None if missing."""
+    path = resolve_auth_storage_path()
+    if path.is_file():
+        msg = f"Reusing storage state: {path}"
+        if log is not None:
+            log.info(msg)
+        else:
+            logging.getLogger("simplyfresh_probe").info(msg)
+        return str(path)
     return None
+
+
+def resolve_auth_storage_path() -> Path:
+    """
+    Absolute path to experiments/simplyfresh_probe/.auth/simplyfresh_storage_state.json.
+
+    Resolved from this module's location (not process cwd), so it works when invoked
+    from repo root or the probe directory. Override with SIMPLYFRESH_STORAGE_STATE_PATH.
+    """
+    override = os.getenv("SIMPLYFRESH_STORAGE_STATE_PATH", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return STORAGE_STATE_PATH.resolve()
 
 
 def new_run_id() -> str:
@@ -489,6 +510,22 @@ def select_checkout_profile(page: Page, config: ProfileConfig, log: logging.Logg
     return False
 
 
+def _page_is_loaded(page: Page) -> bool:
+    url = (page.url or "").lower()
+    return not url.startswith("about:") and url not in ("", "about:blank")
+
+
+def session_login_required(page: Page) -> bool:
+    """True when a loaded Simply Fresh page shows login form or logged-out state."""
+    if not _page_is_loaded(page):
+        return False
+    if page_has_login_form(page):
+        return True
+    if "thesimplyfreshkitchen.com" in page.url.lower() and not page_looks_logged_in(page):
+        return True
+    return False
+
+
 def navigate_to_meal_calendar(
     page: Page,
     run_dir: Path,
@@ -497,21 +534,39 @@ def navigate_to_meal_calendar(
 ) -> NavigationResult:
     """
     Logged-in flow: home or /profile -> Order Now -> profile chooser -> meal calendar.
+
+    Login/session is checked only after navigating with storage state loaded — not on
+    the initial about:blank page.
     """
     result = NavigationResult()
-    if not page_looks_logged_in(page) or page_has_login_form(page):
-        log.error("Not logged in — run probe_simplyfresh.py --manual-login first")
-        return result
-
     clicked_order = False
+    loaded_sf_page = False
+
     for url in (START_URL, PROFILE_URL):
         log.info("Step: loading %s", url)
         page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         human_pause()
         save_step_debug(page, run_dir, "landing", PROBE_DIR, log)
+
+        if session_login_required(page):
+            log.error(
+                "Login required or session expired after loading %s — "
+                "run probe_simplyfresh.py --manual-login",
+                url,
+            )
+            result.login_required = True
+            save_step_debug(page, run_dir, "session_expired", PROBE_DIR, log)
+            return result
+
+        loaded_sf_page = True
         if click_order_now(page, log):
             clicked_order = True
             break
+
+    if not loaded_sf_page:
+        log.error("Could not load Simply Fresh home/profile pages")
+        save_step_debug(page, run_dir, "landing_failed", PROBE_DIR, log)
+        return result
 
     if not clicked_order:
         log.error("Could not find Order Now or Place Order on home/profile")
