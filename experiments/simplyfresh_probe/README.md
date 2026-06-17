@@ -21,23 +21,75 @@ Household experiment for The Aviary ecosystem (Raven server). The goal is to lea
 - Uses normal pacing (about 1 second between actions)
 - Session/cookie files are gitignored and must not be committed
 
-## Setup
+## Setup (one-time on Raven)
 
-From the repository root:
+From the repository root (`/home/vinnieb58/projects/vulture`):
 
 ```bash
+cd /home/vinnieb58/projects/vulture
 python3 -m venv .venv
 .venv/bin/pip install -r experiments/simplyfresh_probe/requirements.txt
 .venv/bin/playwright install chromium
 ```
 
-On Raven without a physical display, use Xvfb for headed/manual login:
+## Raven operator flow (toddler school meal ordering probe)
+
+Run these steps in order. **Step 1 requires a headed browser** (VNC or Xvfb on Raven). Steps 2–4 can run headless once session state is saved.
+
+### 1. Manual login — save session state
+
+Use VNC, or Xvfb if no display:
 
 ```bash
-xvfb-run python3 experiments/simplyfresh_probe/probe_simplyfresh.py --manual-login --headed
+cd /home/vinnieb58/projects/vulture
+xvfb-run .venv/bin/python3 experiments/simplyfresh_probe/probe_simplyfresh.py --manual-login --headed
 ```
 
-## Commands
+Log in in the browser window, then press Enter in the terminal when prompted. Session is saved to:
+
+`experiments/simplyfresh_probe/.auth/simplyfresh_storage_state.json`
+
+### 2. Feasibility probe — verify saved session
+
+```bash
+cd /home/vinnieb58/projects/vulture
+.venv/bin/python3 experiments/simplyfresh_probe/probe_simplyfresh.py --headless
+```
+
+Confirm `login_successful: true`, `calendar_detected: true`, and `meal_options_detected: true` in the report. Review artifacts under `experiments/simplyfresh_probe/artifacts/<run-id>/`.
+
+### 3. Meal-selection probe — inspect only (map calendar, no meal clicks)
+
+```bash
+cd /home/vinnieb58/projects/vulture
+.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless
+```
+
+Review `calendar_map.json` and `before_order_page.*` in the run artifacts.
+
+### 4. Meal-selection probe — dry-run select (max 3 weekdays)
+
+```bash
+cd /home/vinnieb58/projects/vulture
+.venv/bin/python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless
+```
+
+Selects non-vegetarian meals only. Never clicks submit, checkout, pay, confirm, or finalize. Stops on `AUTOSAVE_RISK_DETECTED` unless you pass `--continue-after-autosave`.
+
+### 5. Review artifacts before any future promotion
+
+```bash
+cd /home/vinnieb58/projects/vulture
+ls -lt experiments/simplyfresh_probe/artifacts/ | head
+# Inspect latest run:
+cat experiments/simplyfresh_probe/artifacts/<run-id>/meal_selection_report.json
+```
+
+Do not expand to `--max-days 31` or promote beyond this experiment until artifacts look correct and autosave risk is understood.
+
+---
+
+## Commands (reference)
 
 Manual login (first run — saves session):
 
@@ -94,16 +146,55 @@ At the end of each run:
 - `blockers_detected` (`captcha` / `cloudflare` / `2fa` / `unknown` / `none`)
 - `recommended_next_step`
 
+## Meal selection dry-run (`probe_meal_selection.py`)
+
+**Still a probe** — maps the order calendar and can attempt non-vegetarian meal picks for up to N weekdays. Never clicks submit, save order, checkout, pay, confirm, or finalize.
+
+### Commands
+
+Inspect only (map calendar; no meal option clicks):
+
+```bash
+python3 experiments/simplyfresh_probe/probe_meal_selection.py --inspect-only --headless
+```
+
+First safe dry run (default max 3 weekdays):
+
+```bash
+python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 3 --headless
+```
+
+Full visible month (only after reviewing artifacts):
+
+```bash
+python3 experiments/simplyfresh_probe/probe_meal_selection.py --dry-run-select --max-days 31 --headless
+```
+
+If `AUTOSAVE_RISK_DETECTED` appears after the first selection, the run stops unless you pass `--continue-after-autosave`.
+
+### Dry-run artifacts
+
+Under `artifacts/<run-id>/`:
+
+- `before_order_page.png` / `.html`
+- `calendar_map.json`
+- `each_day_before_*` / `each_day_after_*` (dry-run-select)
+- `meal_selection_report.json`
+
+### Meal selection report fields
+
+- `logged_in`, `order_page_reached`, `month_detected`
+- `days_detected`, `selectable_days_detected`, `days_attempted`, `days_selected`, `days_skipped`, `uncertain_days`
+- `vegetarian_options_detected`, `non_vegetarian_options_detected`
+- `forbidden_controls_detected`, `autosave_risk_detected`, `recommended_next_step`
+
 ## Current known status
 
-- **Live headless probe (2026-05-31):** homepage loads; nav links `MY ACCOUNT` (`/profile`) and `Place Order` are visible on the public homepage
-- Clicking `MY ACCOUNT` without a session lands on a login form (email/password); manual login is required to proceed further
-- No Cloudflare/captcha/2FA blockers observed on initial load in headless Chromium
-- Calendar and meal-selection UI were not reachable without an authenticated session
-- Next live step: run `--manual-login` on Raven/VNC, then rerun normally and inspect artifacts for stable selectors
+- **Raven headless (2026-06-02):** saved session works; feasibility probe reached calendar and meal options
+- Meal dry-run ready for `--inspect-only` then `--dry-run-select --max-days 3` on Raven
 
 ## Not in scope (yet)
 
 - Credential auto-fill from environment variables
-- Automated monthly meal selection
+- Automated monthly meal submission / checkout
 - Production scheduling/service deployment
