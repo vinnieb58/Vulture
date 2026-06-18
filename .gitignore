@@ -33,3 +33,12 @@ experiments/simplyfresh_probe/artifacts/
 # Kestrel probe runtime data (SQLite, status JSON, debug artifacts)
 data/kestrel/
 *.trace.zip
+
+# Heron expense runtime data (receipts, reviewed JSON on Raven, session state)
+.auth/
+*.storage_state.json
+/expenses/
+/Heron/
+/mnt/pelican_backup/Heron/
+experiments/heron/.auth/
+experiments/heron/artifacts/
