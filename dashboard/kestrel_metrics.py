@@ -282,6 +282,15 @@ def get_chart_daily_series(*, days: int | None = None, downsample: bool = False)
     return [{"day": day, "kwh": kwh} for day, kwh in totals.items()]
 
 
+def fetch_interval_rows(
+    *,
+    start_ts: str | None = None,
+    end_ts: str | None = None,
+) -> list[dict[str, Any]]:
+    """Public wrapper for interval row queries used by correlation helpers."""
+    return _fetch_interval_rows(start_ts=start_ts, end_ts=end_ts)
+
+
 def get_home_metrics() -> dict[str, Any]:
     """Metrics subset for the Nest home Kestrel card."""
     avg_7 = get_average_daily_usage(7)

@@ -39,6 +39,35 @@ def _nest_config(tmp_path: Path) -> NestConfig:
 
 
 class TestNestProbeFailurePreservesSnapshot:
+    def test_successful_poll_appends_history(self, tmp_path: Path) -> None:
+        config = _nest_config(tmp_path)
+        output_path = Path(config.output_path)
+        history_path = tmp_path / "kestrel_nest_history.jsonl"
+        snapshot = {
+            "updated_at": "2026-06-19T12:00:00+00:00",
+            "thermostats": {
+                "downstairs": {
+                    "name": "Downstairs",
+                    "temperature": 72,
+                    "action": "COOLING",
+                    "online": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(sys, "argv", ["nest_probe", "--once"]),
+            patch.object(probe_module, "load_nest_config", return_value=config),
+            patch.object(probe_module, "setup_logging"),
+            patch.object(probe_module, "poll_nest_thermostats", return_value=snapshot),
+            patch.object(probe_module, "append_history_from_snapshot") as append_mock,
+        ):
+            code = probe_module.main()
+
+        assert code == 0
+        append_mock.assert_called_once_with(snapshot)
+        assert output_path.is_file()
+
     def test_api_failure_does_not_overwrite_existing_snapshot(self, tmp_path: Path) -> None:
         config = _nest_config(tmp_path)
         output_path = Path(config.output_path)

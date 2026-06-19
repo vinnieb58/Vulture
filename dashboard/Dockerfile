@@ -22,12 +22,13 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py host_cpu_metrics.py db_readers.py log_readers.py kestrel_status.py kestrel_formatting.py kestrel_metrics.py house_status.py house_formatting.py vulture_runtime.py storage_probe.py storage_config.py raven_metrics_history.py metrics_sampler.py ./
-COPY templates/ templates/
-COPY static/ static/
+COPY dashboard/app.py dashboard/parsers.py dashboard/subprocess_util.py dashboard/host_commands.py dashboard/host_status.py dashboard/host_cpu_metrics.py dashboard/db_readers.py dashboard/log_readers.py dashboard/kestrel_status.py dashboard/kestrel_formatting.py dashboard/kestrel_metrics.py dashboard/house_status.py dashboard/house_formatting.py dashboard/vulture_runtime.py dashboard/storage_probe.py dashboard/storage_config.py dashboard/raven_metrics_history.py dashboard/metrics_sampler.py dashboard/nest_history.py dashboard/nest_hvac_runtime.py dashboard/nest_hvac_formatting.py dashboard/nest_energy_correlation.py ./
+COPY kestrel/nest_history.py ./nest_history.py
+COPY dashboard/templates/ templates/
+COPY dashboard/static/ static/
 
 ENV VULTURE_DB_PATH=/app/data/vulture.db \
     VULTURE_LOG_PATH=/app/logs/vulture.log \
