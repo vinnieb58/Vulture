@@ -54,7 +54,7 @@ The snapshot uses lowercase snake_case keys per room:
       "raw_mode": "COOL",
       "eco_mode": "OFF",
       "cool_setpoint": 71,
-      "heat_setpoint": 68
+      "heat_setpoint": null
     }
   }
 }
