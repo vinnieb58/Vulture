@@ -1,0 +1,83 @@
+{
+  "devices": [
+    {
+      "name": "enterprises/616e2a03-0969-424c-b5ac-1a8ba461e0be/devices/ABC123DOWNSTAIRS",
+      "type": "sdm.devices.types.THERMOSTAT",
+      "parentRelations": [
+        {
+          "parent": "enterprises/616e2a03-0969-424c-b5ac-1a8ba461e0be/structures/home/rooms/room-downstairs",
+          "displayName": "Downstairs"
+        }
+      ],
+      "traits": {
+        "sdm.devices.traits.Info": {
+          "customName": "Hallway Thermostat"
+        },
+        "sdm.devices.traits.Temperature": {
+          "ambientTemperatureCelsius": 22.78
+        },
+        "sdm.devices.traits.Humidity": {
+          "ambientHumidityPercent": 65
+        },
+        "sdm.devices.traits.ThermostatMode": {
+          "mode": "COOL"
+        },
+        "sdm.devices.traits.ThermostatHvac": {
+          "status": "COOLING"
+        },
+        "sdm.devices.traits.ThermostatTemperatureSetpoint": {
+          "coolCelsius": 21.67,
+          "heatCelsius": 20.0
+        },
+        "sdm.devices.traits.ThermostatEco": {
+          "mode": "OFF"
+        },
+        "sdm.devices.traits.Connectivity": {
+          "status": "ONLINE"
+        },
+        "sdm.devices.traits.Settings": {
+          "temperatureScale": "FAHRENHEIT"
+        }
+      }
+    },
+    {
+      "name": "enterprises/616e2a03-0969-424c-b5ac-1a8ba461e0be/devices/ABC123UPSTAIRS",
+      "type": "sdm.devices.types.THERMOSTAT",
+      "parentRelations": [
+        {
+          "parent": "enterprises/616e2a03-0969-424c-b5ac-1a8ba461e0be/structures/home/rooms/room-upstairs",
+          "displayName": "Upstairs"
+        }
+      ],
+      "traits": {
+        "sdm.devices.traits.Info": {
+          "customName": "Upstairs Thermostat"
+        },
+        "sdm.devices.traits.Temperature": {
+          "ambientTemperatureCelsius": 24.44
+        },
+        "sdm.devices.traits.Humidity": {
+          "ambientHumidityPercent": 67
+        },
+        "sdm.devices.traits.ThermostatMode": {
+          "mode": "COOL"
+        },
+        "sdm.devices.traits.ThermostatHvac": {
+          "status": "OFF"
+        },
+        "sdm.devices.traits.ThermostatTemperatureSetpoint": {},
+        "sdm.devices.traits.ThermostatEco": {
+          "mode": "MANUAL_ECO",
+          "coolCelsius": 24.44,
+          "heatCelsius": 18.33
+        },
+        "sdm.devices.traits.Connectivity": {
+          "status": "ONLINE"
+        },
+        "sdm.devices.traits.Settings": {
+          "temperatureScale": "FAHRENHEIT"
+        }
+      }
+    }
+  ]
+}

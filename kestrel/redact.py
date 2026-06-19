@@ -15,6 +15,7 @@ _URL_SECRET_PARAMS = re.compile(
     re.IGNORECASE,
 )
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+_GOOGLE_ACCESS_TOKEN = re.compile(r"\bya29\.[A-Za-z0-9._-]+\b")
 _ESIID = re.compile(r"\b\d{15,22}\b")
 _LONG_HEX = re.compile(r"\b[a-f0-9]{32,}\b", re.IGNORECASE)
 _ABSOLUTE_PATH = re.compile(r"(?i)(/[\w./-]+|~[\w./-]+|\\\\[\w\\.-]+)")
@@ -27,6 +28,7 @@ def redact_text(text: str) -> str:
         return text
     result = text
     result = _JWT.sub("[REDACTED_TOKEN]", result)
+    result = _GOOGLE_ACCESS_TOKEN.sub("[REDACTED_TOKEN]", result)
     result = _BEARER.sub("Bearer [REDACTED]", result)
     result = _AUTH_HEADER.sub("Authorization: [REDACTED]", result)
     result = _ENV_SECRET.sub(r"\1=[REDACTED]", result)
