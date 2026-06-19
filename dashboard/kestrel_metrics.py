@@ -282,6 +282,36 @@ def get_chart_daily_series(*, days: int | None = None, downsample: bool = False)
     return [{"day": day, "kwh": kwh} for day, kwh in totals.items()]
 
 
+def fetch_interval_rows(
+    *,
+    start_ts: str | None = None,
+    end_ts: str | None = None,
+) -> list[dict[str, Any]]:
+    """Public wrapper for interval row queries used by correlation helpers."""
+    return _fetch_interval_rows(start_ts=start_ts, end_ts=end_ts)
+
+
+def energy_db_exists() -> bool:
+    """Return True when the Kestrel SQLite database file is present."""
+    return _db_exists()
+
+
+def get_interval_count() -> int | None:
+    """Return total energy interval row count, or None when the DB is unavailable."""
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT COUNT(*) AS count FROM energy_intervals").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return int(row["count"])
+
+
 def get_home_metrics() -> dict[str, Any]:
     """Metrics subset for the Nest home Kestrel card."""
     avg_7 = get_average_daily_usage(7)

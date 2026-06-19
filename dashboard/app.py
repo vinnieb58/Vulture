@@ -37,9 +37,12 @@ from host_status import (
     get_storage_status,
     status_display_class,
 )
+from house_formatting import format_house_card_display
+from house_status import read_house_status
 from kestrel_formatting import format_kestrel_card_display, format_kestrel_detail_display
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
+from nest_hvac_formatting import format_hvac_section
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_metrics_history import (
     CPU_SAT_CRITICAL_MINUTES_1H,
@@ -314,6 +317,11 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     }
 
 
+def _compute_house_card(house: dict[str, Any]) -> dict[str, Any]:
+    """Plain-English House card for household climate (Nest thermostats)."""
+    return format_house_card_display(house)
+
+
 def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
     """Plain-English Kestrel energy card for the Nest overview."""
     state = kestrel.get("state", "no_data")
@@ -358,10 +366,29 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         metrics = {"available": False}
     display = format_kestrel_detail_display(kestrel, metrics)
+    try:
+        hvac = format_hvac_section()
+    except Exception:
+        hvac = {
+            "state": "error",
+            "warning": "Could not load HVAC runtime data",
+            "summaries": [],
+            "collection": {
+                "status": "Missing",
+                "status_key": "missing",
+                "style": "unknown",
+                "samples_last_30m_display": "0",
+                "latest_age": None,
+                "zones": "—",
+                "missing": True,
+            },
+            "correlation": {"available": False, "rows": []},
+        }
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
+        "hvac": hvac,
         **display,
     }
 
@@ -516,13 +543,19 @@ async def nest_overview(request: Request) -> HTMLResponse:
     warnings = _build_warnings(db, logs, raven, vulture, services, storage, docker)
 
     kestrel = read_kestrel_status()
+    house = read_house_status()
     nest = {
         "raven": _compute_raven_card(raven, services, docker, metrics_peaks),
         "storage": _compute_storage_card(storage),
         "vulture": _compute_vulture_card(vulture, db),
+        "house": _compute_house_card(house),
         "network": _compute_network_card(raven),
         "kestrel": _compute_kestrel_card(kestrel),
     }
+
+    house_warning = house.get("warning")
+    if isinstance(house_warning, str) and house_warning:
+        warnings.append(house_warning)
 
     context = {
         "title": "Nest",

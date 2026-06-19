@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll Kestrel Nest thermostats every 5 minutes
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=kestrel-nest-poll.service
+
+[Install]
+WantedBy=timers.target

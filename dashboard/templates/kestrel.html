@@ -102,6 +102,7 @@
     }
 
     .status-badge.ok { color: var(--ok); border-color: var(--ok-border); }
+    .status-badge.warn { color: var(--warn); border-color: var(--warn-border); }
     .status-badge.unknown { color: var(--unknown); border-color: var(--unknown-border); }
     .status-badge.fail { color: var(--fail); border-color: var(--fail-border); }
 
@@ -204,6 +205,52 @@
       gap: 0.35rem;
       color: var(--text);
       font-size: 0.88rem;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 0.45rem 0.35rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .data-table th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .data-table td.num {
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .data-table tr.note-row td {
+      color: var(--warn);
+      font-size: 0.8rem;
+      border-bottom: none;
+      padding-top: 0;
+    }
+
+    .section-warning {
+      color: var(--warn);
+      font-size: 0.84rem;
+      margin-bottom: 0.65rem;
+    }
+
+    .section-note {
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-top: 0.55rem;
     }
 
     .back-link {
@@ -373,6 +420,181 @@
         <script type="application/json" id="chart-data-monthly">{{ kestrel.charts.monthly_totals | tojson }}</script>
       </div>
       {% endif %}
+
+      {% set hvac = kestrel.hvac %}
+      <div class="card full-width">
+        <div class="summary-header" style="margin-bottom:0.65rem;">
+          <span class="card-title" style="margin-bottom:0;">Nest Collection</span>
+          <span class="status-badge {{ hvac.collection.style }}">{{ hvac.collection.status }}</span>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span>Samples last 30m</span>
+            <strong>{{ hvac.collection.samples_last_30m_display }}</strong>
+          </div>
+          <div class="summary-item">
+            <span>Latest</span>
+            <strong>
+              {% if hvac.collection.latest_age %}
+              {{ hvac.collection.latest_age }}
+              {% elif hvac.collection.latest_at %}
+              {{ hvac.collection.latest_at }}
+              {% else %}
+              —
+              {% endif %}
+            </strong>
+          </div>
+          <div class="summary-item">
+            <span>Zones</span>
+            <strong>{{ hvac.collection.zones }}</strong>
+          </div>
+        </div>
+        {% if hvac.collection.missing %}
+        <div class="section-note" style="margin-top:0.65rem;">
+          No Nest history yet. Samples appear after the poll timer runs.
+        </div>
+        {% endif %}
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">HVAC Runtime</div>
+        {% if hvac.warning %}
+        <div class="section-warning">{{ hvac.warning }}</div>
+        {% endif %}
+        {% if hvac.latest_sample_at %}
+        <div class="card-subtitle">Latest Nest sample: {{ hvac.latest_sample_at }}</div>
+        {% endif %}
+        {% if hvac.primary_summary %}
+        <div class="card-subtitle">{{ hvac.primary_summary.title }}</div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Zone</th>
+              <th class="num">Cooling</th>
+              <th class="num">Heating</th>
+              <th class="num">Idle/Off</th>
+              <th class="num">% Cooling</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in hvac.primary_summary.rows %}
+            <tr>
+              <td>{{ row.zone }}</td>
+              <td class="num">{{ row.cooling }}</td>
+              <td class="num">{{ row.heating }}</td>
+              <td class="num">{{ row.idle }}</td>
+              <td class="num">{{ row.percent_cooling }}</td>
+            </tr>
+            {% if row.both_cooling is defined %}
+            <tr>
+              <td colspan="5" class="section-note">Both zones cooling: {{ row.both_cooling }}</td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if hvac.primary_summary.estimate_note %}
+        <div class="section-note">{{ hvac.primary_summary.estimate_note }}</div>
+        {% endif %}
+        {% else %}
+        <div class="chart-empty">No Nest HVAC history yet. Samples appear after the poll timer runs.</div>
+        {% endif %}
+      </div>
+
+      {% if hvac.summaries|length > 1 and hvac.primary_summary %}
+      <div class="card full-width">
+        <div class="card-title">HVAC Runtime — other windows</div>
+        {% for summary in hvac.summaries %}
+        {% if summary.window != hvac.primary_summary.window %}
+        <div class="card-subtitle">{{ summary.title }}</div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Zone</th>
+              <th class="num">Cooling</th>
+              <th class="num">Heating</th>
+              <th class="num">Idle/Off</th>
+              <th class="num">% Cooling</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in summary.rows %}
+            <tr>
+              <td>{{ row.zone }}</td>
+              <td class="num">{{ row.cooling }}</td>
+              <td class="num">{{ row.heating }}</td>
+              <td class="num">{{ row.idle }}</td>
+              <td class="num">{{ row.percent_cooling }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <div class="card full-width">
+        <div class="card-title">Energy + HVAC Correlation</div>
+        {% if hvac.correlation.warning %}
+        <div class="section-warning">{{ hvac.correlation.warning }}</div>
+        {% endif %}
+        {% if hvac.correlation.diagnostics %}
+        <div class="summary-grid" style="margin-bottom:0.75rem;">
+          {% for item in hvac.correlation.diagnostics %}
+          <div class="summary-item">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if hvac.correlation.available and hvac.correlation.rows %}
+        <div class="card-subtitle">Last {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Interval</th>
+              <th class="num">kWh</th>
+              <th>Downstairs</th>
+              <th>Upstairs</th>
+              <th>Cooling?</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in hvac.correlation.rows %}
+            <tr>
+              <td>{{ row.interval }}</td>
+              <td class="num">{{ row.kwh }}</td>
+              <td>{{ row.downstairs }}</td>
+              <td>{{ row.upstairs }}</td>
+              <td>{{ row.cooling }}</td>
+            </tr>
+            {% if row.note %}
+            <tr class="note-row">
+              <td colspan="5">{{ row.note }}</td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if hvac.correlation.estimate_note %}
+        <div class="section-note">{{ hvac.correlation.estimate_note }}</div>
+        {% endif %}
+        {% else %}
+        <div class="chart-empty">
+          {% if hvac.correlation.status == 'no_overlap' %}
+          Waiting for Nest HVAC history and Smart Meter Texas intervals to overlap.
+          {% elif hvac.correlation.status == 'no_nest_history' %}
+          Correlation requires Nest HVAC history from the poll timer.
+          {% elif hvac.correlation.status in ('no_smt_db', 'empty_smt') %}
+          Correlation requires Smart Meter Texas interval data in the Kestrel database.
+          {% else %}
+          Correlation rows will appear once overlapping Nest HVAC history and Smart Meter Texas intervals exist in the selected window.
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
     </div>
   </main>
 </div>

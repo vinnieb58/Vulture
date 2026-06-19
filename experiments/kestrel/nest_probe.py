@@ -28,6 +28,7 @@ from kestrel.nest import (  # noqa: E402
     poll_nest_thermostats,
     redact_nest_message,
 )
+from kestrel.nest_history import append_history_from_snapshot  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +67,9 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
     log.info("Wrote Nest status snapshot (%s thermostat(s))", len(snapshot.get("thermostats", {})))
+
+    if not append_history_from_snapshot(snapshot):
+        log.warning("Nest history append failed; latest snapshot was still written")
 
     names = [
         entry.get("name")

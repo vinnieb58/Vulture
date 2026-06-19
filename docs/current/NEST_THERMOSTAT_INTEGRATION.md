@@ -34,6 +34,69 @@ python experiments/kestrel/nest_probe.py --once
 
 On success the probe writes `data/kestrel_nest_status.json` and prints the thermostat display names found (for example `Downstairs`, `Upstairs`).
 
+On failure the probe exits non-zero, logs a redacted error, and **does not overwrite** the last good snapshot file.
+
+## Scheduled systemd polling (every 5 minutes)
+
+Isolated units (separate from Vulture scheduler and Smart Meter Texas timer):
+
+| Unit | Purpose |
+|------|---------|
+| `kestrel-nest-poll.service` | Oneshot read-only poll (`nest_probe.py --once`) |
+| `kestrel-nest-poll.timer` | Triggers every 5 minutes after boot |
+
+Reference files: `deploy/systemd/kestrel-nest-poll.service`, `deploy/systemd/kestrel-nest-poll.timer`.
+
+### Install
+
+```bash
+cd /home/vinnieb58/projects/vulture
+chmod +x scripts/install_kestrel_nest_timer.sh
+
+# Copy units + daemon-reload
+./scripts/install_kestrel_nest_timer.sh
+
+# Copy units, daemon-reload, enable timer
+./scripts/install_kestrel_nest_timer.sh --enable
+```
+
+Or manually:
+
+```bash
+sudo cp deploy/systemd/kestrel-nest-poll.service /etc/systemd/system/
+sudo cp deploy/systemd/kestrel-nest-poll.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now kestrel-nest-poll.timer
+systemctl list-timers --all | grep kestrel-nest
+```
+
+Requires `NEST_*` OAuth variables in `/home/vinnieb58/projects/vulture/.env`. The service unit loads that file and runs from the repo root. **No thermostat control commands** are invoked.
+
+### Manual one-shot test
+
+```bash
+sudo systemctl start kestrel-nest-poll.service
+journalctl -u kestrel-nest-poll.service -n 100 --no-pager
+python3 experiments/kestrel/nest_probe.py --once
+```
+
+### Timer status
+
+```bash
+systemctl status kestrel-nest-poll.timer
+systemctl list-timers --all | grep kestrel-nest
+```
+
+Successful runs log thermostat count and snapshot path. Failures log redacted OAuth/SDM errors only — never tokens, client secrets, refresh tokens, or Authorization headers.
+
+### Disable / rollback
+
+```bash
+sudo systemctl disable --now kestrel-nest-poll.timer
+sudo rm -f /etc/systemd/system/kestrel-nest-poll.service /etc/systemd/system/kestrel-nest-poll.timer
+sudo systemctl daemon-reload
+```
+
 ## Output shape
 
 The snapshot uses lowercase snake_case keys per room:
@@ -90,3 +153,6 @@ Fixtures live at `tests/fixtures/nest_sdm_two_thermostats.json` (Downstairs COOL
 | `kestrel/nest.py` | SDM OAuth, fetch, parse, snapshot builder |
 | `experiments/kestrel/nest_probe.py` | CLI entry point (`--once`) |
 | `data/kestrel_nest_status.json` | Latest poll output (generated) |
+| `deploy/systemd/kestrel-nest-poll.service` | systemd oneshot poll unit |
+| `deploy/systemd/kestrel-nest-poll.timer` | 5-minute poll timer |
+| `scripts/install_kestrel_nest_timer.sh` | Copy units and optional enable |

@@ -493,7 +493,7 @@ class TestDashboardDockerfile:
 
         copied = set(re.findall(r"COPY ([^\n]+) \./", dockerfile))
         copied_modules = {
-            name.removesuffix(".py")
+            Path(name).stem
             for block in copied
             for name in block.split()
             if name.endswith(".py")
