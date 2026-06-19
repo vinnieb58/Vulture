@@ -30,6 +30,9 @@ _HISTORY_THERMOSTAT_FIELDS = (
     "humidity",
     "mode",
     "action",
+    "raw_hvac_status",
+    "raw_thermostat_mode",
+    "eco_mode",
     "setpoint",
     "online",
 )

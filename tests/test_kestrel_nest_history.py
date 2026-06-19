@@ -28,6 +28,8 @@ def _snapshot(
     updated_at: str = "2026-06-19T12:00:00+00:00",
     downstairs_action: str = "COOLING",
     upstairs_action: str = "OFF",
+    downstairs_raw_hvac: str = "COOLING",
+    upstairs_raw_hvac: str = "OFF",
 ) -> dict:
     return {
         "updated_at": updated_at,
@@ -39,6 +41,9 @@ def _snapshot(
                 "humidity": 65,
                 "mode": "COOL",
                 "action": downstairs_action,
+                "raw_hvac_status": downstairs_raw_hvac,
+                "raw_thermostat_mode": "COOL",
+                "eco_mode": "OFF",
                 "setpoint": 71,
                 "online": True,
             },
@@ -48,6 +53,9 @@ def _snapshot(
                 "humidity": 65,
                 "mode": "MANUAL_ECO",
                 "action": upstairs_action,
+                "raw_hvac_status": upstairs_raw_hvac,
+                "raw_thermostat_mode": "COOL",
+                "eco_mode": "MANUAL_ECO",
                 "setpoint": 76,
                 "online": True,
             },
@@ -64,11 +72,29 @@ class TestNestHistoryRecordBuilding:
             "humidity": 65,
             "mode": "COOL",
             "action": "COOLING",
+            "raw_hvac_status": "COOLING",
+            "raw_thermostat_mode": "COOL",
+            "eco_mode": "OFF",
             "setpoint": 71,
             "online": True,
         }
+        assert downstairs["action"] == downstairs["raw_hvac_status"]
         assert "name" not in downstairs
         assert record["timestamp"] == "2026-06-19T12:00:00+00:00"
+
+    def test_history_stores_raw_hvac_status_separately_from_mode(self) -> None:
+        record = build_history_record(
+            _snapshot(
+                downstairs_action="OFF",
+                downstairs_raw_hvac="OFF",
+                upstairs_action="OFF",
+                upstairs_raw_hvac="OFF",
+            )
+        )
+        downstairs = record["thermostats"]["downstairs"]
+        assert downstairs["mode"] == "COOL"
+        assert downstairs["raw_hvac_status"] == "OFF"
+        assert downstairs["action"] == "OFF"
 
 
 class TestNestHistoryAppendAndPrune:

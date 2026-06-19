@@ -24,6 +24,7 @@ from kestrel.config import setup_logging  # noqa: E402
 from kestrel.nest import (  # noqa: E402
     NestApiError,
     NestConfigError,
+    format_debug_trait_summary,
     load_nest_config,
     poll_nest_thermostats,
     redact_nest_message,
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         "--once",
         action="store_true",
         help="Poll SDM once and write data/kestrel_nest_status.json",
+    )
+    parser.add_argument(
+        "--debug-traits",
+        action="store_true",
+        help="Print sanitized raw SDM trait summary per thermostat (requires --once)",
     )
     return parser.parse_args()
 
@@ -81,6 +87,12 @@ def main() -> int:
     else:
         print("Nest thermostats: none found")
     print(f"Snapshot: {output_path}")
+
+    if args.debug_traits:
+        print("Raw SDM trait summary:")
+        for line in format_debug_trait_summary(snapshot):
+            print(line)
+
     return 0
 
 
