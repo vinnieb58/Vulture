@@ -15,6 +15,7 @@ from kestrel.nest import (
     celsius_to_fahrenheit,
     celsius_to_fahrenheit_rounded,
     extract_display_name,
+    format_debug_trait_summary,
     normalize_room_key,
     parse_devices_payload,
     parse_thermostat_device,
@@ -74,9 +75,12 @@ class TestParseDevicesPayload:
         assert downstairs["temperature"] == 73
         assert downstairs["humidity"] == 65
         assert downstairs["mode"] == "COOL"
+        assert downstairs["raw_thermostat_mode"] == "COOL"
         assert downstairs["raw_mode"] == "COOL"
+        assert downstairs["raw_hvac_status"] == "COOLING"
         assert downstairs["eco_mode"] == "OFF"
         assert downstairs["action"] == "COOLING"
+        assert downstairs["action"] == downstairs["raw_hvac_status"]
         assert downstairs["cool_setpoint"] == 71
         assert downstairs["heat_setpoint"] is None
         assert downstairs["setpoint"] == 71
@@ -87,9 +91,12 @@ class TestParseDevicesPayload:
         assert upstairs["temperature"] == 76
         assert upstairs["humidity"] == 67
         assert upstairs["mode"] == "MANUAL_ECO"
+        assert upstairs["raw_thermostat_mode"] == "COOL"
         assert upstairs["raw_mode"] == "COOL"
+        assert upstairs["raw_hvac_status"] == "OFF"
         assert upstairs["eco_mode"] == "MANUAL_ECO"
         assert upstairs["action"] == "OFF"
+        assert upstairs["action"] == upstairs["raw_hvac_status"]
         assert upstairs["cool_setpoint"] == 76
         assert upstairs["heat_setpoint"] == 65
         assert upstairs["setpoint"] == 76
@@ -151,6 +158,75 @@ class TestParseDevicesPayload:
         assert isinstance(snapshot["thermostats"], dict)
         assert "downstairs" in snapshot["thermostats"]
         assert "upstairs" in snapshot["thermostats"]
+
+
+class TestHvacActionFromRawTraits:
+    def _device(
+        self,
+        *,
+        thermostat_mode: str,
+        hvac_status: str,
+        eco_mode: str = "OFF",
+    ) -> dict:
+        return {
+            "name": "enterprises/demo/devices/debug-1",
+            "type": "sdm.devices.types.THERMOSTAT",
+            "parentRelations": [{"displayName": "Debug Room"}],
+            "traits": {
+                "sdm.devices.traits.Temperature": {"ambientTemperatureCelsius": 22.0},
+                "sdm.devices.traits.Humidity": {"ambientHumidityPercent": 50},
+                "sdm.devices.traits.ThermostatMode": {"mode": thermostat_mode},
+                "sdm.devices.traits.ThermostatHvac": {"status": hvac_status},
+                "sdm.devices.traits.ThermostatTemperatureSetpoint": {"coolCelsius": 21.0},
+                "sdm.devices.traits.ThermostatEco": {"mode": eco_mode},
+                "sdm.devices.traits.Connectivity": {"status": "ONLINE"},
+            },
+        }
+
+    def test_cool_mode_off_hvac_status_yields_action_off(self) -> None:
+        _, entry = parse_thermostat_device(self._device(thermostat_mode="COOL", hvac_status="OFF"))
+        assert entry["raw_thermostat_mode"] == "COOL"
+        assert entry["raw_hvac_status"] == "OFF"
+        assert entry["action"] == "OFF"
+        assert entry["mode"] == "COOL"
+
+    def test_cool_mode_cooling_hvac_status_yields_action_cooling(self) -> None:
+        _, entry = parse_thermostat_device(
+            self._device(thermostat_mode="COOL", hvac_status="COOLING")
+        )
+        assert entry["raw_hvac_status"] == "COOLING"
+        assert entry["action"] == "COOLING"
+
+    def test_manual_eco_off_hvac_status_yields_action_off(self) -> None:
+        device = self._device(thermostat_mode="COOL", hvac_status="OFF", eco_mode="MANUAL_ECO")
+        device["traits"]["sdm.devices.traits.ThermostatEco"] = {
+            "mode": "MANUAL_ECO",
+            "coolCelsius": 23.0,
+            "heatCelsius": 19.0,
+        }
+        _, entry = parse_thermostat_device(device)
+        assert entry["eco_mode"] == "MANUAL_ECO"
+        assert entry["mode"] == "MANUAL_ECO"
+        assert entry["raw_hvac_status"] == "OFF"
+        assert entry["action"] == "OFF"
+
+
+class TestDebugTraitSummary:
+    def test_format_debug_trait_summary_is_sanitized(self) -> None:
+        thermostats = parse_devices_payload(_load_fixture())
+        snapshot = build_nest_snapshot(thermostats)
+        lines = format_debug_trait_summary(snapshot)
+
+        assert len(lines) == 2
+        combined = "\n".join(lines)
+        assert "ya29." not in combined
+        assert "enterprises/" not in combined
+        assert "raw_hvac_status=COOLING" in combined
+        assert "raw_hvac_status=OFF" in combined
+        assert "raw_thermostat_mode=COOL" in combined
+        assert "eco_mode=MANUAL_ECO" in combined
+        assert "room=Downstairs" in combined
+        assert "room=Upstairs" in combined
 
 
 class TestRedactNestMessage:

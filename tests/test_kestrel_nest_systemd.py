@@ -68,6 +68,44 @@ class TestNestProbeFailurePreservesSnapshot:
         append_mock.assert_called_once_with(snapshot)
         assert output_path.is_file()
 
+    def test_debug_traits_prints_sanitized_summary(self, tmp_path: Path, capsys) -> None:
+        config = _nest_config(tmp_path)
+        snapshot = {
+            "updated_at": "2026-06-19T12:00:00+00:00",
+            "thermostats": {
+                "downstairs": {
+                    "name": "Downstairs",
+                    "device_name": "enterprises/demo/devices/secret-id",
+                    "temperature": 73,
+                    "mode": "COOL",
+                    "action": "COOLING",
+                    "raw_hvac_status": "COOLING",
+                    "raw_thermostat_mode": "COOL",
+                    "eco_mode": "OFF",
+                    "cool_setpoint": 71,
+                    "heat_setpoint": None,
+                    "setpoint": 71,
+                    "online": True,
+                }
+            },
+        }
+
+        with (
+            patch.object(sys, "argv", ["nest_probe", "--once", "--debug-traits"]),
+            patch.object(probe_module, "load_nest_config", return_value=config),
+            patch.object(probe_module, "setup_logging"),
+            patch.object(probe_module, "poll_nest_thermostats", return_value=snapshot),
+            patch.object(probe_module, "append_history_from_snapshot", return_value=True),
+        ):
+            code = probe_module.main()
+
+        captured = capsys.readouterr()
+        assert code == 0
+        assert "Raw SDM trait summary:" in captured.out
+        assert "raw_hvac_status=COOLING" in captured.out
+        assert "raw_thermostat_mode=COOL" in captured.out
+        assert "enterprises/" not in captured.out
+
     def test_api_failure_does_not_overwrite_existing_snapshot(self, tmp_path: Path) -> None:
         config = _nest_config(tmp_path)
         output_path = Path(config.output_path)

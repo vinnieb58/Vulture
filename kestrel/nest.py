@@ -192,9 +192,10 @@ def parse_thermostat_device(device: dict[str, Any]) -> tuple[str, dict[str, Any]
     ambient_c = _optional_celsius(temperature_trait.get("ambientTemperatureCelsius"))
     humidity = humidity_trait.get("ambientHumidityPercent")
     raw_mode = mode_trait.get("mode")
-    raw_mode_str = str(raw_mode) if raw_mode is not None else None
-    hvac_status = hvac_trait.get("status")
-    action = str(hvac_status) if hvac_status is not None else None
+    raw_thermostat_mode = str(raw_mode) if raw_mode is not None else None
+    raw_hvac_status_value = hvac_trait.get("status")
+    raw_hvac_status = str(raw_hvac_status_value) if raw_hvac_status_value is not None else None
+    action = raw_hvac_status
 
     eco_mode = eco_trait.get("mode")
     eco_mode_str = str(eco_mode) if eco_mode is not None else "OFF"
@@ -204,7 +205,7 @@ def parse_thermostat_device(device: dict[str, Any]) -> tuple[str, dict[str, Any]
         cool_c = _optional_celsius(eco_trait.get("coolCelsius"))
         heat_c = _optional_celsius(eco_trait.get("heatCelsius"))
     else:
-        effective_mode = raw_mode_str or "OFF"
+        effective_mode = raw_thermostat_mode or "OFF"
         cool_c = _optional_celsius(setpoint_trait.get("coolCelsius"))
         heat_c = _optional_celsius(setpoint_trait.get("heatCelsius"))
 
@@ -231,12 +232,14 @@ def parse_thermostat_device(device: dict[str, Any]) -> tuple[str, dict[str, Any]
         "action": action,
         "setpoint": _active_setpoint_f(
             effective_mode=effective_mode,
-            raw_mode=raw_mode_str,
+            raw_mode=raw_thermostat_mode,
             cool_setpoint_f=cool_setpoint_f,
             heat_setpoint_f=heat_setpoint_f,
         ),
         "online": online,
-        "raw_mode": raw_mode_str,
+        "raw_hvac_status": raw_hvac_status,
+        "raw_thermostat_mode": raw_thermostat_mode,
+        "raw_mode": raw_thermostat_mode,
         "eco_mode": eco_mode_str,
         "cool_setpoint": cool_setpoint_f,
         "heat_setpoint": heat_setpoint_f,
@@ -347,3 +350,50 @@ def poll_nest_thermostats(config: NestConfig) -> dict[str, Any]:
     snapshot = build_nest_snapshot(thermostats)
     log.info("Parsed %s Nest thermostat(s)", len(thermostats))
     return snapshot
+
+
+def _format_setpoints(entry: dict[str, Any]) -> str:
+    parts: list[str] = []
+    cool = entry.get("cool_setpoint")
+    heat = entry.get("heat_setpoint")
+    if cool is not None:
+        parts.append(f"cool={cool}F")
+    if heat is not None:
+        parts.append(f"heat={heat}F")
+    if not parts:
+        setpoint = entry.get("setpoint")
+        if setpoint is not None:
+            return f"setpoint={setpoint}F"
+        return "—"
+    return ", ".join(parts)
+
+
+def format_debug_trait_summary(snapshot: dict[str, Any]) -> list[str]:
+    """Return sanitized per-thermostat raw trait lines for operator debugging."""
+    thermostats = snapshot.get("thermostats")
+    if not isinstance(thermostats, dict):
+        return []
+
+    lines: list[str] = []
+    for room_key in sorted(thermostats):
+        entry = thermostats[room_key]
+        if not isinstance(entry, dict):
+            continue
+        room = str(entry.get("name") or room_key)
+        temperature = entry.get("temperature")
+        temp_display = f"{temperature}F" if temperature is not None else "—"
+        lines.append(
+            " | ".join(
+                [
+                    f"room={room}",
+                    f"raw_hvac_status={entry.get('raw_hvac_status') or '—'}",
+                    f"raw_thermostat_mode={entry.get('raw_thermostat_mode') or '—'}",
+                    f"eco_mode={entry.get('eco_mode') or '—'}",
+                    f"action={entry.get('action') or '—'}",
+                    f"temperature={temp_display}",
+                    f"setpoints={_format_setpoints(entry)}",
+                ]
+            )
+        )
+    return lines
+
