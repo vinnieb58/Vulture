@@ -27,6 +27,11 @@ class HelpCommand:
 
 
 @dataclass(frozen=True)
+class HelpPrefsCommand:
+    kind: str = "help-prefs"
+
+
+@dataclass(frozen=True)
 class HistoryCommand:
     kind: str = "history"
     scope: str = "trip"
@@ -111,6 +116,7 @@ class AliasPrefCommand:
 Command = (
     StartCommand
     | HelpCommand
+    | HelpPrefsCommand
     | HistoryCommand
     | ResetTripCommand
     | UndoLastCommand
@@ -136,25 +142,26 @@ _ALIAS_PREF_RE = re.compile(r"^alias\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
 _REMOVE_PREF_RE = re.compile(r"^remove\s+preference\s+(.+)$", re.IGNORECASE)
 
 HELP_TEXT = """Finch grocery commands:
-• help
-• preview eggs, milk
-• add eggs
-• add eggs again / force add eggs
-• add-list eggs, milk
-• 2 eggs
-• prefs / preferences / list prefs / show preferences — list saved preferences
-• pref ITEM — show one preference
-• forget ITEM — remove one
-• change ITEM — pick a new preferred product
-• alias bagels to bagel
-• history / added today / what did finch add
-• reset trip / new grocery trip
-• undo last
+- add eggs
+- add-list eggs, milk
+- 2 eggs
+- history
+- prefs
+- help preferences
 
-If Finch asks you to choose, reply 1 to add once, prefer 1 to remember it, or nvm to cancel.
+If Finch asks you to choose:
+- reply 1 to add once
+- reply prefer 1 to remember it
+- reply nvm to cancel
 
-Finch tracks a local "added list" per trip (not your live Kroger cart).
-Cart writes stay disabled until FINCH_LIVE_CART=true on Raven."""
+Finch tracks what it added this trip. Kroger is still the live cart."""
+
+HELP_PREFS_TEXT = """Preference commands:
+- prefs — list saved preferences
+- pref bagels — show one saved preference
+- forget bagels — remove one
+- change bagels — pick a different preferred product
+- alias plain bagels to bagel — reuse another preference"""
 
 START_TEXT = (
     "Welcome to Finch on Telegram.\n\n"
@@ -201,6 +208,8 @@ def parse_command(message: str) -> Command | None:
     lower = text.lower()
     if lower in ("/start", "start"):
         return StartCommand()
+    if lower in ("help preferences", "help prefs"):
+        return HelpPrefsCommand()
     if lower in ("help", "/help"):
         return HelpCommand()
     if lower in ("history", "finch history", "what did finch add"):
@@ -409,8 +418,28 @@ def format_history_response(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_MISSING_ROUTE_MESSAGE = (
+    "That Finch API route is missing or not deployed yet. "
+    "Try restarting finch-api or updating Raven."
+)
+
+
 def format_error(message: str) -> str:
     return f"Finch error: {message}"
+
+
+def format_api_error(
+    *,
+    status_code: int,
+    detail: str,
+    method: str | None = None,
+    path: str | None = None,
+) -> str:
+    if status_code == 404 or detail.strip().lower() == "not found":
+        return _MISSING_ROUTE_MESSAGE
+    if status_code >= 500:
+        return f"Finch error: The grocery service had a problem ({status_code}). Try again in a moment."
+    return format_error(detail)
 
 
 def format_preferences_response(payload: dict[str, Any]) -> str:

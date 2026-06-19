@@ -13,6 +13,22 @@ def _chat_key(message: telegram_client.InboundTextMessage) -> str:
     return finch_client.telegram_chat_key(message.chat_id)
 
 
+def _format_finch_api_error(exc: finch_client.FinchApiError) -> str:
+    logger.error(
+        "Finch API error: %s %s -> %s %s",
+        exc.method or "?",
+        exc.path or "?",
+        exc.status_code,
+        exc.detail,
+    )
+    return commands.format_api_error(
+        status_code=exc.status_code,
+        detail=exc.detail,
+        method=exc.method,
+        path=exc.path,
+    )
+
+
 def _handle_pending_reply(
     message: telegram_client.InboundTextMessage,
     command: commands.ChooseReplyCommand
@@ -38,7 +54,7 @@ def _handle_pending_reply(
     except finch_client.FinchApiError as exc:
         if exc.status_code == 403:
             return commands.format_cart_blocked(exc.detail)
-        return commands.format_error(exc.detail)
+        return _format_finch_api_error(exc)
     return commands.format_choose_response(payload)
 
 
@@ -62,11 +78,14 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
     if isinstance(command, commands.HelpCommand):
         return commands.HELP_TEXT
 
+    if isinstance(command, commands.HelpPrefsCommand):
+        return commands.HELP_PREFS_TEXT
+
     if isinstance(command, commands.PreviewCommand):
         try:
             payload = finch_client.preview(command.text)
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_preview_response(payload)
 
     if isinstance(command, commands.AddCommand):
@@ -79,7 +98,7 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_add_response(payload)
 
     if isinstance(command, commands.AddListCommand):
@@ -92,49 +111,49 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_add_list_response(payload)
 
     if isinstance(command, commands.HistoryCommand):
         try:
             payload = finch_client.cart_history(limit=10, scope=command.scope)
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_history_response(payload)
 
     if isinstance(command, commands.ResetTripCommand):
         try:
             payload = finch_client.trip_reset()
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return str(payload.get("message") or "Started new grocery trip.")
 
     if isinstance(command, commands.UndoLastCommand):
         try:
             payload = finch_client.trip_undo_last()
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return str(payload.get("message") or "Undo complete.")
 
     if isinstance(command, commands.PrefsCommand):
         try:
             payload = finch_client.preferences_list()
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_preferences_response(payload)
 
     if isinstance(command, commands.PrefCommand):
         try:
             payload = finch_client.preference_get(command.item)
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_preference_get_response(payload)
 
     if isinstance(command, commands.ForgetPrefCommand):
         try:
             payload = finch_client.preference_delete(command.item)
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_preference_delete_response(payload)
 
     if isinstance(command, commands.ChangePrefCommand):
@@ -147,7 +166,7 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
         except finch_client.FinchApiError as exc:
             if exc.status_code == 403:
                 return commands.format_cart_blocked(exc.detail)
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         if payload.get("needs_choice"):
             return commands.format_needs_choice_response(payload)
         return commands.format_error("Unexpected change response.")
@@ -156,7 +175,7 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
         try:
             payload = finch_client.preference_alias(command.new_key, command.existing_key)
         except finch_client.FinchApiError as exc:
-            return commands.format_error(exc.detail)
+            return _format_finch_api_error(exc)
         return commands.format_preference_alias_response(payload)
 
     return None
