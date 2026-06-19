@@ -163,3 +163,49 @@ class TestKestrelDashboardHTTP:
                 "secret/path.csv",
             ):
                 assert forbidden not in text
+
+    def test_kestrel_page_renders_hvac_sections(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        history_path = tmp_path / "nest_history.jsonl"
+        _write_status(status_path)
+        _seed_db(db_path)
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", history_path)
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", history_path)
+
+        from kestrel.nest_history import append_history_from_snapshot
+
+        append_history_from_snapshot(
+            {
+                "updated_at": "2026-06-16T05:05:00+00:00",
+                "thermostats": {
+                    "downstairs": {
+                        "temperature": 72,
+                        "humidity": 65,
+                        "mode": "COOL",
+                        "action": "COOLING",
+                        "setpoint": 71,
+                        "online": True,
+                    },
+                    "upstairs": {
+                        "temperature": 77,
+                        "humidity": 65,
+                        "mode": "MANUAL_ECO",
+                        "action": "OFF",
+                        "setpoint": 76,
+                        "online": True,
+                    },
+                },
+            },
+            path=history_path,
+            now=datetime(2026, 6, 16, 5, 5, tzinfo=ZoneInfo("UTC")),
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+        text = response.text
+        assert "HVAC Runtime" in text
+        assert "Energy + HVAC Correlation" in text
+        assert "Nest Collection" in text
+        assert "Downstairs" in text or "House any" in text

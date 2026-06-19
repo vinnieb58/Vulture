@@ -42,6 +42,7 @@ from house_status import read_house_status
 from kestrel_formatting import format_kestrel_card_display, format_kestrel_detail_display
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
+from nest_hvac_formatting import format_hvac_section
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_metrics_history import (
     CPU_SAT_CRITICAL_MINUTES_1H,
@@ -365,10 +366,29 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         metrics = {"available": False}
     display = format_kestrel_detail_display(kestrel, metrics)
+    try:
+        hvac = format_hvac_section()
+    except Exception:
+        hvac = {
+            "state": "error",
+            "warning": "Could not load HVAC runtime data",
+            "summaries": [],
+            "collection": {
+                "status": "Missing",
+                "status_key": "missing",
+                "style": "unknown",
+                "samples_last_30m_display": "0",
+                "latest_age": None,
+                "zones": "—",
+                "missing": True,
+            },
+            "correlation": {"available": False, "rows": []},
+        }
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
+        "hvac": hvac,
         **display,
     }
 
