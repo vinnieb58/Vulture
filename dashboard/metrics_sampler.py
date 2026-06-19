@@ -1,8 +1,7 @@
 """Background Raven metrics sampler for the dashboard container.
 
-Runs a lightweight daemon thread that appends host metric samples every
-``DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS`` (default 60s) so history stays
-continuous even when nobody is viewing the Nest dashboard.
+Collects raw CPU readings every 5 seconds, rolls them into 60-second buckets,
+and persists buckets to JSONL so short CPU spikes are captured accurately.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import logging
 import os
 import threading
 
-from raven_metrics_history import MIN_SAMPLE_INTERVAL_SECONDS, record_sample_if_due
+from raven_metrics_history import RAW_SAMPLE_INTERVAL_SECONDS, record_raw_sample
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ SAMPLER_ENABLED = os.environ.get("DASHBOARD_METRICS_SAMPLER_ENABLED", "1").lower
 class MetricsSampler:
     """Daemon thread that records Raven host metrics on a fixed interval."""
 
-    def __init__(self, *, interval_seconds: int = MIN_SAMPLE_INTERVAL_SECONDS) -> None:
+    def __init__(self, *, interval_seconds: int = RAW_SAMPLE_INTERVAL_SECONDS) -> None:
         self._interval = max(1, interval_seconds)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -45,7 +44,7 @@ class MetricsSampler:
         )
         self._thread.start()
         logger.info(
-            "Background metrics sampler started (interval=%ss)",
+            "Background metrics sampler started (raw_interval=%ss)",
             self._interval,
         )
 
@@ -59,9 +58,9 @@ class MetricsSampler:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                appended = record_sample_if_due()
+                appended = record_raw_sample()
                 if appended:
-                    logger.debug("Background metrics sample appended")
+                    logger.debug("Background metrics bucket appended")
             except Exception:
                 logger.exception("Background metrics sample failed")
             if self._stop_event.wait(self._interval):
