@@ -102,6 +102,7 @@
     }
 
     .status-badge.ok { color: var(--ok); border-color: var(--ok-border); }
+    .status-badge.warn { color: var(--warn); border-color: var(--warn-border); }
     .status-badge.unknown { color: var(--unknown); border-color: var(--unknown-border); }
     .status-badge.fail { color: var(--fail); border-color: var(--fail-border); }
 
@@ -421,6 +422,40 @@
       {% endif %}
 
       {% set hvac = kestrel.hvac %}
+      <div class="card full-width">
+        <div class="summary-header" style="margin-bottom:0.65rem;">
+          <span class="card-title" style="margin-bottom:0;">Nest Collection</span>
+          <span class="status-badge {{ hvac.collection.style }}">{{ hvac.collection.status }}</span>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span>Samples last 30m</span>
+            <strong>{{ hvac.collection.samples_last_30m_display }}</strong>
+          </div>
+          <div class="summary-item">
+            <span>Latest</span>
+            <strong>
+              {% if hvac.collection.latest_age %}
+              {{ hvac.collection.latest_age }}
+              {% elif hvac.collection.latest_at %}
+              {{ hvac.collection.latest_at }}
+              {% else %}
+              —
+              {% endif %}
+            </strong>
+          </div>
+          <div class="summary-item">
+            <span>Zones</span>
+            <strong>{{ hvac.collection.zones }}</strong>
+          </div>
+        </div>
+        {% if hvac.collection.missing %}
+        <div class="section-note" style="margin-top:0.65rem;">
+          No Nest history yet. Samples appear after the poll timer runs.
+        </div>
+        {% endif %}
+      </div>
+
       <div class="card full-width">
         <div class="card-title">HVAC Runtime</div>
         {% if hvac.warning %}

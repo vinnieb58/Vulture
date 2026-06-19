@@ -373,6 +373,15 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
             "state": "error",
             "warning": "Could not load HVAC runtime data",
             "summaries": [],
+            "collection": {
+                "status": "Missing",
+                "status_key": "missing",
+                "style": "unknown",
+                "samples_last_30m_display": "0",
+                "latest_age": None,
+                "zones": "—",
+                "missing": True,
+            },
             "correlation": {"available": False, "rows": []},
         }
     return {

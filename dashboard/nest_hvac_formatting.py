@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from kestrel_formatting import KESTREL_DISPLAY_TZ, format_timestamp_friendly
+from nest_collection_health import STATUS_MISSING, get_nest_collection_health
 from nest_energy_correlation import get_energy_hvac_correlation
 from nest_hvac_runtime import (
     HvacRuntimeSummary,
@@ -72,6 +73,56 @@ def format_hvac_runtime_summary(summary: HvacRuntimeSummary) -> dict[str, Any]:
     }
 
 
+def _format_age_minutes(age_minutes: int | None) -> str | None:
+    if age_minutes is None:
+        return None
+    if age_minutes < 1:
+        return "<1 minute ago"
+    if age_minutes == 1:
+        return "1 minute ago"
+    return f"{age_minutes} minutes ago"
+
+
+def _collection_style(status: str) -> str:
+    return {
+        "ok": "ok",
+        "limited": "warn",
+        "stale": "fail",
+        "missing": "unknown",
+    }.get(status, "unknown")
+
+
+def format_collection_health_display(
+    *,
+    now: datetime | None = None,
+    tz_name: str = KESTREL_DISPLAY_TZ,
+) -> dict[str, Any]:
+    ts_now = now or datetime.now(timezone.utc)
+    health = get_nest_collection_health(now=ts_now)
+
+    latest_display = None
+    if health.latest_sample_at is not None:
+        latest_display = format_timestamp_friendly(
+            health.latest_sample_at.isoformat(),
+            tz_name=tz_name,
+            now=ts_now,
+        )
+
+    zones_display = ", ".join(health.zones) if health.zones else "—"
+
+    return {
+        "status": health.status_label,
+        "status_key": health.status,
+        "style": _collection_style(health.status),
+        "samples_last_30m": health.samples_last_30m,
+        "samples_last_30m_display": str(health.samples_last_30m),
+        "latest_at": latest_display,
+        "latest_age": _format_age_minutes(health.age_minutes),
+        "zones": zones_display,
+        "missing": health.status == STATUS_MISSING,
+    }
+
+
 def format_hvac_section(
     *,
     now: datetime | None = None,
@@ -79,6 +130,7 @@ def format_hvac_section(
 ) -> dict[str, Any]:
     """Build display payloads for HVAC runtime and energy correlation."""
     ts_now = now or datetime.now(timezone.utc)
+    collection = format_collection_health_display(now=ts_now, tz_name=tz_name)
     runtime = get_hvac_runtime_summaries(now=ts_now)
     correlation = get_energy_hvac_correlation(now=ts_now)
 
@@ -173,6 +225,7 @@ def format_hvac_section(
         "warnings": warnings,
         "latest_sample_at": latest_sample_display,
         "age_minutes": runtime.get("age_minutes"),
+        "collection": collection,
         "primary_summary": primary,
         "summaries": summaries,
         "correlation": {
