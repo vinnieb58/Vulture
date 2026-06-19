@@ -36,6 +36,8 @@ from host_status import (
     get_storage_status,
     status_display_class,
 )
+from house_formatting import format_house_card_display
+from house_status import read_house_status
 from kestrel_formatting import format_kestrel_card_display, format_kestrel_detail_display
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
@@ -241,6 +243,11 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     }
 
 
+def _compute_house_card(house: dict[str, Any]) -> dict[str, Any]:
+    """Plain-English House card for household climate (Nest thermostats)."""
+    return format_house_card_display(house)
+
+
 def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
     """Plain-English Kestrel energy card for the Nest overview."""
     state = kestrel.get("state", "no_data")
@@ -443,13 +450,19 @@ async def nest_overview(request: Request) -> HTMLResponse:
     warnings = _build_warnings(db, logs, raven, vulture, services, storage, docker)
 
     kestrel = read_kestrel_status()
+    house = read_house_status()
     nest = {
         "raven": _compute_raven_card(raven, services, docker, metrics_peaks),
         "storage": _compute_storage_card(storage),
         "vulture": _compute_vulture_card(vulture, db),
+        "house": _compute_house_card(house),
         "network": _compute_network_card(raven),
         "kestrel": _compute_kestrel_card(kestrel),
     }
+
+    house_warning = house.get("warning")
+    if isinstance(house_warning, str) and house_warning:
+        warnings.append(house_warning)
 
     context = {
         "title": "Nest",
