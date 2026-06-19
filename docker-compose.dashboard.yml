@@ -28,6 +28,7 @@ services:
     environment:
       VULTURE_DB_PATH: /app/data/vulture.db
       VULTURE_LOG_PATH: /app/logs/vulture.log
+      NEST_STATUS_PATH: /app/data/kestrel_nest_status.json
       DASHBOARD_HOST_ROOT: /host/root
       DASHBOARD_HOST_PROC: /host/proc
       DASHBOARD_SYSTEMD_BUS_SOCKET: /run/dbus/system_bus_socket

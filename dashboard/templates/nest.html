@@ -294,6 +294,49 @@
     .usage-fill.warn { background: var(--warn); }
     .usage-fill.fail { background: var(--fail); }
 
+    .house-zone {
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+      margin-top: 0.1rem;
+    }
+
+    .house-zone-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.12rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .house-zone-row:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .house-zone-name {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .house-zone-metrics {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .house-zone-status {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .house-updated {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }
+
     /* Placeholder card */
     .card-placeholder {
       opacity: 0.45;
@@ -578,6 +621,35 @@
         <a href="/vulture" style="font-size:0.78rem; color:var(--accent); margin-top:0.3rem; text-decoration:none;">
           View details →
         </a>
+      </div>
+
+      {# ── House (climate / household status) ───────────────── #}
+      {% set hc = nest.house %}
+      {% set hs = hc.style %}
+      <div class="card status-{{ hs }}">
+        <div class="card-header">
+          <span class="card-title">House</span>
+          <span class="status-badge {{ hs }}">{{ hc.status }}</span>
+        </div>
+        {% if hc.thermostats %}
+        <div class="house-zone">
+          {% for zone in hc.thermostats %}
+          <div class="house-zone-row">
+            <span class="house-zone-name">{{ zone.name }}</span>
+            <span class="house-zone-metrics">{{ zone.metrics_line }}</span>
+            <span class="house-zone-status">{{ zone.summary }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% if hc.updated_display %}
+        <div class="house-updated">{{ hc.updated_display }}</div>
+        {% endif %}
+        {% else %}
+        <div class="card-headline {{ hs }}">{{ hc.headline }}</div>
+        {% if hc.updated_display %}
+        <div class="house-updated">{{ hc.updated_display }}</div>
+        {% endif %}
+        {% endif %}
       </div>
 
       {# ── Alerts / Warnings ────────────────────────────────── #}
