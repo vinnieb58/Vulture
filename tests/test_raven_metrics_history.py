@@ -26,11 +26,18 @@ from raven_metrics_history import (  # noqa: E402
     append_sample,
     compute_metrics_summary,
     compute_peaks,
+    get_metrics_summary,
     minutes_cpu_above_threshold,
     parse_history_lines,
     prune_samples,
     read_history,
+    record_sample_if_due,
     sample_and_get_peaks,
+)
+from metrics_sampler import (  # noqa: E402
+    MetricsSampler,
+    start_metrics_sampler,
+    stop_metrics_sampler,
 )
 
 
@@ -238,6 +245,128 @@ class TestLoadNormalization:
         assert summary["cpu_threads"] == 4
 
 
+class TestRegularVsSparseSampling:
+    def test_regular_minute_samples_aggregate_accurately(self, monkeypatch):
+        monkeypatch.setattr("raven_metrics_history.MIN_SAMPLE_INTERVAL_SECONDS", 60)
+        now = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
+        samples = [
+            _sample(
+                offset_hours=minute / 60.0,
+                cpu_percent=95.0 if minute < 12 else 40.0,
+                now=now,
+            )
+            for minute in range(20)
+        ]
+        summary = compute_metrics_summary(samples, now=now)
+        assert summary["cpu_above_90_minutes_1h_raw"] == 12.0
+        assert summary["peak_cpu_1h"] == "95%"
+        assert summary["sample_count_1h"] == 20
+
+    def test_sparse_samples_undercount_saturation(self, monkeypatch):
+        monkeypatch.setattr("raven_metrics_history.MIN_SAMPLE_INTERVAL_SECONDS", 60)
+        now = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
+        samples = [
+            _sample(offset_hours=0.9, cpu_percent=95.0, now=now),
+            _sample(offset_hours=0.5, cpu_percent=95.0, now=now),
+            _sample(offset_hours=0.1, cpu_percent=95.0, now=now),
+        ]
+        summary = compute_metrics_summary(samples, now=now)
+        assert summary["cpu_above_90_minutes_1h_raw"] == 3.0
+        assert summary["cpu_above_90_minutes_1h"] == "3 min"
+
+    def test_get_metrics_summary_does_not_append(self, tmp_path: Path, monkeypatch):
+        history_path = tmp_path / "history.jsonl"
+        now = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
+        sample = _sample(offset_hours=0.1, load_1=1.5, now=now)
+        history_path.write_text(sample.to_json_line() + "\n", encoding="utf-8")
+        monkeypatch.setattr("raven_metrics_history.HISTORY_PATH", history_path)
+
+        with patch("raven_metrics_history.read_cpu_percent_live", return_value=33.0):
+            with patch("raven_metrics_history.read_cpu_temp_celsius", return_value=60.0):
+                with patch("raven_metrics_history.read_cpu_thread_count", return_value=4):
+                    summary = get_metrics_summary(path=history_path, now=now)
+
+        assert summary["cpu_now_value"] == 33.0
+        assert history_path.read_text(encoding="utf-8").count("\n") == 1
+
+    def test_record_sample_if_due_respects_interval(self, tmp_path: Path, monkeypatch):
+        history_path = tmp_path / "history.jsonl"
+        now = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
+        sample = _sample(offset_hours=0, load_1=1.0, now=now)
+        append_sample(sample, path=history_path, now=now)
+
+        with patch(
+            "raven_metrics_history.collect_current_sample",
+            return_value=_sample(offset_hours=0, load_1=2.0, now=now),
+        ) as collect_mock:
+            assert record_sample_if_due(path=history_path, now=now) is False
+            collect_mock.assert_not_called()
+
+        later = now + timedelta(seconds=61)
+        with patch(
+            "raven_metrics_history.collect_current_sample",
+            return_value=_sample(offset_hours=0, load_1=2.0, now=later),
+        ):
+            assert record_sample_if_due(path=history_path, now=later) is True
+        lines = [line for line in history_path.read_text(encoding="utf-8").splitlines() if line]
+        assert len(lines) == 2
+
+
+class TestBackgroundSampler:
+    def test_record_sample_if_due_runs_without_page_view(self, tmp_path: Path, monkeypatch):
+        """Background sampling logic appends on interval without HTTP requests."""
+        history_path = tmp_path / "history.jsonl"
+        monkeypatch.setattr("raven_metrics_history.HISTORY_PATH", history_path)
+        monkeypatch.setattr("raven_metrics_history.MIN_SAMPLE_INTERVAL_SECONDS", 1)
+        now = datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
+
+        with patch(
+            "raven_metrics_history.collect_current_sample",
+            side_effect=[
+                _sample(offset_hours=0, load_1=1.0, now=now),
+                _sample(offset_hours=0, load_1=2.0, now=now + timedelta(seconds=2)),
+            ],
+        ):
+            assert record_sample_if_due(path=history_path, now=now) is True
+            assert record_sample_if_due(path=history_path, now=now) is False
+            assert record_sample_if_due(
+                path=history_path,
+                now=now + timedelta(seconds=2),
+            ) is True
+
+        lines = [line for line in history_path.read_text(encoding="utf-8").splitlines() if line]
+        assert len(lines) == 2
+
+    def test_sampler_thread_invokes_record_sample_if_due(self, monkeypatch):
+        calls: list[bool] = []
+
+        def _fake_record() -> bool:
+            calls.append(True)
+            return False
+
+        monkeypatch.setattr("metrics_sampler.record_sample_if_due", _fake_record)
+        sampler = MetricsSampler(interval_seconds=0.05)
+        sampler.start()
+        try:
+            import time
+
+            time.sleep(0.15)
+        finally:
+            sampler.stop()
+        assert calls
+
+    def test_sampler_disabled_by_env(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_METRICS_SAMPLER_ENABLED", "0")
+        monkeypatch.setattr("metrics_sampler.SAMPLER_ENABLED", False)
+        start_metrics_sampler()
+        try:
+            from metrics_sampler import is_metrics_sampler_running
+
+            assert is_metrics_sampler_running() is False
+        finally:
+            stop_metrics_sampler()
+
+
 class TestDashboardPeaksIntegration:
     def test_dashboard_renders_new_metrics_without_crashing(self, tmp_path: Path, monkeypatch):
         from fastapi.testclient import TestClient
@@ -263,8 +392,16 @@ class TestDashboardPeaksIntegration:
         with patch("host_status.run_host_command", return_value=(False, "unavailable")):
             with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
                 with patch("raven_metrics_history.collect_current_sample", return_value=None):
-                    client = TestClient(dashboard_app.app)
-                    response = client.get("/")
+                    with patch("raven_metrics_history.get_metrics_summary") as summary_mock:
+                        summary_mock.return_value = {
+                            "cpu_now": "42%",
+                            "temp_now": "60°C",
+                            "peak_load_avg_1h": "2.14",
+                            "load_help": "Load is runnable work, not CPU %. Compare load to CPU threads.",
+                            "peak_memory_1h": "62%",
+                        }
+                        client = TestClient(dashboard_app.app)
+                        response = client.get("/")
 
         assert response.status_code == 200
         assert "CPU now" in response.text

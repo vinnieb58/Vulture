@@ -16,6 +16,7 @@ Routes
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,13 +46,23 @@ from raven_metrics_history import (
     CPU_SAT_WARN_MINUTES_1H,
     TEMP_CRITICAL_CELSIUS,
     TEMP_WARN_CELSIUS,
-    sample_and_get_peaks,
+    get_metrics_summary,
 )
+from metrics_sampler import start_metrics_sampler, stop_metrics_sampler
 from vulture_runtime import get_vulture_runtime
 
 AUTO_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_AUTO_REFRESH_SECONDS", "30"))
 
-app = FastAPI(title="Nest Dashboard", version="1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Start background metrics sampler on container startup."""
+    start_metrics_sampler()
+    yield
+    stop_metrics_sampler()
+
+
+app = FastAPI(title="Nest Dashboard", version="1.0", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 app.mount(
     "/static",
@@ -404,7 +415,7 @@ def _collect_data() -> tuple[
     logs = read_log_snapshot()
     db = read_db_snapshot(log_lines=logs.get("lines", []))
     raven = get_raven_health()
-    metrics_peaks = sample_and_get_peaks()
+    metrics_peaks = get_metrics_summary()
     services = get_service_statuses()
     storage = get_storage_status()
     for mount in storage:

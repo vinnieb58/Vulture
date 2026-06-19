@@ -1,8 +1,8 @@
 """Lightweight local Raven host metrics history for peak reporting.
 
-Samples CPU, memory, load, and temperature at dashboard request time, persists
-to a JSONL file, prunes entries older than the retention window, and computes
-1h/24h peaks and saturation metrics for the Nest card.
+A background sampler in the dashboard container appends samples every 60 seconds.
+Page requests read the same JSONL file and compute live summaries without
+writing new samples. Retention defaults to 48 hours.
 """
 
 from __future__ import annotations
@@ -616,47 +616,76 @@ def compute_peaks(
     return compute_metrics_summary(samples, now=now)
 
 
+def _collect_live_readings(
+    *,
+    previous: MetricsSample | None = None,
+) -> dict[str, float | int | None]:
+    """Read current host CPU/load values without persisting a sample."""
+    live_cpu_percent: float | None = None
+    if (
+        previous is not None
+        and previous.cpu_total_jiffies is not None
+        and previous.cpu_idle_jiffies is not None
+    ):
+        live_cpu_percent, _, _ = read_cpu_percent_from_jiffies(
+            previous.cpu_total_jiffies,
+            previous.cpu_idle_jiffies,
+        )
+    if live_cpu_percent is None:
+        live_cpu_percent = read_cpu_percent_live()
+
+    loads = _read_load_numeric()
+    return {
+        "live_cpu_percent": live_cpu_percent,
+        "live_cpu_temp": read_cpu_temp_celsius(),
+        "live_cpu_threads": read_cpu_thread_count(),
+        "live_load_1": loads[0] if loads else None,
+    }
+
+
+def record_sample_if_due(
+    *,
+    path: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Collect and append one sample when the minimum interval has elapsed."""
+    ts_now = now or datetime.now(timezone.utc)
+    history = prune_samples(read_history(path), now=ts_now)
+    if not _should_append_sample(history, ts_now):
+        return False
+    previous = _latest_sample(history)
+    sample = collect_current_sample(now=ts_now, previous=previous)
+    if sample is None:
+        return False
+    append_sample(sample, path=path, now=ts_now)
+    return True
+
+
+def get_metrics_summary(
+    *,
+    path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Read history and compute dashboard metrics without appending a sample."""
+    ts_now = now or datetime.now(timezone.utc)
+    samples = prune_samples(read_history(path), now=ts_now)
+    previous = _latest_sample(samples)
+    live = _collect_live_readings(previous=previous)
+    return compute_metrics_summary(
+        samples,
+        now=ts_now,
+        live_cpu_percent=live["live_cpu_percent"],
+        live_cpu_temp=live["live_cpu_temp"],
+        live_cpu_threads=live["live_cpu_threads"],
+        live_load_1=live["live_load_1"],
+    )
+
+
 def sample_and_get_peaks(
     *,
     path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Sample current metrics (when due), persist history, return summary."""
-    ts_now = now or datetime.now(timezone.utc)
-    history = prune_samples(read_history(path), now=ts_now)
-    previous = _latest_sample(history)
-    sample = collect_current_sample(now=ts_now, previous=previous)
-    if sample is not None:
-        samples = append_sample(sample, path=path, now=ts_now)
-    else:
-        samples = history
-
-    live_cpu_percent = sample.cpu_percent if sample is not None else None
-    if live_cpu_percent is None:
-        if (
-            previous is not None
-            and previous.cpu_total_jiffies is not None
-            and previous.cpu_idle_jiffies is not None
-        ):
-            live_cpu_percent, _, _ = read_cpu_percent_from_jiffies(
-                previous.cpu_total_jiffies,
-                previous.cpu_idle_jiffies,
-            )
-        if live_cpu_percent is None:
-            live_cpu_percent = read_cpu_percent_live()
-
-    live_cpu_temp = read_cpu_temp_celsius()
-    live_cpu_threads = read_cpu_thread_count()
-    live_load_1 = sample.load_1 if sample is not None else None
-    if live_load_1 is None:
-        loads = _read_load_numeric()
-        live_load_1 = loads[0] if loads else None
-
-    return compute_metrics_summary(
-        samples,
-        now=ts_now,
-        live_cpu_percent=live_cpu_percent,
-        live_cpu_temp=live_cpu_temp,
-        live_cpu_threads=live_cpu_threads,
-        live_load_1=live_load_1,
-    )
+    """Backward-compatible helper: record when due, then return summary."""
+    record_sample_if_due(path=path, now=now)
+    return get_metrics_summary(path=path, now=now)

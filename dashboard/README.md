@@ -139,9 +139,23 @@ curl -I http://localhost:8088
 
 ## Raven Health metrics
 
-The Nest Raven Health card samples host metrics on each page load (no separate
-monitoring daemon). Samples are written to a local JSONL file and retained for
-48 hours by default.
+The Nest Raven Health card reads from a shared JSONL history file. A **background
+sampler** inside the `vulture-dashboard` container appends one sample every 60
+seconds while the container is running — independent of browser views or page
+refreshes. Dashboard page requests only **read** history and compute live
+summaries; they do not drive sampling.
+
+### Continuous vs request-sampled
+
+| Component | Behavior |
+|-----------|----------|
+| Background sampler | Continuous — daemon thread, 60s interval, starts with container |
+| Nest page (`/`, `/advanced`) | Read-only — calls `get_metrics_summary()` |
+| `/health` | No metrics — liveness probe only |
+
+If the background sampler is disabled (`DASHBOARD_METRICS_SAMPLER_ENABLED=0`),
+history falls back to request-driven sampling via `record_sample_if_due()` and
+1h/24h aggregates may be sparse or misleading.
 
 ### Load average vs CPU %
 
@@ -172,9 +186,13 @@ bind mount:
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL sample file |
 | `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Minimum seconds between samples |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of history to keep |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Enable background 60s sampler thread |
 
 Each sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp, CPU
 thread count, and raw jiffies (for delta-based CPU % on the next sample).
+
+Samples are stored at `./data/raven_metrics_history.jsonl` (shared by the
+background sampler and dashboard reads).
 
 ### Operating thresholds
 
@@ -195,16 +213,23 @@ Configurable via environment variables (sane defaults):
 ./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
 ```
 
-Verify samples are populating:
+Verify continuous sampling **without opening the dashboard**:
 
 ```bash
-# Check JSONL history file (one line per sample, appended every ~60s on page loads):
-tail -3 ./data/raven_metrics_history.jsonl
+# Line count should grow by ~1 per minute while container is up:
+watch -n 10 'wc -l ./data/raven_metrics_history.jsonl'
 
-# Confirm Nest page shows CPU/temp fields:
+# Or tail the file directly:
+tail -f ./data/raven_metrics_history.jsonl
+
+# Confirm dashboard container started the sampler (look for startup log line):
+docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
+```
+
+Verify dashboard display (optional):
+
+```bash
 curl -s http://localhost:8088/ | grep -E 'CPU now|Temp now|CPU threads'
-
-# Container liveness (unchanged):
 curl -sf http://localhost:8088/health
 ```
 
@@ -223,6 +248,7 @@ curl -sf http://localhost:8088/health
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
 | `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Min seconds between metric samples |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of metric history to retain |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Background sampler on/off |
 | `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | CPU temp WARN threshold (°C) |
 | `DASHBOARD_TEMP_CRITICAL_CELSIUS` | `90` | CPU temp FAIL threshold (°C) |
 | `DASHBOARD_CPU_SAT_THRESHOLD` | `90` | CPU % saturation threshold |
