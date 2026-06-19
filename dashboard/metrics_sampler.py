@@ -79,6 +79,9 @@ def start_metrics_sampler() -> None:
         return
     if _sampler is None:
         _sampler = MetricsSampler()
+    if _sampler.running:
+        logger.debug("Background metrics sampler already running; not starting another")
+        return
     _sampler.start()
 
 

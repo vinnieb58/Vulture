@@ -8,7 +8,9 @@ writing new samples. Retention defaults to 48 hours.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +29,9 @@ from host_cpu_metrics import (
     read_proc_stat_jiffies,
 )
 from host_status import HOST_PROC, _read_memory
+
+logger = logging.getLogger(__name__)
+_history_io_lock = threading.Lock()
 
 HISTORY_PATH = Path(
     os.environ.get(
@@ -338,21 +343,22 @@ def append_sample(
 ) -> list[MetricsSample]:
     """Append a sample when due, prune to retention window, persist atomically."""
     history_path = path or HISTORY_PATH
-    current = prune_samples(read_history(history_path), now=now)
-    ts_now = now or sample.timestamp
-    if _should_append_sample(current, ts_now):
-        current.append(sample)
-        current.sort(key=lambda sample: sample.timestamp)
-    try:
-        history_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = history_path.with_suffix(history_path.suffix + ".tmp")
-        body = "\n".join(sample.to_json_line() for sample in current)
-        if body:
-            body += "\n"
-        tmp.write_text(body, encoding="utf-8")
-        tmp.replace(history_path)
-    except OSError:
-        pass
+    with _history_io_lock:
+        current = prune_samples(read_history(history_path), now=now)
+        ts_now = now or sample.timestamp
+        if _should_append_sample(current, ts_now):
+            current.append(sample)
+            current.sort(key=lambda sample: sample.timestamp)
+        try:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = history_path.with_suffix(history_path.suffix + ".tmp")
+            body = "\n".join(sample.to_json_line() for sample in current)
+            if body:
+                body += "\n"
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(history_path)
+        except OSError as exc:
+            logger.warning("Could not persist metrics history: %s", exc)
     return current
 
 
@@ -656,7 +662,12 @@ def record_sample_if_due(
     previous = _latest_sample(history)
     sample = collect_current_sample(now=ts_now, previous=previous)
     if sample is None:
+        logger.warning("Metrics sample skipped: host load average unavailable")
         return False
+    if sample.cpu_temp_celsius is None:
+        logger.warning("CPU temperature sensor not available for metrics sample")
+    if sample.cpu_percent is None:
+        logger.warning("CPU utilization unavailable for metrics sample")
     append_sample(sample, path=path, now=ts_now)
     return True
 
@@ -668,17 +679,21 @@ def get_metrics_summary(
 ) -> dict[str, Any]:
     """Read history and compute dashboard metrics without appending a sample."""
     ts_now = now or datetime.now(timezone.utc)
-    samples = prune_samples(read_history(path), now=ts_now)
-    previous = _latest_sample(samples)
-    live = _collect_live_readings(previous=previous)
-    return compute_metrics_summary(
-        samples,
-        now=ts_now,
-        live_cpu_percent=live["live_cpu_percent"],
-        live_cpu_temp=live["live_cpu_temp"],
-        live_cpu_threads=live["live_cpu_threads"],
-        live_load_1=live["live_load_1"],
-    )
+    try:
+        samples = prune_samples(read_history(path), now=ts_now)
+        previous = _latest_sample(samples)
+        live = _collect_live_readings(previous=previous)
+        return compute_metrics_summary(
+            samples,
+            now=ts_now,
+            live_cpu_percent=live["live_cpu_percent"],
+            live_cpu_temp=live["live_cpu_temp"],
+            live_cpu_threads=live["live_cpu_threads"],
+            live_load_1=live["live_load_1"],
+        )
+    except Exception:
+        logger.warning("Failed to compute metrics summary", exc_info=True)
+        return compute_metrics_summary([], now=ts_now)
 
 
 def sample_and_get_peaks(
