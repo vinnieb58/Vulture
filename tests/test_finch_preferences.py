@@ -326,12 +326,21 @@ class TestTelegramPreferenceCommands:
         assert alias.existing_key == "bagel"
 
     def test_help_text_includes_preference_commands(self):
-        from finch_telegram.commands import HELP_TEXT
+        from finch_telegram.commands import HELP_PREFS_TEXT, HELP_TEXT
 
         assert "prefs" in HELP_TEXT
-        assert "pref ITEM" in HELP_TEXT
-        assert "forget ITEM" in HELP_TEXT
-        assert "change ITEM" in HELP_TEXT
+        assert "help preferences" in HELP_TEXT
+        assert "FINCH_LIVE_CART" not in HELP_TEXT
+        assert "pref bagels" in HELP_PREFS_TEXT
+        assert "forget bagels" in HELP_PREFS_TEXT
+        assert "change bagels" in HELP_PREFS_TEXT
+        assert "alias plain bagels to bagel" in HELP_PREFS_TEXT
+
+    def test_parse_help_preferences_commands(self):
+        from finch_telegram.commands import HelpPrefsCommand, parse_command
+
+        for text in ("help preferences", "help prefs"):
+            assert isinstance(parse_command(text), HelpPrefsCommand), text
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.preferences_list")
@@ -413,3 +422,40 @@ class TestTelegramPreferenceCommands:
         mock_change.assert_called_once()
         body = mock_send.call_args[0][1]
         assert "Needs choice" in body
+
+    @patch("finch_telegram.handler.telegram_client.send_text_message")
+    @patch("finch_telegram.handler.finch_client.preferences_list")
+    def test_prefs_404_shows_deploy_hint(self, mock_list, mock_send, monkeypatch):
+        monkeypatch.setenv("FINCH_TELEGRAM_TEST_MODE", "1")
+        monkeypatch.setenv("FINCH_TELEGRAM_BOT_TOKEN", "test-telegram-bot-token")
+        monkeypatch.setenv("FINCH_TELEGRAM_ALLOWED_USER_IDS", "111222333")
+        monkeypatch.setenv("FINCH_API_KEY", "test-fin-api-key")
+
+        from finch_telegram.finch_client import FinchApiError
+        from finch_telegram.handler import process_inbound
+        from finch_telegram.telegram_client import InboundTextMessage
+
+        mock_list.side_effect = FinchApiError(
+            404,
+            "Not Found",
+            method="GET",
+            path="/finch/preferences",
+        )
+        process_inbound(
+            InboundTextMessage(
+                chat_id="111222333",
+                user_id="111222333",
+                text="prefs",
+                update_id=63,
+            )
+        )
+        body = mock_send.call_args[0][1]
+        assert "missing or not deployed yet" in body
+        assert "Finch error: Not Found" not in body
+
+    def test_format_api_error_404(self):
+        from finch_telegram.commands import format_api_error
+
+        message = format_api_error(status_code=404, detail="Not Found")
+        assert "missing or not deployed yet" in message
+        assert "restarting finch-api" in message

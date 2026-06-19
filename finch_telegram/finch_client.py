@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -13,10 +14,19 @@ FINCH_KEY_HEADER = "X-Finch-Key"
 
 
 class FinchApiError(Exception):
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        *,
+        method: str | None = None,
+        path: str | None = None,
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.method = method
+        self.path = path
 
 
 def telegram_chat_key(chat_id: str) -> str:
@@ -39,7 +49,12 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
                 detail = str(payload["detail"])
         except ValueError:
             pass
-        raise FinchApiError(response.status_code, detail)
+        raise FinchApiError(
+            response.status_code,
+            detail,
+            method=method,
+            path=path,
+        )
     return response.json()
 
 
@@ -118,11 +133,13 @@ def preferences_list() -> dict[str, Any]:
 
 
 def preference_get(item: str) -> dict[str, Any]:
-    return _request("GET", f"/finch/preferences/{item}")
+    encoded = quote(item, safe="")
+    return _request("GET", f"/finch/preferences/{encoded}")
 
 
 def preference_delete(item: str) -> dict[str, Any]:
-    return _request("DELETE", f"/finch/preferences/{item}")
+    encoded = quote(item, safe="")
+    return _request("DELETE", f"/finch/preferences/{encoded}")
 
 
 def preference_change(item: str, *, chat_key: str, source: str | None = None) -> dict[str, Any]:

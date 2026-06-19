@@ -25,7 +25,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py db_readers.py log_readers.py kestrel_status.py kestrel_formatting.py kestrel_metrics.py vulture_runtime.py storage_probe.py storage_config.py raven_metrics_history.py ./
+COPY app.py parsers.py subprocess_util.py host_commands.py host_status.py host_cpu_metrics.py db_readers.py log_readers.py kestrel_status.py kestrel_formatting.py kestrel_metrics.py vulture_runtime.py storage_probe.py storage_config.py raven_metrics_history.py metrics_sampler.py ./
 COPY templates/ templates/
 COPY static/ static/
 

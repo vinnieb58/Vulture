@@ -487,6 +487,8 @@ class TestTelegramSearchSelection:
 
         assert "prefer 1" in HELP_TEXT
         assert "nvm" in HELP_TEXT
+        assert "FINCH_LIVE_CART" not in HELP_TEXT
+        assert "Kroger is still the live cart" in HELP_TEXT
 
     def test_parse_pending_replies(self):
         from finch_telegram.commands import (
