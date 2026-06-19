@@ -140,22 +140,24 @@ curl -I http://localhost:8088
 ## Raven Health metrics
 
 The Nest Raven Health card reads from a shared JSONL history file. A **background
-sampler** inside the `vulture-dashboard` container appends one sample every 60
-seconds while the container is running — independent of browser views or page
-refreshes. Dashboard page requests only **read** history and compute live
-summaries; they do not drive sampling.
+sampler** inside the `vulture-dashboard` container collects CPU every **5 seconds**,
+rolls readings into **60-second buckets**, and persists one bucket line per minute.
+Page requests only **read** bucket history and compute live summaries.
+
+Peak CPU is the **maximum 5-second reading within each minute bucket**, not
+continuous kernel tracing — short Vulture pulses are captured much more
+accurately than the old 60-second point samples.
 
 ### Continuous vs request-sampled
 
 | Component | Behavior |
 |-----------|----------|
-| Background sampler | Continuous — daemon thread, 60s interval, starts with container |
+| Background sampler | Continuous — daemon thread, 5s raw interval, 60s bucket rollups |
 | Nest page (`/`, `/advanced`) | Read-only — calls `get_metrics_summary()` |
 | `/health` | No metrics — liveness probe only |
 
 If the background sampler is disabled (`DASHBOARD_METRICS_SAMPLER_ENABLED=0`),
-history falls back to request-driven sampling via `record_sample_if_due()` and
-1h/24h aggregates may be sparse or misleading.
+history falls back to request-driven sampling and 1h/24h aggregates may be sparse.
 
 ### Load average vs CPU %
 
@@ -183,13 +185,19 @@ bind mount:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL sample file |
-| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Minimum seconds between samples |
+| `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL bucket file |
+| `DASHBOARD_METRICS_RAW_SAMPLE_INTERVAL_SECONDS` | `5` | Raw CPU sample interval |
+| `DASHBOARD_METRICS_BUCKET_SECONDS` | `60` | Rollup bucket size |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of history to keep |
-| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Enable background 60s sampler thread |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Enable background sampler thread |
 
-Each sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp, CPU
-thread count, and raw jiffies (for delta-based CPU % on the next sample).
+Each persisted bucket (`format_version: 2`) records: timestamp (minute), `cpu_avg_percent`,
+`cpu_peak_percent`, `cpu_samples_count`, `cpu_seconds_over_90`, temp avg/peak,
+memory %, and load 1/5/15. Legacy v1 point samples are still read safely and
+converted to synthetic buckets on load.
+
+CPU >90% last hour is displayed in **minutes** but computed from bucket
+`cpu_seconds_over_90` (e.g. a 10-second spike adds 10 seconds).
 
 Samples are stored at `./data/raven_metrics_history.jsonl` (shared by the
 background sampler and dashboard reads).
@@ -216,11 +224,11 @@ Configurable via environment variables (sane defaults):
 Verify continuous sampling **without opening the dashboard**:
 
 ```bash
-# Line count should grow by ~1 per minute while container is up:
+# Line count should grow by ~1 per minute (one bucket per minute):
 watch -n 10 'wc -l ./data/raven_metrics_history.jsonl'
 
-# Or tail the file directly:
-tail -f ./data/raven_metrics_history.jsonl
+# Inspect latest bucket — look for cpu_peak_percent and cpu_seconds_over_90:
+tail -1 ./data/raven_metrics_history.jsonl | jq .
 
 # Confirm dashboard container started the sampler (look for startup log line):
 docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
@@ -246,7 +254,8 @@ curl -sf http://localhost:8088/health
 | `DASHBOARD_HOST_SYS` | `/host/root/sys` | Host sysfs for CPU temperature |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
-| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Min seconds between metric samples |
+| `DASHBOARD_METRICS_RAW_SAMPLE_INTERVAL_SECONDS` | `5` | Raw CPU sample interval |
+| `DASHBOARD_METRICS_BUCKET_SECONDS` | `60` | Bucket rollup interval |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of metric history to retain |
 | `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Background sampler on/off |
 | `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | CPU temp WARN threshold (°C) |
