@@ -239,6 +239,11 @@
       opacity: 0.75;
     }
 
+    .help-tip {
+      cursor: help;
+      border-bottom: 1px dotted var(--muted);
+    }
+
     /* Drive list inside storage card */
     .drive-list {
       display: flex;
@@ -451,17 +456,87 @@
             <span>Uptime</span>
             <strong>{{ rc.uptime }}</strong>
           </div>
+          {% if rc.cpu_now %}
+          <div class="detail-row">
+            <span>CPU now</span>
+            <strong>{{ rc.cpu_now }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.cpu_above_90_1h %}
+          <div class="detail-row">
+            <span>CPU &gt;90% last hour</span>
+            <strong>{{ rc.cpu_above_90_1h }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.temp_now %}
+          <div class="detail-row">
+            <span>Temp now</span>
+            <strong>{{ rc.temp_now }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.temp_high_today %}
+          <div class="detail-row">
+            <span>Temp high today</span>
+            <strong>{{ rc.temp_high_today }}</strong>
+          </div>
+          {% endif %}
           {% if rc.memory %}
           <div class="detail-row">
             <span>Memory</span>
             <strong>{{ rc.memory }}</strong>
           </div>
           {% endif %}
+          {% if rc.load_average %}
+          <div class="detail-row">
+            <span>Load 1/5/15</span>
+            <strong>{{ rc.load_average }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.cpu_threads %}
+          <div class="detail-row">
+            <span>CPU threads</span>
+            <strong>{{ rc.cpu_threads }}</strong>
+          </div>
+          {% endif %}
+          <div class="detail-row">
+            <span>Containers</span>
+            <strong>{{ rc.containers_running }} running</strong>
+          </div>
           {% if rc.peaks %}
           <div class="peaks-section">
             <div class="detail-row peaks-header">
-              <span>Peaks</span>
+              <span>Details</span>
             </div>
+            {% if rc.peaks.peak_cpu_1h %}
+            <div class="detail-row peaks-row">
+              <span>Peak CPU 1h</span>
+              <strong>{{ rc.peaks.peak_cpu_1h }}</strong>
+            </div>
+            {% endif %}
+            {% if rc.peaks.peak_cpu_24h %}
+            <div class="detail-row peaks-row">
+              <span>Peak CPU 24h</span>
+              <strong>{{ rc.peaks.peak_cpu_24h }}</strong>
+            </div>
+            {% endif %}
+            {% if rc.peaks.cpu_above_90_minutes_24h %}
+            <div class="detail-row peaks-row">
+              <span>CPU &gt;90% last 24h</span>
+              <strong>{{ rc.peaks.cpu_above_90_minutes_24h }}</strong>
+            </div>
+            {% endif %}
+            {% if rc.peaks.temp_avg_1h %}
+            <div class="detail-row peaks-row">
+              <span>Temp avg 1h</span>
+              <strong>{{ rc.peaks.temp_avg_1h }}</strong>
+            </div>
+            {% endif %}
+            {% if rc.peaks.temp_high_24h %}
+            <div class="detail-row peaks-row">
+              <span>Temp high 24h</span>
+              <strong>{{ rc.peaks.temp_high_24h }}</strong>
+            </div>
+            {% endif %}
             <div class="detail-row peaks-row">
               <span>Peak memory 1h</span>
               <strong>{{ rc.peaks.peak_memory_1h }}</strong>
@@ -471,25 +546,21 @@
               <strong>{{ rc.peaks.peak_memory_24h }}</strong>
             </div>
             <div class="detail-row peaks-row">
-              <span>Peak load 1h</span>
-              <strong>{{ rc.peaks.peak_load_1h }}</strong>
+              <span class="help-tip" title="{{ rc.load_help }}">Peak load avg 1h</span>
+              <strong>{{ rc.peaks.peak_load_avg_1h or rc.peaks.peak_load_1h }}</strong>
             </div>
             <div class="detail-row peaks-row">
-              <span>Peak load 24h</span>
-              <strong>{{ rc.peaks.peak_load_24h }}</strong>
+              <span class="help-tip" title="{{ rc.load_help }}">Peak load avg 24h</span>
+              <strong>{{ rc.peaks.peak_load_avg_24h or rc.peaks.peak_load_24h }}</strong>
             </div>
+            {% if rc.load_pressure %}
+            <div class="detail-row peaks-row detail-row-muted">
+              <span class="help-tip" title="{{ rc.load_help }}">Load pressure</span>
+              <strong>{{ rc.load_pressure }}</strong>
+            </div>
+            {% endif %}
           </div>
           {% endif %}
-          {% if rc.load_average %}
-          <div class="detail-row detail-row-muted">
-            <span>Load (1/5/15)</span>
-            <strong>{{ rc.load_average }}</strong>
-          </div>
-          {% endif %}
-          <div class="detail-row">
-            <span>Containers</span>
-            <strong>{{ rc.containers_running }} running</strong>
-          </div>
         </div>
       </div>
 

@@ -16,6 +16,7 @@ Routes
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,28 @@ from kestrel_formatting import format_kestrel_card_display, format_kestrel_detai
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
 from log_readers import LOG_PATH, read_log_snapshot
-from raven_metrics_history import sample_and_get_peaks
+from raven_metrics_history import (
+    CPU_SAT_CRITICAL_MINUTES_1H,
+    CPU_SAT_WARN_MINUTES_1H,
+    TEMP_CRITICAL_CELSIUS,
+    TEMP_WARN_CELSIUS,
+    get_metrics_summary,
+)
+from metrics_sampler import start_metrics_sampler, stop_metrics_sampler
 from vulture_runtime import get_vulture_runtime
 
 AUTO_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_AUTO_REFRESH_SECONDS", "30"))
 
-app = FastAPI(title="Nest Dashboard", version="1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Start background metrics sampler on container startup."""
+    start_metrics_sampler()
+    yield
+    stop_metrics_sampler()
+
+
+app = FastAPI(title="Nest Dashboard", version="1.0", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 app.mount(
     "/static",
@@ -76,6 +93,41 @@ def _collect_warnings(*sections: dict[str, Any]) -> list[str]:
 # Nest overview card computation
 # ---------------------------------------------------------------------------
 
+def _raven_operating_issues(metrics: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return (severity, message) pairs for CPU/temp operating thresholds."""
+    issues: list[tuple[str, str]] = []
+
+    temp_now = metrics.get("temp_now_celsius")
+    if temp_now is not None:
+        if temp_now >= TEMP_CRITICAL_CELSIUS:
+            issues.append(
+                ("FAIL", f"CPU temperature critical: {metrics.get('temp_now', f'{temp_now:.0f}°C')}")
+            )
+        elif temp_now >= TEMP_WARN_CELSIUS:
+            issues.append(
+                ("WARN", f"CPU temperature high: {metrics.get('temp_now', f'{temp_now:.0f}°C')}")
+            )
+
+    cpu_sat_minutes = metrics.get("cpu_above_90_minutes_1h_raw")
+    if cpu_sat_minutes is not None:
+        if cpu_sat_minutes >= CPU_SAT_CRITICAL_MINUTES_1H:
+            issues.append(
+                (
+                    "FAIL",
+                    f"CPU above 90% for {metrics.get('cpu_above_90_minutes_1h', f'{cpu_sat_minutes:.0f} min')} in the last hour",
+                )
+            )
+        elif cpu_sat_minutes >= CPU_SAT_WARN_MINUTES_1H:
+            issues.append(
+                (
+                    "WARN",
+                    f"CPU above 90% for {metrics.get('cpu_above_90_minutes_1h', f'{cpu_sat_minutes:.0f} min')} in the last hour",
+                )
+            )
+
+    return issues
+
+
 def _compute_raven_card(
     raven: dict[str, Any],
     services: list[ServiceStatus],
@@ -89,14 +141,18 @@ def _compute_raven_card(
     failed = raven.get("failed_units", [])
     ignored_failed = raven.get("ignored_failed_units", [])
     internet_ok = raven.get("internet_ok", True)
+    metrics = metrics_peaks or {}
 
     issues: list[str] = []
+    severities: list[str] = []
     if failed:
         plural = "s" if len(failed) != 1 else ""
         names = ", ".join(failed[:3])
         issues.append(f"{len(failed)} failed systemd unit{plural}: {names}")
+        severities.append("FAIL")
     if not internet_ok:
         issues.append("Internet unreachable")
+        severities.append("WARN")
 
     critical_labels = {"SSH", "tailscaled", "docker", "vulture-bot"}
     for svc in services:
@@ -104,11 +160,17 @@ def _compute_raven_card(
             "active", "not found", "not configured", "unknown"
         ):
             issues.append(f"{svc.label} is {svc.active}")
+            severities.append("WARN")
+
+    for severity, message in _raven_operating_issues(metrics):
+        issues.append(message)
+        severities.append(severity)
 
     if issues:
-        # Only FAIL when there are actionable failed units.  Other issues
-        # (internet, critical services) are WARN regardless.
-        status = "FAIL" if failed else "WARN"
+        if "FAIL" in severities or failed:
+            status = "FAIL"
+        else:
+            status = "WARN"
         headline = issues[0]
     else:
         status = "OK"
@@ -121,6 +183,10 @@ def _compute_raven_card(
         if memory.percent_used is not None:
             mem_str += f" ({memory.percent_used:.0f}%)"
 
+    load_average = raven.get("load_average")
+    cpu_threads = metrics.get("cpu_threads")
+    load_pressure = metrics.get("load_pressure")
+
     return {
         "status": status,
         "headline": headline,
@@ -128,10 +194,17 @@ def _compute_raven_card(
         "ignored_failed_units": ignored_failed,
         "hostname": raven.get("hostname", "unknown"),
         "uptime": raven.get("uptime", "unknown"),
-        "load_average": raven.get("load_average"),
+        "cpu_now": metrics.get("cpu_now"),
+        "cpu_above_90_1h": metrics.get("cpu_above_90_minutes_1h"),
+        "temp_now": metrics.get("temp_now"),
+        "temp_high_today": metrics.get("temp_high_today"),
+        "load_average": load_average,
+        "cpu_threads": cpu_threads,
+        "load_pressure": load_pressure,
+        "load_help": metrics.get("load_help"),
         "memory": mem_str,
         "containers_running": docker.running_count,
-        "peaks": metrics_peaks or {},
+        "peaks": metrics,
     }
 
 
@@ -349,7 +422,7 @@ def _collect_data() -> tuple[
     logs = read_log_snapshot()
     db = read_db_snapshot(log_lines=logs.get("lines", []))
     raven = get_raven_health()
-    metrics_peaks = sample_and_get_peaks()
+    metrics_peaks = get_metrics_summary()
     services = get_service_statuses()
     storage = get_storage_status()
     for mount in storage:
