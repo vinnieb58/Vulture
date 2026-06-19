@@ -115,6 +115,53 @@ def format_hvac_section(
             }
         )
 
+    diagnostics = correlation.get("diagnostics") or {}
+    correlation_diagnostics: list[dict[str, str]] = []
+    window_start = diagnostics.get("window_start")
+    window_end = diagnostics.get("window_end")
+    if window_start and window_end:
+        correlation_diagnostics.append(
+            {
+                "label": "Correlation window",
+                "value": (
+                    f"{format_timestamp_friendly(str(window_start), tz_name=tz_name, now=ts_now)}"
+                    f" – {format_timestamp_friendly(str(window_end), tz_name=tz_name, now=ts_now)}"
+                ),
+            }
+        )
+    smt_latest = diagnostics.get("smt_latest")
+    if smt_latest:
+        correlation_diagnostics.append(
+            {
+                "label": "Latest SMT interval",
+                "value": format_timestamp_friendly(str(smt_latest), tz_name=tz_name, now=ts_now),
+            }
+        )
+    nest_earliest = diagnostics.get("nest_earliest")
+    nest_latest = diagnostics.get("nest_latest")
+    if nest_earliest:
+        correlation_diagnostics.append(
+            {
+                "label": "Earliest Nest sample",
+                "value": format_timestamp_friendly(str(nest_earliest), tz_name=tz_name, now=ts_now),
+            }
+        )
+    if nest_latest:
+        correlation_diagnostics.append(
+            {
+                "label": "Latest Nest sample",
+                "value": format_timestamp_friendly(str(nest_latest), tz_name=tz_name, now=ts_now),
+            }
+        )
+    interval_count = diagnostics.get("interval_count")
+    if interval_count is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "SMT interval rows",
+                "value": f"{int(interval_count):,}",
+            }
+        )
+
     warnings: list[str] = []
     for warning in (runtime.get("warning"), correlation.get("warning")):
         if isinstance(warning, str) and warning:
@@ -130,10 +177,12 @@ def format_hvac_section(
         "summaries": summaries,
         "correlation": {
             "available": bool(correlation.get("available")),
+            "status": correlation.get("status"),
             "warning": correlation.get("warning"),
             "rows": correlation_rows,
             "hours": correlation.get("hours"),
             "estimate_note": correlation.get("estimate_note"),
             "high_kwh_threshold": correlation.get("high_kwh_threshold"),
+            "diagnostics": correlation_diagnostics,
         },
     }
