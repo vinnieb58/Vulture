@@ -6,8 +6,8 @@ hunts, adapters, storage, Docker, and logs — without any write or admin contro
 ## What v0.2 shows
 
 - **Summary cards** — hunt counts, running containers, failed systemd units
-- **Raven Health** — hostname, server time, uptime, boot time, LAN/Tailscale IP,
-  internet reachability, failed systemd units, CPU load, memory usage
+- **Raven Health** — hostname, uptime, CPU %, CPU saturation, CPU temperature,
+  memory usage, load average (with thread count and load pressure), containers
 - **Key Services** — ssh/ssh.socket, tailscaled, smbd, docker, vulture-bot,
   vulture-scheduler timer (`is-active` / `is-enabled`)
 - **Vulture Runtime** — bot/scheduler process or systemd status, tmux sessions,
@@ -137,6 +137,77 @@ curl -I http://localhost:8088
 - **LAN/Tailscale IP** accuracy depends on host network namespace visibility
   from the container.
 
+## Raven Health metrics
+
+The Nest Raven Health card samples host metrics on each page load (no separate
+monitoring daemon). Samples are written to a local JSONL file and retained for
+48 hours by default.
+
+### Load average vs CPU %
+
+Linux **load average** counts runnable processes, not CPU utilization. On a
+4-thread Chromebox, a load of ~6 can be normal under bursty work while current
+CPU % is much lower. The card shows:
+
+- **CPU now** — utilization % from `/proc/stat`
+- **Load 1/5/15** — traditional load averages
+- **CPU threads** — logical CPU count from `/proc/cpuinfo`
+- **Load pressure** — `load_1 / cpu_threads` (values above 1.0 suggest queuing)
+- **Peak load avg** — peak 1-minute load in the Details section, with tooltip:
+  *"Load is runnable work, not CPU %. Compare load to CPU threads."*
+
+### CPU temperature
+
+Temperature is read from host sysfs thermal zones via the `/host/root/sys`
+bind mount:
+
+- Preferred zones: `x86_pkg_temp`, `coretemp`, `k10temp`, `cpu`, `acpitz`
+- Path: `/host/root/sys/class/thermal/thermal_zone*/temp` (millidegrees → °C)
+- If no readable sensor is found, the card shows **not available** (no crash)
+
+### Sampling and retention
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL sample file |
+| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Minimum seconds between samples |
+| `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of history to keep |
+
+Each sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp, CPU
+thread count, and raw jiffies (for delta-based CPU % on the next sample).
+
+### Operating thresholds
+
+Configurable via environment variables (sane defaults):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | WARN when current temp exceeds |
+| `DASHBOARD_TEMP_CRITICAL_CELSIUS` | `90` | FAIL when current temp exceeds |
+| `DASHBOARD_CPU_SAT_THRESHOLD` | `90` | CPU % threshold for saturation |
+| `DASHBOARD_CPU_SAT_WARN_MINUTES_1H` | `10` | WARN when above threshold this many minutes in last hour |
+| `DASHBOARD_CPU_SAT_CRITICAL_MINUTES_1H` | `30` | FAIL when above threshold this many minutes in last hour |
+
+### Deploy and verify on Raven
+
+```bash
+# From the Vulture repo root on Raven:
+./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
+```
+
+Verify samples are populating:
+
+```bash
+# Check JSONL history file (one line per sample, appended every ~60s on page loads):
+tail -3 ./data/raven_metrics_history.jsonl
+
+# Confirm Nest page shows CPU/temp fields:
+curl -s http://localhost:8088/ | grep -E 'CPU now|Temp now|CPU threads'
+
+# Container liveness (unchanged):
+curl -sf http://localhost:8088/health
+```
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -147,11 +218,20 @@ curl -I http://localhost:8088
 | `DASHBOARD_AUTO_REFRESH_SECONDS` | `60` | Meta refresh interval |
 | `DASHBOARD_HOST_ROOT` | `/host/root` | Host root bind for `df` |
 | `DASHBOARD_HOST_PROC` | `/host/proc` | Host proc bind |
+| `DASHBOARD_HOST_SYS` | `/host/root/sys` | Host sysfs for CPU temperature |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
+| `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
+| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Min seconds between metric samples |
+| `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of metric history to retain |
+| `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | CPU temp WARN threshold (°C) |
+| `DASHBOARD_TEMP_CRITICAL_CELSIUS` | `90` | CPU temp FAIL threshold (°C) |
+| `DASHBOARD_CPU_SAT_THRESHOLD` | `90` | CPU % saturation threshold |
+| `DASHBOARD_CPU_SAT_WARN_MINUTES_1H` | `10` | WARN minutes above threshold in 1h |
+| `DASHBOARD_CPU_SAT_CRITICAL_MINUTES_1H` | `30` | FAIL minutes above threshold in 1h |
 
 ## Local validation
 
 ```bash
 python3 -m compileall -q dashboard
-python3 -m pytest tests/test_dashboard.py tests/test_dashboard_storage.py -q
+python3 -m pytest tests/test_dashboard.py tests/test_raven_metrics_history.py tests/test_dashboard_storage.py -q
 ```

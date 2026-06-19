@@ -671,6 +671,121 @@ class TestNestCardComputation:
         card = _compute_raven_card(raven, [], docker)
         assert card["status"] == "WARN"
 
+    def test_raven_card_warn_when_temp_high(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "1 day",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        metrics = {
+            "temp_now": "82°C",
+            "temp_now_celsius": 82.0,
+            "cpu_above_90_minutes_1h_raw": 0.0,
+        }
+        card = _compute_raven_card(raven, [], docker, metrics)
+        assert card["status"] == "WARN"
+        assert "temperature" in card["headline"].lower()
+
+    def test_raven_card_fail_when_temp_critical(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "1 day",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        metrics = {
+            "temp_now": "92°C",
+            "temp_now_celsius": 92.0,
+            "cpu_above_90_minutes_1h_raw": 0.0,
+        }
+        card = _compute_raven_card(raven, [], docker, metrics)
+        assert card["status"] == "FAIL"
+        assert "critical" in card["headline"].lower()
+
+    def test_raven_card_warn_when_cpu_saturated(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "1 day",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        metrics = {
+            "cpu_above_90_minutes_1h": "12 min",
+            "cpu_above_90_minutes_1h_raw": 12.0,
+            "temp_now_celsius": 65.0,
+        }
+        card = _compute_raven_card(raven, [], docker, metrics)
+        assert card["status"] == "WARN"
+        assert "90%" in card["headline"]
+
+    def test_raven_card_fail_when_cpu_saturated_critical(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "1 day",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": None,
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=0, stopped_count=0)
+        metrics = {
+            "cpu_above_90_minutes_1h": "35 min",
+            "cpu_above_90_minutes_1h_raw": 35.0,
+            "temp_now_celsius": 65.0,
+        }
+        card = _compute_raven_card(raven, [], docker, metrics)
+        assert card["status"] == "FAIL"
+        assert "90%" in card["headline"]
+
+    def test_raven_card_includes_cpu_and_temp_fields(self):
+        from app import _compute_raven_card
+        from host_status import DockerSnapshot
+        raven = {
+            "hostname": "raven",
+            "uptime": "3 days",
+            "failed_units": [],
+            "internet_ok": True,
+            "load_average": "0.2 / 0.3 / 0.4 (1/5/15 min)",
+            "memory": None,
+            "warnings": [],
+        }
+        docker = DockerSnapshot(daemon_active=True, daemon_state="active", warning=None, running_count=2, stopped_count=0)
+        metrics = {
+            "cpu_now": "42%",
+            "cpu_above_90_minutes_1h": "0 min",
+            "temp_now": "61°C",
+            "temp_high_today": "74°C",
+            "cpu_threads": 4,
+            "load_pressure": "0.05",
+            "load_help": "Load is runnable work, not CPU %. Compare load to CPU threads.",
+        }
+        card = _compute_raven_card(raven, [], docker, metrics)
+        assert card["cpu_now"] == "42%"
+        assert card["temp_now"] == "61°C"
+        assert card["cpu_threads"] == 4
+
     def test_storage_card_ok_when_all_mounted_with_low_usage(self):
         from app import _compute_storage_card
         from storage_probe import StorageStatus
