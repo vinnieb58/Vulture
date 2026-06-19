@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from glances_client import GLANCES_UNAVAILABLE_LABEL, fetch_glances_snapshot, glances_enabled
 from host_cpu_metrics import (
     NOT_AVAILABLE_LABEL,
     compute_cpu_percent,
@@ -672,6 +673,46 @@ def record_sample_if_due(
     return True
 
 
+def _apply_glances_live(summary: dict[str, Any], glances: dict[str, Any]) -> dict[str, Any]:
+    """Overlay Glances live telemetry onto the metrics summary."""
+    cpu_total = glances.get("cpu_total_percent")
+    cpu_temp = glances.get("cpu_temp_celsius")
+    load_1 = glances.get("load_1")
+    cpu_threads = glances.get("cpu_threads")
+
+    if cpu_total is not None:
+        summary["cpu_now"] = format_cpu_percent(cpu_total)
+        summary["cpu_now_value"] = cpu_total
+    if cpu_temp is not None:
+        summary["temp_now"] = format_celsius(cpu_temp)
+        summary["temp_now_celsius"] = cpu_temp
+    if load_1 is not None:
+        summary["load_pressure"] = (
+            f"{compute_load_pressure(load_1, cpu_threads):.2f}"
+            if cpu_threads
+            else COLLECTING_LABEL
+        )
+        summary["load_pressure_value"] = compute_load_pressure(load_1, cpu_threads)
+    if cpu_threads is not None:
+        summary["cpu_threads"] = cpu_threads
+
+    summary.update(
+        {
+            "metrics_source": "glances",
+            "glances_available": True,
+            "glances_status": None,
+            "load_average": glances.get("load_average"),
+            "memory_live": glances.get("memory"),
+            "swap": glances.get("swap"),
+            "cpu_per_core": glances.get("cpu_per_core"),
+            "cpu_per_core_summary": glances.get("cpu_per_core_summary"),
+            "top_processes": glances.get("top_processes"),
+            "top_processes_summary": glances.get("top_processes_summary"),
+        }
+    )
+    return summary
+
+
 def get_metrics_summary(
     *,
     path: Path | None = None,
@@ -682,8 +723,24 @@ def get_metrics_summary(
     try:
         samples = prune_samples(read_history(path), now=ts_now)
         previous = _latest_sample(samples)
+        glances: dict[str, Any] | None = None
+        if glances_enabled():
+            glances = fetch_glances_snapshot()
+
+        if glances and glances.get("available"):
+            live = _collect_live_readings(previous=previous)
+            summary = compute_metrics_summary(
+                samples,
+                now=ts_now,
+                live_cpu_percent=glances.get("cpu_total_percent") or live["live_cpu_percent"],
+                live_cpu_temp=glances.get("cpu_temp_celsius") or live["live_cpu_temp"],
+                live_cpu_threads=glances.get("cpu_threads") or live["live_cpu_threads"],
+                live_load_1=glances.get("load_1") or live["live_load_1"],
+            )
+            return _apply_glances_live(summary, glances)
+
         live = _collect_live_readings(previous=previous)
-        return compute_metrics_summary(
+        summary = compute_metrics_summary(
             samples,
             now=ts_now,
             live_cpu_percent=live["live_cpu_percent"],
@@ -691,9 +748,29 @@ def get_metrics_summary(
             live_cpu_threads=live["live_cpu_threads"],
             live_load_1=live["live_load_1"],
         )
+        if glances_enabled():
+            summary.update(
+                {
+                    "metrics_source": "fallback",
+                    "glances_available": False,
+                    "glances_status": GLANCES_UNAVAILABLE_LABEL,
+                }
+            )
+        else:
+            summary["metrics_source"] = "local"
+        return summary
     except Exception:
         logger.warning("Failed to compute metrics summary", exc_info=True)
-        return compute_metrics_summary([], now=ts_now)
+        summary = compute_metrics_summary([], now=ts_now)
+        if glances_enabled():
+            summary.update(
+                {
+                    "metrics_source": "fallback",
+                    "glances_available": False,
+                    "glances_status": GLANCES_UNAVAILABLE_LABEL,
+                }
+            )
+        return summary
 
 
 def sample_and_get_peaks(

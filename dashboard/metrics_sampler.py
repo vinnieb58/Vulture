@@ -11,15 +11,17 @@ import logging
 import os
 import threading
 
+from glances_client import glances_enabled
 from raven_metrics_history import MIN_SAMPLE_INTERVAL_SECONDS, record_sample_if_due
 
 logger = logging.getLogger(__name__)
 
-SAMPLER_ENABLED = os.environ.get("DASHBOARD_METRICS_SAMPLER_ENABLED", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-)
+
+def is_sampler_enabled() -> bool:
+    explicit = os.environ.get("DASHBOARD_METRICS_SAMPLER_ENABLED")
+    if explicit is None:
+        return not glances_enabled()
+    return explicit.lower() not in ("0", "false", "no")
 
 
 class MetricsSampler:
@@ -74,7 +76,7 @@ _sampler: MetricsSampler | None = None
 def start_metrics_sampler() -> None:
     """Start the background sampler unless disabled by env."""
     global _sampler
-    if not SAMPLER_ENABLED:
+    if not is_sampler_enabled():
         logger.info("Background metrics sampler disabled by env")
         return
     if _sampler is None:

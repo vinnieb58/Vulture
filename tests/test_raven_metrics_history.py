@@ -36,6 +36,7 @@ from raven_metrics_history import (  # noqa: E402
 )
 from metrics_sampler import (  # noqa: E402
     MetricsSampler,
+    is_sampler_enabled,
     start_metrics_sampler,
     stop_metrics_sampler,
 )
@@ -357,7 +358,6 @@ class TestBackgroundSampler:
 
     def test_sampler_disabled_by_env(self, monkeypatch):
         monkeypatch.setenv("DASHBOARD_METRICS_SAMPLER_ENABLED", "0")
-        monkeypatch.setattr("metrics_sampler.SAMPLER_ENABLED", False)
         start_metrics_sampler()
         try:
             from metrics_sampler import is_metrics_sampler_running

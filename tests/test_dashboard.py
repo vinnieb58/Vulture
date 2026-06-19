@@ -143,6 +143,7 @@ class TestDashboardHTTP:
         db_path = tmp_path / "missing.db"
         log_path = tmp_path / "missing.log"
         monkeypatch.setenv("DASHBOARD_METRICS_SAMPLER_ENABLED", "0")
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "0")
         monkeypatch.setattr(dashboard_app, "DB_PATH", db_path)
         monkeypatch.setattr(dashboard_app, "LOG_PATH", log_path)
         monkeypatch.setattr("db_readers.DB_PATH", db_path)

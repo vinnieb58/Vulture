@@ -184,9 +184,10 @@ def _compute_raven_card(
         if memory.percent_used is not None:
             mem_str += f" ({memory.percent_used:.0f}%)"
 
-    load_average = raven.get("load_average")
+    load_average = metrics.get("load_average") or raven.get("load_average")
     cpu_threads = metrics.get("cpu_threads")
     load_pressure = metrics.get("load_pressure")
+    memory = metrics.get("memory_live") or mem_str
 
     return {
         "status": status,
@@ -203,7 +204,13 @@ def _compute_raven_card(
         "cpu_threads": cpu_threads,
         "load_pressure": load_pressure,
         "load_help": metrics.get("load_help"),
-        "memory": mem_str,
+        "memory": memory,
+        "swap": metrics.get("swap"),
+        "cpu_per_core_summary": metrics.get("cpu_per_core_summary"),
+        "top_processes_summary": metrics.get("top_processes_summary"),
+        "glances_status": metrics.get("glances_status"),
+        "glances_available": metrics.get("glances_available"),
+        "metrics_source": metrics.get("metrics_source"),
         "containers_running": docker.running_count,
         "peaks": metrics,
     }
