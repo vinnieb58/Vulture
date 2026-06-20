@@ -32,6 +32,18 @@ GLANCES_ENDPOINTS: tuple[str, ...] = (
     "/api/4/processlist",
 )
 
+GLANCES_DETAILS_EXTRA_ENDPOINTS: tuple[str, ...] = (
+    "/api/4/fs",
+    "/api/4/network",
+    "/api/4/uptime",
+    "/api/4/system",
+    "/api/4/docker",
+)
+
+GLANCES_DETAILS_ENDPOINTS: tuple[str, ...] = (
+    GLANCES_ENDPOINTS + GLANCES_DETAILS_EXTRA_ENDPOINTS
+)
+
 # Preferred CPU/package temperature labels from Glances sensors (lower = higher priority).
 _TEMP_LABEL_PRIORITY: tuple[str, ...] = (
     "x86_pkg_temp",
@@ -298,40 +310,180 @@ def _parse_cpu_temp(data: list[Any] | None) -> float | None:
     return candidates[0][1]
 
 
-def _parse_top_processes(data: list[Any] | None) -> list[dict[str, Any]]:
+def _parse_process_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    cpu_percent = _coerce_float(entry.get("cpu_percent"))
+    name = str(entry.get("name") or entry.get("username") or "unknown")
+    if cpu_percent is None:
+        return None
+    mem_percent = _coerce_float(entry.get("memory_percent"))
+    parsed: dict[str, Any] = {
+        "name": name,
+        "cpu_percent": cpu_percent,
+        "cpu_percent_display": format_cpu_percent(cpu_percent),
+    }
+    if mem_percent is not None:
+        parsed["memory_percent"] = mem_percent
+        parsed["memory_percent_display"] = f"{mem_percent:.1f}%"
+    pid = _coerce_int(entry.get("pid"))
+    if pid is not None:
+        parsed["pid"] = pid
+    return parsed
+
+
+def _parse_top_processes(
+    data: list[Any] | None,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         return []
     processes: list[dict[str, Any]] = []
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        cpu_percent = _coerce_float(entry.get("cpu_percent"))
-        name = str(entry.get("name") or entry.get("username") or "unknown")
-        if cpu_percent is None:
+        parsed = _parse_process_entry(entry)
+        if parsed is not None:
+            processes.append(parsed)
+    processes.sort(key=lambda item: item["cpu_percent"], reverse=True)
+    max_items = limit if limit is not None else max(1, TOP_PROCESS_LIMIT)
+    return processes[:max_items]
+
+
+def _parse_cpu_breakdown(data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    breakdown: dict[str, Any] = {}
+    for key in ("user", "system", "nice", "idle", "iowait", "irq", "softirq"):
+        value = _coerce_float(data.get(key))
+        if value is not None:
+            breakdown[key] = value
+            breakdown[f"{key}_display"] = format_cpu_percent(value)
+    return breakdown
+
+
+def _parse_all_sensors(data: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    sensors: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
             continue
-        processes.append(
+        sensor_type = str(entry.get("type") or "")
+        if sensor_type != "temperature_core":
+            continue
+        label = str(entry.get("label") or "sensor")
+        value = _coerce_float(entry.get("value"))
+        if value is None:
+            continue
+        sensors.append(
             {
-                "name": name,
-                "cpu_percent": cpu_percent,
-                "cpu_percent_display": format_cpu_percent(cpu_percent),
+                "label": label,
+                "value_celsius": value,
+                "value_display": format_celsius(value),
+                "priority": _temp_label_rank(label),
             }
         )
-    processes.sort(key=lambda item: item["cpu_percent"], reverse=True)
-    return processes[: max(1, TOP_PROCESS_LIMIT)]
+    sensors.sort(key=lambda item: (item["priority"], -item["value_celsius"]))
+    if sensors:
+        highest_value = max(item["value_celsius"] for item in sensors)
+        for item in sensors:
+            item["is_highest"] = item["value_celsius"] == highest_value
+    return sensors
 
 
-def fetch_glances_snapshot() -> dict[str, Any]:
-    """Fetch live host metrics from Glances API v4 within a shared time budget."""
-    started = time.monotonic()
-    payload = _fetch_all_json()
-    elapsed = time.monotonic() - started
-    if elapsed > _fetch_budget_seconds():
-        logger.info(
-            "Glances snapshot took %.2fs (budget %.1fs)",
-            elapsed,
-            _fetch_budget_seconds(),
+def _parse_filesystems(data: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    filesystems: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        mount = str(entry.get("mnt_point") or entry.get("mountpoint") or "")
+        device = str(entry.get("device_name") or entry.get("device") or "")
+        percent = _coerce_float(entry.get("percent"))
+        used_bytes = _coerce_int(entry.get("used"))
+        total_bytes = _coerce_int(entry.get("size") or entry.get("total"))
+        free_bytes = _coerce_int(entry.get("free"))
+        if not mount and not device:
+            continue
+        filesystems.append(
+            {
+                "device": device or "—",
+                "mount": mount or "—",
+                "percent": percent,
+                "percent_display": f"{percent:.0f}%" if percent is not None else None,
+                "used_display": _format_bytes(used_bytes),
+                "total_display": _format_bytes(total_bytes),
+                "free_display": _format_bytes(free_bytes),
+            }
         )
+    return filesystems
 
+
+def _parse_network_interfaces(data: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    interfaces: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("interface_name") or entry.get("name") or "")
+        if not name:
+            continue
+        recv_bytes = _coerce_int(entry.get("bytes_recv"))
+        sent_bytes = _coerce_int(entry.get("bytes_sent"))
+        speed = _coerce_int(entry.get("speed"))
+        interfaces.append(
+            {
+                "name": name,
+                "bytes_recv_display": _format_bytes(recv_bytes),
+                "bytes_sent_display": _format_bytes(sent_bytes),
+                "speed_mbps": speed,
+            }
+        )
+    return interfaces
+
+
+def _parse_uptime(data: Any | None) -> float | None:
+    if isinstance(data, dict):
+        return _coerce_float(data.get("seconds") or data.get("uptime"))
+    return _coerce_float(data)
+
+
+def _parse_system_info(data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    info: dict[str, Any] = {}
+    for key, target in (
+        ("hostname", "hostname"),
+        ("hr_name", "hardware"),
+        ("linux_distro", "os"),
+        ("os_version", "os_version"),
+        ("platform", "platform"),
+        ("kernel_version", "kernel"),
+    ):
+        value = data.get(key)
+        if value:
+            info[target] = str(value)
+    return info
+
+
+def _parse_docker_containers(data: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        return []
+    containers: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("Names") or "")
+        status = str(entry.get("status") or entry.get("State") or "")
+        if not name:
+            continue
+        containers.append({"name": name, "status": status or "unknown"})
+    return containers
+
+
+def _build_glances_snapshot(payload: dict[str, Any | None]) -> dict[str, Any]:
     cpu_data = payload.get("/api/4/cpu")
     load_data = payload.get("/api/4/load")
     mem_data = payload.get("/api/4/mem")
@@ -372,11 +524,18 @@ def fetch_glances_snapshot() -> dict[str, Any]:
             f"{item['name']} {item['cpu_percent_display']}" for item in top_processes
         )
 
+    mem_free = None
+    mem_cached = None
+    if isinstance(mem_data, dict):
+        mem_free = _coerce_int(mem_data.get("free"))
+        mem_cached = _coerce_int(mem_data.get("cached"))
+
     return {
         "available": available,
         "status_message": None if available else GLANCES_UNAVAILABLE_LABEL,
         "cpu_total_percent": cpu_total,
         "cpu_now": format_cpu_percent(cpu_total) if cpu_total is not None else None,
+        "cpu_breakdown": _parse_cpu_breakdown(cpu_data if isinstance(cpu_data, dict) else None),
         "cpu_per_core": per_core,
         "cpu_per_core_summary": per_core_summary,
         "load_1": load_1,
@@ -387,13 +546,70 @@ def fetch_glances_snapshot() -> dict[str, Any]:
         "memory_percent": mem_percent,
         "memory_used_bytes": mem_used,
         "memory_total_bytes": mem_total,
+        "memory_free_bytes": mem_free,
+        "memory_cached_bytes": mem_cached,
         "memory": _format_memory_line(mem_percent, mem_used, mem_total),
         "swap_percent": swap_percent,
         "swap_used_bytes": swap_used,
         "swap_total_bytes": swap_total,
+        "swap_free_bytes": (
+            max(0, swap_total - swap_used)
+            if swap_total is not None and swap_used is not None
+            else None
+        ),
         "swap": _format_swap_line(swap_percent, swap_used, swap_total),
         "cpu_temp_celsius": cpu_temp,
         "temp_now": format_celsius(cpu_temp) if cpu_temp is not None else NOT_AVAILABLE_LABEL,
+        "sensors": _parse_all_sensors(sensors_data if isinstance(sensors_data, list) else None),
         "top_processes": top_processes,
         "top_processes_summary": top_processes_summary,
+        "processes": _parse_top_processes(
+            process_data if isinstance(process_data, list) else None,
+            limit=20,
+        ),
+        "filesystems": _parse_filesystems(payload.get("/api/4/fs")),
+        "network": _parse_network_interfaces(payload.get("/api/4/network")),
+        "uptime_seconds": _parse_uptime(payload.get("/api/4/uptime")),
+        "system_info": _parse_system_info(
+            payload.get("/api/4/system") if isinstance(payload.get("/api/4/system"), dict) else None
+        ),
+        "docker_containers": _parse_docker_containers(payload.get("/api/4/docker")),
     }
+
+
+def fetch_glances_snapshot() -> dict[str, Any]:
+    """Fetch live host metrics from Glances API v4 within a shared time budget."""
+    started = time.monotonic()
+    payload = _fetch_all_json()
+    elapsed = time.monotonic() - started
+    if elapsed > _fetch_budget_seconds():
+        logger.info(
+            "Glances snapshot took %.2fs (budget %.1fs)",
+            elapsed,
+            _fetch_budget_seconds(),
+        )
+
+    snapshot = _build_glances_snapshot(payload)
+    elapsed = time.monotonic() - started
+    if elapsed > _fetch_budget_seconds():
+        logger.info(
+            "Glances snapshot took %.2fs (budget %.1fs)",
+            elapsed,
+            _fetch_budget_seconds(),
+        )
+    return snapshot
+
+
+def fetch_glances_details_snapshot() -> dict[str, Any]:
+    """Fetch extended Glances telemetry for the Raven Health details page."""
+    started = time.monotonic()
+    payload = _fetch_all_json(GLANCES_DETAILS_ENDPOINTS)
+    snapshot = _build_glances_snapshot(payload)
+    elapsed = time.monotonic() - started
+    if elapsed > _fetch_budget_seconds():
+        logger.info(
+            "Glances details snapshot took %.2fs (budget %.1fs)",
+            elapsed,
+            _fetch_budget_seconds(),
+        )
+    return snapshot

@@ -1,7 +1,7 @@
 # Nest v1 Dashboard — tablet-first household/Raven observability container.
 # Vulture runtime (bot/scheduler) stays on the host; this container observes host
 # state via carefully scoped read-only mounts.
-# Routes: / (Nest home)  /storage  /vulture  /advanced  /health
+# Routes: / (Nest home)  /storage  /vulture  /raven/health  /advanced  /health
 
 FROM python:3.12-slim
 
@@ -25,7 +25,7 @@ RUN apt-get update \
 COPY dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY dashboard/app.py dashboard/parsers.py dashboard/subprocess_util.py dashboard/host_commands.py dashboard/host_status.py dashboard/host_cpu_metrics.py dashboard/glances_client.py dashboard/db_readers.py dashboard/log_readers.py dashboard/kestrel_status.py dashboard/kestrel_formatting.py dashboard/kestrel_metrics.py dashboard/house_status.py dashboard/house_formatting.py dashboard/vulture_runtime.py dashboard/storage_probe.py dashboard/storage_config.py dashboard/raven_metrics_history.py dashboard/metrics_sampler.py dashboard/nest_history.py dashboard/nest_hvac_runtime.py dashboard/nest_hvac_formatting.py dashboard/nest_energy_correlation.py dashboard/nest_collection_health.py ./
+COPY dashboard/app.py dashboard/parsers.py dashboard/subprocess_util.py dashboard/host_commands.py dashboard/host_status.py dashboard/host_cpu_metrics.py dashboard/glances_client.py dashboard/raven_health_details.py dashboard/db_readers.py dashboard/log_readers.py dashboard/kestrel_status.py dashboard/kestrel_formatting.py dashboard/kestrel_metrics.py dashboard/house_status.py dashboard/house_formatting.py dashboard/vulture_runtime.py dashboard/storage_probe.py dashboard/storage_config.py dashboard/raven_metrics_history.py dashboard/metrics_sampler.py dashboard/nest_history.py dashboard/nest_hvac_runtime.py dashboard/nest_hvac_formatting.py dashboard/nest_energy_correlation.py dashboard/nest_collection_health.py ./
 COPY kestrel/nest_history.py ./nest_history.py
 COPY dashboard/templates/ templates/
 COPY dashboard/static/ static/
