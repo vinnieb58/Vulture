@@ -47,6 +47,8 @@ INSTALLED_SYSTEMD_GLOBS = (
     "canary-*.timer",
     "dashboard-*.service",
     "dashboard-*.timer",
+    "pelican-*.service",
+    "pelican-*.timer",
 )
 
 OPTIONAL_HOST_PATHS = (
