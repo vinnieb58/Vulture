@@ -242,11 +242,11 @@ class TestKrogerClient:
             ]
         )
         client = self._client(session)
-        products = client.search_products("eggs")
-        assert len(products) == 1
-        assert products[0].product_id == "123"
-        assert products[0].price == "2.99"
-        assert products[0].size == "12 ct"
+        search_result = client.search_products("eggs")
+        assert len(search_result.products) == 1
+        assert search_result.products[0].product_id == "123"
+        assert search_result.products[0].price == "2.99"
+        assert search_result.products[0].size == "12 ct"
 
     def test_format_price(self):
         p = KrogerProduct("1", "upc", "Eggs", price="3.5")
@@ -426,9 +426,9 @@ class TestSearch:
         )
         oauth = KrogerOAuthConfig(client_id="c", client_secret="s", location_id="01400441")
         client = KrogerClient(oauth, session=session)
-        products = run_search("eggs", client=client)
-        assert len(products) == 1
-        assert products[0].size == "12 ct"
+        search_result = run_search("eggs", client=client)
+        assert len(search_result.products) == 1
+        assert search_result.products[0].size == "12 ct"
 
     def test_product_to_alias(self):
         product = self._sample_products()[0]

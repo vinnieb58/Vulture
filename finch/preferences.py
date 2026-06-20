@@ -179,13 +179,14 @@ def prepare_change_preference(
     intent = intents[0]
     qty = max(1, int(intent.quantity))
     search_query = intent.normalized_name
-    results = search_products_for_choice(search_query, client=client)
+    results, total_count = search_products_for_choice(search_query, client=client)
     return build_needs_choice_outcome(
         requested_item=intent.raw_text,
         normalized_name=intent.normalized_name,
         search_query=search_query,
         quantity=qty,
-        results=results,
+        cached_results=results,
+        total_count=total_count,
         chat_key=chat_key,
         pending_db_path=pending_db_path,
     )

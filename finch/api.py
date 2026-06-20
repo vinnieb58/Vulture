@@ -18,6 +18,8 @@ from finch import __version__
 from finch.cart_choice import (
     NeedsChoiceOutcome,
     execute_pending_choice,
+    paginate_pending_back,
+    paginate_pending_more,
     prepare_add_or_needs_choice,
     process_add_list_with_choice,
     rerun_pending_search,
@@ -400,6 +402,39 @@ def create_app() -> FastAPI:
             "cleared": cleared,
             "message": "Cancelled pending product choice." if cleared else "No pending choice to cancel.",
         }
+
+    @application.post("/finch/cart/pending/more", dependencies=[Depends(require_finch_key)])
+    def finch_cart_pending_more(body: PendingCancelRequest) -> dict[str, Any]:
+        try:
+            require_live_cart()
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        client = load_kroger_client_from_env()
+        try:
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        outcome = paginate_pending_more(
+            chat_key=body.chat_key,
+            client=client,
+        )
+        if isinstance(outcome, NeedsChoiceOutcome):
+            return _needs_choice_response(outcome)
+        if not outcome.get("ok"):
+            raise HTTPException(status_code=422, detail=outcome.get("message", "pagination failed"))
+        return outcome
+
+    @application.post("/finch/cart/pending/back", dependencies=[Depends(require_finch_key)])
+    def finch_cart_pending_back(body: PendingCancelRequest) -> dict[str, Any]:
+        outcome = paginate_pending_back(chat_key=body.chat_key)
+        if isinstance(outcome, NeedsChoiceOutcome):
+            return _needs_choice_response(outcome)
+        if not outcome.get("ok"):
+            raise HTTPException(status_code=422, detail=outcome.get("message", "pagination failed"))
+        return outcome
 
     @application.get("/finch/cart/pending", dependencies=[Depends(require_finch_key)])
     def finch_cart_pending(chat_key: str) -> dict[str, Any]:

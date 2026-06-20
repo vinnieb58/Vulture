@@ -17,6 +17,7 @@ PENDING_SELECTION_DB_PATH = Path(
 )
 
 _DEFAULT_TTL_MINUTES = 15
+_DEFAULT_PAGE_SIZE = 10
 
 
 def _resolve_db_path(db_path: Path | None = None) -> Path:
@@ -35,6 +36,15 @@ def pending_ttl_minutes() -> int:
         return _DEFAULT_TTL_MINUTES
 
 
+def search_page_size() -> int:
+    raw = os.getenv("FINCH_SEARCH_RESULT_LIMIT", str(_DEFAULT_PAGE_SIZE))
+    try:
+        page_size = int(raw)
+    except ValueError:
+        page_size = _DEFAULT_PAGE_SIZE
+    return max(1, min(page_size, 50))
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pending_selections (
     chat_key TEXT PRIMARY KEY,
@@ -44,7 +54,11 @@ CREATE TABLE IF NOT EXISTS pending_selections (
     quantity INTEGER NOT NULL DEFAULT 1,
     results_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    cached_results_json TEXT,
+    page_offset INTEGER NOT NULL DEFAULT 0,
+    page_size INTEGER NOT NULL DEFAULT 10,
+    total_count INTEGER
 );
 """
 
@@ -87,9 +101,44 @@ class PendingSelection:
     normalized_name: str
     search_query: str
     quantity: int
-    results: list[PendingSearchResult]
+    cached_results: list[PendingSearchResult]
+    page_offset: int
+    page_size: int
+    total_count: int | None
     created_at: str
     expires_at: str
+
+    @property
+    def results(self) -> list[PendingSearchResult]:
+        start = self.page_offset * self.page_size
+        return self.cached_results[start : start + self.page_size]
+
+    @property
+    def page_start(self) -> int:
+        if not self.results:
+            return 0
+        return self.page_offset * self.page_size + 1
+
+    @property
+    def page_end(self) -> int:
+        if not self.results:
+            return 0
+        return self.page_start + len(self.results) - 1
+
+    @property
+    def has_back(self) -> bool:
+        return self.page_offset > 0
+
+    @property
+    def has_more(self) -> bool:
+        next_page_start = (self.page_offset + 1) * self.page_size
+        if next_page_start < len(self.cached_results):
+            return True
+        if self.total_count is not None:
+            return len(self.cached_results) < self.total_count
+        if not self.cached_results:
+            return False
+        return len(self.cached_results) % self.page_size == 0
 
     def to_dict(self) -> dict:
         return {
@@ -99,6 +148,14 @@ class PendingSelection:
             "search_query": self.search_query,
             "quantity": self.quantity,
             "results": [item.to_dict() for item in self.results],
+            "cached_count": len(self.cached_results),
+            "page_offset": self.page_offset,
+            "page_size": self.page_size,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "has_more": self.has_more,
+            "has_back": self.has_back,
+            "total_count": self.total_count,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
         }
@@ -115,10 +172,29 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(pending_selections)").fetchall()
+    }
+    if "cached_results_json" not in columns:
+        conn.execute("ALTER TABLE pending_selections ADD COLUMN cached_results_json TEXT")
+    if "page_offset" not in columns:
+        conn.execute(
+            "ALTER TABLE pending_selections ADD COLUMN page_offset INTEGER NOT NULL DEFAULT 0"
+        )
+    if "page_size" not in columns:
+        conn.execute(
+            "ALTER TABLE pending_selections ADD COLUMN page_size INTEGER NOT NULL DEFAULT 10"
+        )
+    if "total_count" not in columns:
+        conn.execute("ALTER TABLE pending_selections ADD COLUMN total_count INTEGER")
+
+
 def init_pending_selection_db(db_path: Path | None = None) -> None:
     path = _resolve_db_path(db_path)
     with _connect(path) as conn:
         conn.executescript(_SCHEMA)
+        _ensure_schema_columns(conn)
 
 
 def _utc_now() -> datetime:
@@ -134,15 +210,32 @@ def _parse_iso(ts: str) -> datetime:
 
 
 def _row_to_pending(row: sqlite3.Row) -> PendingSelection:
-    raw_results = json.loads(row["results_json"])
-    results = [PendingSearchResult.from_dict(item) for item in raw_results]
+    page_size = int(row["page_size"]) if row["page_size"] is not None else search_page_size()
+    page_offset = int(row["page_offset"]) if row["page_offset"] is not None else 0
+    total_count = row["total_count"]
+    if total_count is not None:
+        total_count = int(total_count)
+
+    cached_raw = row["cached_results_json"]
+    if cached_raw:
+        cached_results = [
+            PendingSearchResult.from_dict(item) for item in json.loads(cached_raw)
+        ]
+    else:
+        cached_results = [
+            PendingSearchResult.from_dict(item) for item in json.loads(row["results_json"])
+        ]
+
     return PendingSelection(
         chat_key=row["chat_key"],
         requested_item=row["requested_item"],
         normalized_name=row["normalized_name"],
         search_query=row["search_query"],
         quantity=int(row["quantity"]),
-        results=results,
+        cached_results=cached_results,
+        page_offset=page_offset,
+        page_size=page_size,
+        total_count=total_count,
         created_at=row["created_at"],
         expires_at=row["expires_at"],
     )
@@ -155,7 +248,10 @@ def save_pending_selection(
     normalized_name: str,
     search_query: str,
     quantity: int,
-    results: list[PendingSearchResult],
+    cached_results: list[PendingSearchResult],
+    page_offset: int = 0,
+    page_size: int | None = None,
+    total_count: int | None = None,
     db_path: Path | None = None,
     ttl_minutes: int | None = None,
 ) -> PendingSelection:
@@ -164,14 +260,20 @@ def save_pending_selection(
     created = _utc_now()
     ttl = ttl_minutes if ttl_minutes is not None else pending_ttl_minutes()
     expires = created + timedelta(minutes=ttl)
-    payload = json.dumps([item.to_dict() for item in results])
+    resolved_page_size = page_size if page_size is not None else search_page_size()
+    cached_payload = json.dumps([item.to_dict() for item in cached_results])
+    page_results = cached_results[
+        page_offset * resolved_page_size : page_offset * resolved_page_size + resolved_page_size
+    ]
+    results_payload = json.dumps([item.to_dict() for item in page_results])
     with _connect(path) as conn:
         conn.execute(
             """
             INSERT INTO pending_selections (
                 chat_key, requested_item, normalized_name, search_query,
-                quantity, results_json, created_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                quantity, results_json, created_at, expires_at,
+                cached_results_json, page_offset, page_size, total_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_key) DO UPDATE SET
                 requested_item=excluded.requested_item,
                 normalized_name=excluded.normalized_name,
@@ -179,7 +281,11 @@ def save_pending_selection(
                 quantity=excluded.quantity,
                 results_json=excluded.results_json,
                 created_at=excluded.created_at,
-                expires_at=excluded.expires_at
+                expires_at=excluded.expires_at,
+                cached_results_json=excluded.cached_results_json,
+                page_offset=excluded.page_offset,
+                page_size=excluded.page_size,
+                total_count=excluded.total_count
             """,
             (
                 chat_key,
@@ -187,9 +293,13 @@ def save_pending_selection(
                 normalize_preference_key(normalized_name),
                 search_query,
                 max(1, int(quantity)),
-                payload,
+                results_payload,
                 created.isoformat(),
                 expires.isoformat(),
+                cached_payload,
+                max(0, int(page_offset)),
+                resolved_page_size,
+                total_count,
             ),
         )
     return PendingSelection(
@@ -198,9 +308,36 @@ def save_pending_selection(
         normalized_name=normalize_preference_key(normalized_name),
         search_query=search_query,
         quantity=max(1, int(quantity)),
-        results=results,
+        cached_results=cached_results,
+        page_offset=max(0, int(page_offset)),
+        page_size=resolved_page_size,
+        total_count=total_count,
         created_at=created.isoformat(),
         expires_at=expires.isoformat(),
+    )
+
+
+def update_pending_selection_page(
+    pending: PendingSelection,
+    *,
+    page_offset: int,
+    cached_results: list[PendingSearchResult] | None = None,
+    total_count: int | None = None,
+    db_path: Path | None = None,
+    ttl_minutes: int | None = None,
+) -> PendingSelection:
+    return save_pending_selection(
+        chat_key=pending.chat_key,
+        requested_item=pending.requested_item,
+        normalized_name=pending.normalized_name,
+        search_query=pending.search_query,
+        quantity=pending.quantity,
+        cached_results=cached_results if cached_results is not None else pending.cached_results,
+        page_offset=page_offset,
+        page_size=pending.page_size,
+        total_count=total_count if total_count is not None else pending.total_count,
+        db_path=db_path,
+        ttl_minutes=ttl_minutes,
     )
 
 

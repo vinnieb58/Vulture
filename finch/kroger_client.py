@@ -125,6 +125,12 @@ def _safe_log_response(resp: requests.Response) -> str:
     return f"HTTP {resp.status_code} from {resp.url.split('?')[0]}"
 
 
+@dataclass(frozen=True)
+class ProductSearchResult:
+    products: list[KrogerProduct]
+    total_count: int | None = None
+
+
 def _parse_products_payload(data: dict[str, Any]) -> list[KrogerProduct]:
     products: list[KrogerProduct] = []
     for item in data.get("data", []):
@@ -151,6 +157,22 @@ def _parse_products_payload(data: dict[str, Any]) -> list[KrogerProduct]:
             )
         )
     return products
+
+
+def _parse_product_search_total(data: dict[str, Any]) -> int | None:
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    pagination = meta.get("pagination")
+    if not isinstance(pagination, dict):
+        return None
+    total = pagination.get("total")
+    if total is None:
+        return None
+    try:
+        return max(0, int(total))
+    except (TypeError, ValueError):
+        return None
 
 
 def has_pickup_department(departments: list[dict[str, Any]] | None) -> bool:
@@ -324,12 +346,15 @@ class KrogerClient:
         *,
         location_id: str | None = None,
         limit: int = 10,
-    ) -> list[KrogerProduct]:
+        start: int = 0,
+    ) -> ProductSearchResult:
         loc = location_id or self.oauth.location_id
         params: dict[str, str | int] = {
             "filter.term": term,
             "filter.limit": limit,
         }
+        if start > 0:
+            params["filter.start"] = start
         if loc:
             params["filter.locationId"] = loc
 
@@ -347,7 +372,11 @@ class KrogerClient:
         if resp.status_code >= 400:
             logger.warning("%s (product search)", _safe_log_response(resp))
             raise KrogerError(f"Product search failed: HTTP {resp.status_code}")
-        return _parse_products_payload(resp.json())
+        payload = resp.json()
+        return ProductSearchResult(
+            products=_parse_products_payload(payload),
+            total_count=_parse_product_search_total(payload),
+        )
 
     def search_locations(
         self,

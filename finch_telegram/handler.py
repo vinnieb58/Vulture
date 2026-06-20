@@ -33,7 +33,9 @@ def _handle_pending_reply(
     message: telegram_client.InboundTextMessage,
     command: commands.ChooseReplyCommand
     | commands.CancelPendingCommand
-    | commands.SearchPendingCommand,
+    | commands.SearchPendingCommand
+    | commands.MorePendingCommand
+    | commands.BackPendingCommand,
 ) -> str:
     chat_key = _chat_key(message)
     try:
@@ -45,6 +47,16 @@ def _handle_pending_reply(
             if payload.get("needs_choice"):
                 return commands.format_needs_choice_response(payload)
             return commands.format_error("Unexpected search response.")
+        if isinstance(command, commands.MorePendingCommand):
+            payload = finch_client.pending_more(chat_key)
+            if payload.get("needs_choice"):
+                return commands.format_needs_choice_response(payload)
+            return commands.format_error(str(payload.get("message") or "No more results."))
+        if isinstance(command, commands.BackPendingCommand):
+            payload = finch_client.pending_back(chat_key)
+            if payload.get("needs_choice"):
+                return commands.format_needs_choice_response(payload)
+            return commands.format_error(str(payload.get("message") or "Cannot go back."))
         payload = finch_client.cart_choose(
             chat_key,
             command.selection,

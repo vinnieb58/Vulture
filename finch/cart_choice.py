@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,19 +27,19 @@ from finch.pending_selection import (
     clear_pending_selection,
     get_pending_selection,
     save_pending_selection,
+    search_page_size,
+    update_pending_selection_page,
 )
 from finch.preference_norm import normalize_preference_key
 from finch.preview import resolve_intent
 from finch.search import product_to_alias, run_search
 
+logger = logging.getLogger(__name__)
+
 
 def search_result_limit() -> int:
-    raw = os.getenv("FINCH_SEARCH_RESULT_LIMIT", "5")
-    try:
-        limit = int(raw)
-    except ValueError:
-        limit = 5
-    return max(1, min(limit, 10))
+    """Page size for search-and-choose results (default 10)."""
+    return search_page_size()
 
 
 def product_to_pending_result(product: KrogerProduct) -> PendingSearchResult:
@@ -122,9 +122,17 @@ def search_products_for_choice(
     *,
     client: KrogerClient,
     limit: int | None = None,
-) -> list[PendingSearchResult]:
-    products = run_search(query, limit=limit or search_result_limit(), client=client)
-    return [product_to_pending_result(product) for product in products]
+    start: int = 0,
+) -> tuple[list[PendingSearchResult], int | None]:
+    page_size = limit or search_result_limit()
+    search_result = run_search(
+        query,
+        limit=page_size,
+        start=start,
+        client=client,
+    )
+    results = [product_to_pending_result(product) for product in search_result.products]
+    return results, search_result.total_count
 
 
 @dataclass(frozen=True)
@@ -135,6 +143,11 @@ class NeedsChoiceOutcome:
     quantity: int
     results: list[PendingSearchResult]
     pending: PendingSelection | None = None
+    page_start: int = 1
+    page_end: int = 0
+    has_more: bool = False
+    has_back: bool = False
+    total_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -145,10 +158,31 @@ class NeedsChoiceOutcome:
             "search_query": self.search_query,
             "quantity": self.quantity,
             "results": [item.to_dict() for item in self.results],
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "has_more": self.has_more,
+            "has_back": self.has_back,
+            "total_count": self.total_count,
         }
         if self.pending is not None:
             payload["pending"] = self.pending.to_dict()
         return payload
+
+
+def _needs_choice_from_pending(pending: PendingSelection) -> NeedsChoiceOutcome:
+    return NeedsChoiceOutcome(
+        requested_item=pending.requested_item,
+        normalized_name=pending.normalized_name,
+        search_query=pending.search_query,
+        quantity=pending.quantity,
+        results=pending.results,
+        pending=pending,
+        page_start=pending.page_start,
+        page_end=pending.page_end,
+        has_more=pending.has_more,
+        has_back=pending.has_back,
+        total_count=pending.total_count,
+    )
 
 
 def build_needs_choice_outcome(
@@ -157,11 +191,15 @@ def build_needs_choice_outcome(
     normalized_name: str,
     search_query: str,
     quantity: int,
-    results: list[PendingSearchResult],
+    cached_results: list[PendingSearchResult],
+    total_count: int | None = None,
+    page_offset: int = 0,
+    page_size: int | None = None,
     chat_key: str | None = None,
     pending_db_path: Path | None = None,
 ) -> NeedsChoiceOutcome:
     pending = None
+    resolved_page_size = page_size or search_result_limit()
     if chat_key:
         pending = save_pending_selection(
             chat_key=chat_key,
@@ -169,16 +207,40 @@ def build_needs_choice_outcome(
             normalized_name=normalized_name,
             search_query=search_query,
             quantity=quantity,
-            results=results,
+            cached_results=cached_results,
+            page_offset=page_offset,
+            page_size=resolved_page_size,
+            total_count=total_count,
             db_path=pending_db_path,
         )
+    page_results = cached_results[
+        page_offset * resolved_page_size : page_offset * resolved_page_size + resolved_page_size
+    ]
+    page_start = page_offset * resolved_page_size + 1 if page_results else 0
+    page_end = page_start + len(page_results) - 1 if page_results else 0
+    has_more = False
+    has_back = page_offset > 0
+    if page_results:
+        next_page_start = (page_offset + 1) * resolved_page_size
+        if next_page_start < len(cached_results):
+            has_more = True
+        elif total_count is not None:
+            has_more = len(cached_results) < total_count
+        else:
+            has_more = len(cached_results) % resolved_page_size == 0
+
     return NeedsChoiceOutcome(
         requested_item=requested_item,
         normalized_name=normalized_name,
         search_query=search_query,
         quantity=quantity,
-        results=results,
+        results=page_results,
         pending=pending,
+        page_start=page_start,
+        page_end=page_end,
+        has_more=has_more,
+        has_back=has_back,
+        total_count=total_count,
     )
 
 
@@ -204,13 +266,14 @@ def prepare_add_or_needs_choice(
         return resolve_cart_item(parsed_text, quantity=quantity, db_path=db_path)
 
     requested_item, normalized_name, search_query, qty = needs
-    results = search_products_for_choice(search_query, client=client)
+    results, total_count = search_products_for_choice(search_query, client=client)
     return build_needs_choice_outcome(
         requested_item=requested_item,
         normalized_name=normalized_name,
         search_query=search_query,
         quantity=qty,
-        results=results,
+        cached_results=results,
+        total_count=total_count,
         chat_key=chat_key,
         pending_db_path=pending_db_path,
     )
@@ -267,13 +330,17 @@ def execute_pending_choice(
             "message": "No pending product choice. Try add <item> first.",
         }
 
-    if selection < 1 or selection > len(pending.results):
+    if selection < 1 or selection > len(pending.cached_results):
+        visible = f"{pending.page_start}-{pending.page_end}" if pending.results else "none"
         return {
             "ok": False,
-            "message": f"Pick a number between 1 and {len(pending.results)}.",
+            "message": (
+                f"Pick a number between {pending.page_start} and {pending.page_end} "
+                f"(showing {visible})."
+            ),
         }
 
-    result = pending.results[selection - 1]
+    result = pending.cached_results[selection - 1]
     try:
         attempt = attempt_from_pending_result(pending, result)
     except CartResolveError as exc:
@@ -366,7 +433,7 @@ def process_add_list_with_choice(
         )
         if needs is not None:
             requested_item, normalized_name, search_query, qty = needs
-            results = search_products_for_choice(search_query, client=client)
+            results, total_count = search_products_for_choice(search_query, client=client)
             return AddListProgress(
                 added_outcomes=added_outcomes,
                 needs_choice=build_needs_choice_outcome(
@@ -374,7 +441,8 @@ def process_add_list_with_choice(
                     normalized_name=normalized_name,
                     search_query=search_query,
                     quantity=qty,
-                    results=results,
+                    cached_results=results,
+                    total_count=total_count,
                     chat_key=chat_key,
                     pending_db_path=pending_db_path,
                 ),
@@ -407,13 +475,122 @@ def rerun_pending_search(
     if not cleaned:
         return {"ok": False, "message": "Search query cannot be empty."}
 
-    results = search_products_for_choice(cleaned, client=client)
+    results, total_count = search_products_for_choice(cleaned, client=client)
     return build_needs_choice_outcome(
         requested_item=pending.requested_item,
         normalized_name=pending.normalized_name,
         search_query=cleaned,
         quantity=pending.quantity,
-        results=results,
+        cached_results=results,
+        total_count=total_count,
+        page_offset=0,
+        page_size=pending.page_size,
         chat_key=chat_key,
         pending_db_path=pending_db_path,
     )
+
+
+def paginate_pending_more(
+    *,
+    chat_key: str,
+    client: KrogerClient,
+    pending_db_path: Path | None = None,
+) -> NeedsChoiceOutcome | dict[str, Any]:
+    pending = get_pending_selection(chat_key, db_path=pending_db_path)
+    if not pending:
+        return {
+            "ok": False,
+            "message": "No pending product choice. Try add <item> first.",
+        }
+
+    if not pending.has_more:
+        return {
+            "ok": False,
+            "message": "No more search results.",
+        }
+
+    next_page_offset = pending.page_offset + 1
+    next_page_start = next_page_offset * pending.page_size
+    cached_results = list(pending.cached_results)
+    total_count = pending.total_count
+
+    if next_page_start >= len(cached_results):
+        logger.info(
+            "Fetching more Kroger search results chat_key=%s query=%r start=%d limit=%d",
+            chat_key,
+            pending.search_query,
+            len(cached_results),
+            pending.page_size,
+        )
+        new_results, fetched_total = search_products_for_choice(
+            pending.search_query,
+            client=client,
+            limit=pending.page_size,
+            start=len(cached_results),
+        )
+        if fetched_total is not None:
+            total_count = fetched_total
+        if not new_results:
+            return {
+                "ok": False,
+                "message": "No more search results.",
+            }
+        cached_results.extend(new_results)
+    else:
+        logger.info(
+            "Showing cached Kroger search page chat_key=%s query=%r page_offset=%d",
+            chat_key,
+            pending.search_query,
+            next_page_offset,
+        )
+
+    updated = update_pending_selection_page(
+        pending,
+        page_offset=next_page_offset,
+        cached_results=cached_results,
+        total_count=total_count,
+        db_path=pending_db_path,
+    )
+    logger.info(
+        "Advanced search pagination chat_key=%s query=%r page=%d-%d cached=%d total=%s",
+        chat_key,
+        pending.search_query,
+        updated.page_start,
+        updated.page_end,
+        len(updated.cached_results),
+        updated.total_count,
+    )
+    return _needs_choice_from_pending(updated)
+
+
+def paginate_pending_back(
+    *,
+    chat_key: str,
+    pending_db_path: Path | None = None,
+) -> NeedsChoiceOutcome | dict[str, Any]:
+    pending = get_pending_selection(chat_key, db_path=pending_db_path)
+    if not pending:
+        return {
+            "ok": False,
+            "message": "No pending product choice. Try add <item> first.",
+        }
+
+    if not pending.has_back:
+        return {
+            "ok": False,
+            "message": "Already on the first page of results.",
+        }
+
+    updated = update_pending_selection_page(
+        pending,
+        page_offset=pending.page_offset - 1,
+        db_path=pending_db_path,
+    )
+    logger.info(
+        "Moved back in search pagination chat_key=%s query=%r page=%d-%d",
+        chat_key,
+        pending.search_query,
+        updated.page_start,
+        updated.page_end,
+    )
+    return _needs_choice_from_pending(updated)
