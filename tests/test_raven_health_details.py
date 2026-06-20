@@ -195,9 +195,32 @@ class TestRavenHealthDetailsPage:
         assert response.status_code == 200
         text = response.text
         assert "Raven Health Details (Glances)" in text
-        assert "Glances" in text
         assert "Top CPU Processes" in text
         assert "python3" in text
+        for marker in (
+            "data-gauge",
+            "data-chart",
+            "donut-gauge",
+            "progress-bar",
+            "CPU Usage",
+            "Load Average",
+            "Memory Usage",
+            "Disk Usage",
+            "Network",
+        ):
+            assert marker in text
+
+    def test_details_page_contains_chart_and_gauge_containers(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/raven/health")
+        text = response.text
+        assert 'id="gauge-cpu"' in text
+        assert 'id="chart-cpu-1h"' in text
+        assert 'class="progress-list"' in text
+        assert 'data-chart="cpu-history"' in text
 
     def test_details_page_shows_unavailable_banner(self, client, monkeypatch):
         monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
@@ -210,6 +233,8 @@ class TestRavenHealthDetailsPage:
                     response = client.get("/raven/health")
         assert response.status_code == 200
         assert "Glances unavailable" in response.text
+        assert 'id="gauge-cpu"' in response.text
+        assert 'id="chart-cpu-1h"' in response.text
 
 
 class TestRavenHealthGlancesAPI:
@@ -225,6 +250,11 @@ class TestRavenHealthGlancesAPI:
         assert data["overview"]["cpu"]["total_display"] == "42%"
         assert data["processes"][0]["name"] == "python3"
         assert data["disks"][0]["mount"] == "/"
+        assert "cpu_history_1h" in data["history"]
+        assert "load_history_1h" in data["history"]
+        assert "memory_history_1h" in data["history"]
+        assert "network_history_1h" in data["history"]
+        assert "containers" in data
 
     def test_api_unavailable_status(self, client, monkeypatch):
         monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
@@ -237,6 +267,41 @@ class TestRavenHealthGlancesAPI:
         data = response.json()
         assert data["status"] == "unavailable"
         assert data["glances_available"] is False
+
+    def test_api_includes_history_arrays_when_samples_exist(self, client, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from raven_metrics_history import MetricsSample
+
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        history_path = tmp_path / "history.jsonl"
+        now = datetime.now(timezone.utc)
+        sample = MetricsSample(
+            timestamp=now - timedelta(minutes=10),
+            load_1=1.2,
+            load_5=1.0,
+            load_15=0.8,
+            memory_used_percent=55.0,
+            memory_used_bytes=4_000_000_000,
+            memory_total_bytes=8_000_000_000,
+            cpu_percent=33.0,
+            cpu_temp_celsius=60.0,
+            cpu_total_jiffies=1000,
+            cpu_idle_jiffies=700,
+            cpu_threads=4,
+        )
+        history_path.write_text(sample.to_json_line() + "\n", encoding="utf-8")
+        monkeypatch.setenv("DASHBOARD_METRICS_HISTORY_PATH", str(history_path))
+        monkeypatch.setattr("raven_metrics_history.HISTORY_PATH", history_path)
+
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/api/raven/health/glances")
+        data = response.json()
+        assert len(data["history"]["cpu_history_1h"]) == 1
+        assert len(data["history"]["load_history_1h"]) == 1
+        assert len(data["history"]["memory_history_1h"]) == 1
 
 
 class TestNormalizeGlancesDetails:

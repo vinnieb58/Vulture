@@ -75,10 +75,16 @@ def _history_series_1h(
                     "value": round(sample.memory_used_percent, 1),
                 }
             )
+    network_series: list[dict[str, Any]] = []
     return {
         "cpu_1h": cpu_series,
         "load_1h": load_series,
         "memory_1h": memory_series,
+        "network_1h": network_series,
+        "cpu_history_1h": cpu_series,
+        "load_history_1h": load_series,
+        "memory_history_1h": memory_series,
+        "network_history_1h": network_series,
     }
 
 
@@ -88,13 +94,21 @@ def _memory_section(glances: dict[str, Any]) -> dict[str, Any]:
     total = glances.get("memory_total_bytes")
     free = glances.get("memory_free_bytes")
     cached = glances.get("memory_cached_bytes")
+    cached_percent = None
+    if percent is not None and cached is not None and total:
+        cached_percent = min(100.0, max(0.0, 100.0 * cached / total))
+    free_percent = None
+    if percent is not None and free is not None and total:
+        free_percent = min(100.0, max(0.0, 100.0 * free / total))
     return {
         "percent": percent,
         "percent_display": f"{percent:.0f}%" if percent is not None else None,
         "used_display": _format_bytes(used),
         "total_display": _format_bytes(total),
         "free_display": _format_bytes(free),
+        "free_percent": free_percent,
         "cached_display": _format_bytes(cached),
+        "cached_percent": cached_percent,
         "summary": glances.get("memory"),
     }
 
@@ -138,6 +152,32 @@ def _system_section(
     }
 
 
+def _containers_section(
+    *,
+    docker_running: int,
+    docker_containers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total = len(docker_containers) if docker_containers else docker_running
+    running = docker_running
+    if docker_containers:
+        running = sum(
+            1
+            for item in docker_containers
+            if "run" in str(item.get("status", "")).lower()
+        )
+        total = len(docker_containers)
+    percent = None
+    if total > 0:
+        percent = round(100.0 * running / total, 1)
+    return {
+        "running": running,
+        "total": total,
+        "percent": percent,
+        "percent_display": f"{percent:.0f}%" if percent is not None else None,
+        "items": docker_containers,
+    }
+
+
 def normalize_glances_details(
     glances: dict[str, Any],
     *,
@@ -153,6 +193,10 @@ def normalize_glances_details(
     cpu_breakdown = glances.get("cpu_breakdown") or {}
     top_processes = glances.get("top_processes") or glances.get("processes") or []
     overview_processes = top_processes[:5]
+    containers = _containers_section(
+        docker_running=docker_running,
+        docker_containers=glances.get("docker_containers") or [],
+    )
 
     return {
         "status": status,
@@ -191,6 +235,9 @@ def normalize_glances_details(
                 "peak_memory_24h": metrics.get("peak_memory_24h"),
                 "temp_high_24h": metrics.get("temp_high_24h"),
             },
+            "containers": containers,
+            "disks": glances.get("filesystems") or [],
+            "network": glances.get("network") or [],
         },
         "cpu": {
             "total_display": glances.get("cpu_now"),
@@ -211,6 +258,7 @@ def normalize_glances_details(
             docker_running=docker_running,
         ),
         "docker": glances.get("docker_containers") or [],
+        "containers": containers,
         "history": history,
         "fallback": {
             "cpu_now": metrics.get("cpu_now"),
