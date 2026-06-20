@@ -18,8 +18,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from pelican.config import SCRIPT_VERSION  # noqa: E402
 from pelican.inventory import (  # noqa: E402
+    InventoryResult,
     classify_required_paths,
     copy_optional_file,
+    copy_repo_systemd_defs,
     discover_recovery_docs,
     should_exclude_repo_path,
 )
@@ -171,6 +173,25 @@ class TestRequiredOptionalHandling:
         assert should_exclude_repo_path(Path("logs/bot.log"))
         assert should_exclude_repo_path(Path(".env"))
         assert not should_exclude_repo_path(Path("engine/database.py"))
+
+    def test_copy_repo_systemd_defs_creates_nested_dest_dir(self, tmp_path):
+        repo = tmp_path / "repo"
+        units = repo / "deploy" / "systemd"
+        units.mkdir(parents=True)
+        (units / "finch-api.service").write_text("[Service]\nType=simple\n", encoding="utf-8")
+        (units / "vulture-bot.service").write_text("[Service]\nType=simple\n", encoding="utf-8")
+
+        dest_dir = tmp_path / "bundle" / "config" / "systemd-repo"
+        assert not dest_dir.exists()
+
+        result = InventoryResult()
+        copy_repo_systemd_defs(repo, dest_dir, result)
+
+        assert dest_dir.is_dir()
+        assert (dest_dir / "finch-api.service").is_file()
+        assert (dest_dir / "vulture-bot.service").is_file()
+        assert len(result.included) == 2
+        assert result.missing_optional == []
 
 
 class TestSecretRedaction:

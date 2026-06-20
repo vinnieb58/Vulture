@@ -104,17 +104,33 @@ def classify_required_paths(
     return result
 
 
+def ensure_parent_directory(path: Path) -> None:
+    """Create all parent directories for a destination file path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_directory(path: Path) -> None:
+    """Create a destination directory and any missing parents."""
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def copy_file_to_dest(source: Path, dest: Path, result: InventoryResult) -> None:
+    """Copy a file after ensuring nested destination directories exist."""
+    ensure_parent_directory(dest)
+    shutil.copy2(source, dest)
+    result.included.append(str(dest))
+
+
 def copy_optional_file(source: Path, dest: Path, result: InventoryResult) -> None:
     label = str(source)
     if not source.is_file():
         result.missing_optional.append(label)
         return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, dest)
-    result.included.append(str(dest))
+    copy_file_to_dest(source, dest, result)
 
 
 def copy_repo_docker_compose(repo_root: Path, dest_dir: Path, result: InventoryResult) -> None:
+    ensure_directory(dest_dir)
     for name in REPO_DOCKER_COMPOSE_FILES:
         source = repo_root / name
         dest = dest_dir / name
@@ -126,11 +142,10 @@ def copy_repo_systemd_defs(repo_root: Path, dest_dir: Path, result: InventoryRes
     if not src_dir.is_dir():
         result.missing_optional.append(str(src_dir))
         return
+    ensure_directory(dest_dir)
     for unit in sorted(src_dir.iterdir()):
         if unit.is_file():
-            dest = dest_dir / unit.name
-            shutil.copy2(unit, dest)
-            result.included.append(str(dest))
+            copy_file_to_dest(unit, dest_dir / unit.name, result)
 
 
 def copy_recovery_docs(repo_root: Path, dest_dir: Path, result: InventoryResult) -> None:
@@ -138,15 +153,14 @@ def copy_recovery_docs(repo_root: Path, dest_dir: Path, result: InventoryResult)
     if not docs:
         result.missing_optional.append("recovery documentation (none discovered)")
         return
+    ensure_directory(dest_dir)
     for doc in docs:
         rel = doc.relative_to(repo_root)
-        dest = dest_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(doc, dest)
-        result.included.append(str(dest))
+        copy_file_to_dest(doc, dest_dir / rel, result)
 
 
 def copy_optional_host_config(dest_root: Path, result: InventoryResult) -> None:
+    ensure_directory(dest_root / "host")
     for source in OPTIONAL_HOST_PATHS:
         dest = dest_root / "host" / source.relative_to(source.anchor)
         copy_optional_file(source, dest, result)
@@ -155,14 +169,16 @@ def copy_optional_host_config(dest_root: Path, result: InventoryResult) -> None:
     installed = discover_installed_systemd_units()
     if not installed:
         result.missing_optional.append(f"{OPTIONAL_SYSTEMD_DIR}/<aviary-units>")
+    else:
+        ensure_directory(systemd_dest)
     for unit in installed:
-        dest = systemd_dest / unit.name
-        copy_optional_file(unit, dest, result)
+        copy_optional_file(unit, systemd_dest / unit.name, result)
 
     samba_dest = dest_root / "samba"
     samba_files = discover_samba_configs()
     if not samba_files:
         result.missing_optional.append("/etc/samba/smb.conf")
+    else:
+        ensure_directory(samba_dest)
     for conf in samba_files:
-        dest = samba_dest / conf.name
-        copy_optional_file(conf, dest, result)
+        copy_optional_file(conf, samba_dest / conf.name, result)
