@@ -10,7 +10,12 @@ from pathlib import Path
 from finch.aliases import ensure_seeded, get_alias, upsert_alias
 from finch.env_check import search_ready
 from finch.env_util import load_env
-from finch.kroger_client import KrogerError, KrogerProduct, load_kroger_client_from_env
+from finch.kroger_client import (
+    KrogerError,
+    KrogerProduct,
+    ProductSearchResult,
+    load_kroger_client_from_env,
+)
 from finch.models import AliasEntry
 from finch.preference_norm import normalize_preference_key
 
@@ -96,8 +101,9 @@ def run_search(
     term: str,
     *,
     limit: int = 10,
+    start: int = 0,
     client=None,
-) -> list[KrogerProduct]:
+) -> ProductSearchResult:
     if client is None:
         if not search_ready():
             raise RuntimeError(
@@ -105,7 +111,7 @@ def run_search(
                 "Set FINCH_KROGER_CLIENT_ID and FINCH_KROGER_CLIENT_SECRET in .env"
             )
         client = load_kroger_client_from_env()
-    return client.search_products(term, limit=limit)
+    return client.search_products(term, limit=limit, start=start)
 
 
 def print_search_results(
@@ -169,17 +175,23 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         client = load_kroger_client_from_env() if search_ready() else None
-        products = run_search(args.term, limit=args.limit, client=client)
+        search_result = run_search(args.term, limit=args.limit, client=client)
     except (RuntimeError, KrogerError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     location_id = client.oauth.location_id if client else None
-    print_search_results(args.term, products, location_id=location_id, as_json=args.json)
+    print_search_results(
+        args.term,
+        search_result.products,
+        location_id=location_id,
+        as_json=args.json,
+    )
 
     if not args.save_alias:
         return 0
 
+    products = search_result.products
     if not products:
         print("No results to save.", file=sys.stderr)
         return 1

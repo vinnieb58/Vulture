@@ -84,6 +84,16 @@ class SearchPendingCommand:
 
 
 @dataclass(frozen=True)
+class MorePendingCommand:
+    kind: str = "more-pending"
+
+
+@dataclass(frozen=True)
+class BackPendingCommand:
+    kind: str = "back-pending"
+
+
+@dataclass(frozen=True)
 class PrefsCommand:
     kind: str = "prefs"
 
@@ -126,6 +136,8 @@ Command = (
     | ChooseReplyCommand
     | CancelPendingCommand
     | SearchPendingCommand
+    | MorePendingCommand
+    | BackPendingCommand
     | PrefsCommand
     | PrefCommand
     | ForgetPrefCommand
@@ -137,6 +149,8 @@ _PENDING_PREFER_RE = re.compile(r"^prefer\s+(\d+)\s*$", re.IGNORECASE)
 _PENDING_CHOOSE_RE = re.compile(r"^choose\s+(\d+)\s*$", re.IGNORECASE)
 _PENDING_DIGIT_RE = re.compile(r"^(\d+)\s*$")
 _PENDING_CANCEL_RE = re.compile(r"^(nvm|cancel)\s*$", re.IGNORECASE)
+_PENDING_MORE_RE = re.compile(r"^more\s*$", re.IGNORECASE)
+_PENDING_BACK_RE = re.compile(r"^back\s*$", re.IGNORECASE)
 _PENDING_SEARCH_RE = re.compile(r"^search\s+(.+)$", re.IGNORECASE)
 _ALIAS_PREF_RE = re.compile(r"^alias\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
 _REMOVE_PREF_RE = re.compile(r"^remove\s+preference\s+(.+)$", re.IGNORECASE)
@@ -150,9 +164,12 @@ HELP_TEXT = """Finch grocery commands:
 - help preferences
 
 If Finch asks you to choose:
-- reply 1 to add once
+- reply 1-10 to add once (or the shown range after more)
 - reply prefer 1 to remember it
-- reply nvm to cancel
+- reply more to see more results
+- reply back to go to the previous page
+- reply search <query> to refine
+- reply nvm or cancel to cancel
 
 Finch tracks what it added this trip. Kroger is still the live cart."""
 
@@ -178,7 +195,16 @@ def normalize_message(message: str) -> str:
     return text
 
 
-def parse_pending_reply(message: str) -> ChooseReplyCommand | CancelPendingCommand | SearchPendingCommand | None:
+def parse_pending_reply(
+    message: str,
+) -> (
+    ChooseReplyCommand
+    | CancelPendingCommand
+    | SearchPendingCommand
+    | MorePendingCommand
+    | BackPendingCommand
+    | None
+):
     text = normalize_message(message)
     if not text:
         return None
@@ -193,6 +219,10 @@ def parse_pending_reply(message: str) -> ChooseReplyCommand | CancelPendingComma
         return ChooseReplyCommand(selection=int(match.group(1)), prefer=False)
     if _PENDING_CANCEL_RE.match(text):
         return CancelPendingCommand()
+    if _PENDING_MORE_RE.match(text):
+        return MorePendingCommand()
+    if _PENDING_BACK_RE.match(text):
+        return BackPendingCommand()
     match = _PENDING_SEARCH_RE.match(text)
     if match:
         query = match.group(1).strip()
@@ -299,13 +329,30 @@ def format_cart_blocked(detail: str | None = None) -> str:
 
 def format_needs_choice_response(payload: dict[str, Any]) -> str:
     requested = payload.get("requested_item") or payload.get("normalized_name") or "item"
+    search_query = payload.get("search_query") or requested
     results = payload.get("results") or []
-    lines = [f'Needs choice for "{requested}":', ""]
+    page_start = int(payload.get("page_start") or 1)
+    page_end = int(payload.get("page_end") or len(results))
+    total_count = payload.get("total_count")
+    has_more = bool(payload.get("has_more"))
+    has_back = bool(payload.get("has_back"))
+
     if not results:
-        lines.append("No Kroger results found. Reply search <query> to try again, or nvm to cancel.")
+        lines = [f'Needs choice for "{requested}":', ""]
+        lines.append("No Kroger results found. Reply search <query> to try again, or cancel.")
         return "\n".join(lines)
 
-    for index, result in enumerate(results, start=1):
+    if total_count is not None:
+        lines = [
+            f'Found {total_count} matches for "{search_query}":',
+            "",
+            f"Showing {page_start}-{page_end} of {total_count}.",
+            "",
+        ]
+    else:
+        lines = [f'Found multiple matches for "{requested}":', ""]
+
+    for index, result in enumerate(results, start=page_start):
         name = result.get("description") or "item"
         size = result.get("size")
         price = result.get("price")
@@ -318,7 +365,18 @@ def format_needs_choice_response(payload: dict[str, Any]) -> str:
         lines.append(line)
 
     lines.append("")
-    lines.append("Reply 1 to add once, prefer 1 to remember it, search <query> to refine, or nvm to cancel.")
+    lines.append("Reply with:")
+    if page_start == page_end:
+        lines.append(f"- {page_start} to select")
+    else:
+        lines.append(f"- {page_start}-{page_end} to select")
+    if has_more:
+        lines.append("- more")
+    if has_back:
+        lines.append("- back")
+    lines.append("- prefer <number> to remember it")
+    lines.append("- search <query> to refine")
+    lines.append("- cancel")
     return "\n".join(lines)
 
 

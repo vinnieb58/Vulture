@@ -64,7 +64,7 @@ def api_env(monkeypatch, alias_db: Path, pending_db: Path, ledger_db: Path, tmp_
     monkeypatch.setenv("FINCH_PENDING_SELECTION_DB_PATH", str(pending_db))
     monkeypatch.setenv("FINCH_TRIP_LEDGER_DB_PATH", str(ledger_db))
     monkeypatch.setenv("FINCH_ACTIVITY_DB_PATH", str(tmp_path / "finch_activity.db"))
-    monkeypatch.setenv("FINCH_SEARCH_RESULT_LIMIT", "5")
+    monkeypatch.setenv("FINCH_SEARCH_RESULT_LIMIT", "10")
 
 
 @pytest.fixture
@@ -103,13 +103,32 @@ def _mock_kroger_client():
     return mock_client
 
 
-def _patch_search(results: list[PendingSearchResult] | None = None):
+def _tortilla_results(count: int = 25) -> list[PendingSearchResult]:
+    return [
+        PendingSearchResult(
+            product_id=f"tortilla-{index}",
+            upc=f"0001111{index:06d}",
+            description=f"Tortilla option {index}",
+            size=f"{index} ct",
+            price=f"${index}.99",
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def _patch_search(
+    results: list[PendingSearchResult] | None = None,
+    *,
+    total_count: int | None = None,
+):
     items = results if results is not None else BAGEL_RESULTS
+    resolved_total = total_count if total_count is not None else len(items)
 
-    def fake_search(query: str, *, client=None, limit: int = 5):
-        from finch.kroger_client import KrogerProduct
+    def fake_search(query: str, *, client=None, limit: int = 10, start: int = 0):
+        from finch.kroger_client import KrogerProduct, ProductSearchResult
 
-        return [
+        page = items[start : start + limit]
+        products = [
             KrogerProduct(
                 product_id=item.product_id,
                 upc=item.upc,
@@ -117,8 +136,9 @@ def _patch_search(results: list[PendingSearchResult] | None = None):
                 size=item.size,
                 price=item.price.replace("$", "") if item.price else None,
             )
-            for item in items
+            for item in page
         ]
+        return ProductSearchResult(products=products, total_count=resolved_total)
 
     return patch("finch.cart_choice.run_search", side_effect=fake_search)
 
@@ -141,6 +161,8 @@ class TestSearchSelectionApi:
         assert len(payload["results"]) == 2
         assert payload["results"][0]["description"] == "Plain Bagels 6 ct"
         assert payload["results"][0]["price"] == "$3.99"
+        assert payload["page_start"] == 1
+        assert payload["page_end"] == 2
         pending = get_pending_selection(CHAT_KEY)
         assert pending is not None
         assert pending.normalized_name == "bagel"
@@ -369,6 +391,139 @@ class TestSearchSelectionApi:
         assert mock_client.add_to_cart.call_count == 1
 
 
+class TestSearchPaginationApi:
+    def test_initial_display_shows_ten_results(self, api_client):
+        tortillas = _tortilla_results(25)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search(tortillas, total_count=37):
+                        response = api_client.post(
+                            "/finch/cart/add",
+                            json={"item": "tortillas", "chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["needs_choice"] is True
+        assert len(payload["results"]) == 10
+        assert payload["page_start"] == 1
+        assert payload["page_end"] == 10
+        assert payload["total_count"] == 37
+        assert payload["has_more"] is True
+        assert payload["has_back"] is False
+        assert payload["results"][0]["description"] == "Tortilla option 1"
+        assert payload["results"][9]["description"] == "Tortilla option 10"
+
+    def test_select_result_8_on_first_page(self, api_client):
+        tortillas = _tortilla_results(15)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search(tortillas):
+                        api_client.post(
+                            "/finch/cart/add",
+                            json={"item": "tortillas", "chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        choose = api_client.post(
+                            "/finch/cart/choose",
+                            json={"chat_key": CHAT_KEY, "selection": 8},
+                            headers=AUTH_HEADERS,
+                        )
+        assert choose.status_code == 200
+        payload = choose.json()
+        assert payload["ok"] is True
+        assert payload["attempt"]["product_id"] == "tortilla-8"
+        assert get_pending_selection(CHAT_KEY) is None
+
+    def test_select_result_14_after_more(self, api_client):
+        tortillas = _tortilla_results(25)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search(tortillas, total_count=25) as mock_search:
+                        api_client.post(
+                            "/finch/cart/add",
+                            json={"item": "tortillas", "chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        more = api_client.post(
+                            "/finch/cart/pending/more",
+                            json={"chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        choose = api_client.post(
+                            "/finch/cart/choose",
+                            json={"chat_key": CHAT_KEY, "selection": 14},
+                            headers=AUTH_HEADERS,
+                        )
+        assert more.status_code == 200
+        more_payload = more.json()
+        assert more_payload["page_start"] == 11
+        assert more_payload["page_end"] == 20
+        assert more_payload["has_back"] is True
+        assert mock_search.call_count == 2
+        assert choose.status_code == 200
+        assert choose.json()["attempt"]["product_id"] == "tortilla-14"
+
+    def test_more_uses_cached_results_without_extra_search(self, api_client):
+        tortillas = _tortilla_results(25)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search(tortillas, total_count=25) as mock_search:
+                        api_client.post(
+                            "/finch/cart/add",
+                            json={"item": "tortillas", "chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        first_more = api_client.post(
+                            "/finch/cart/pending/more",
+                            json={"chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        second_more = api_client.post(
+                            "/finch/cart/pending/more",
+                            json={"chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+        assert first_more.status_code == 200
+        assert second_more.status_code == 200
+        assert second_more.json()["page_start"] == 21
+        assert second_more.json()["page_end"] == 25
+        assert mock_search.call_count == 3
+
+    def test_back_returns_previous_page(self, api_client):
+        tortillas = _tortilla_results(25)
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search(tortillas, total_count=25):
+                        api_client.post(
+                            "/finch/cart/add",
+                            json={"item": "tortillas", "chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        api_client.post(
+                            "/finch/cart/pending/more",
+                            json={"chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+                        back = api_client.post(
+                            "/finch/cart/pending/back",
+                            json={"chat_key": CHAT_KEY},
+                            headers=AUTH_HEADERS,
+                        )
+        assert back.status_code == 200
+        payload = back.json()
+        assert payload["page_start"] == 1
+        assert payload["page_end"] == 10
+        assert payload["has_back"] is False
+
+
 class TestPendingSelectionStore:
     def test_pending_expires(self, pending_db: Path, monkeypatch):
         monkeypatch.setenv("FINCH_PENDING_SELECTION_DB_PATH", str(pending_db))
@@ -381,7 +536,7 @@ class TestPendingSelectionStore:
             normalized_name="bagels",
             search_query="bagels",
             quantity=1,
-            results=BAGEL_RESULTS,
+            cached_results=BAGEL_RESULTS,
             db_path=pending_db,
             ttl_minutes=0,
         )
@@ -403,6 +558,11 @@ class TestTelegramSearchSelection:
         mock_add.return_value = {
             "needs_choice": True,
             "requested_item": "bagels",
+            "search_query": "bagels",
+            "page_start": 1,
+            "page_end": 1,
+            "has_more": False,
+            "has_back": False,
             "results": [
                 {
                     "description": "Plain Bagels 6 ct",
@@ -422,8 +582,51 @@ class TestTelegramSearchSelection:
         _, kwargs = mock_add.call_args
         assert kwargs["chat_key"] == CHAT_KEY
         body = mock_send.call_args[0][1]
-        assert "Needs choice" in body
-        assert "prefer 1" in body.lower() or "Reply 1" in body
+        assert "Found multiple matches" in body
+        assert "1. Plain Bagels 6 ct" in body
+        assert "cancel" in body.lower()
+
+    @patch("finch_telegram.handler.telegram_client.send_text_message")
+    @patch("finch_telegram.handler.finch_client.pending_more")
+    def test_more_reply_formats_paginated_results(self, mock_more, mock_send, monkeypatch):
+        monkeypatch.setenv("FINCH_TELEGRAM_TEST_MODE", "1")
+        monkeypatch.setenv("FINCH_TELEGRAM_BOT_TOKEN", "test-telegram-bot-token")
+        monkeypatch.setenv("FINCH_TELEGRAM_ALLOWED_USER_IDS", "111222333")
+        monkeypatch.setenv("FINCH_API_KEY", "test-fin-api-key")
+
+        from finch_telegram.handler import process_inbound
+        from finch_telegram.telegram_client import InboundTextMessage
+
+        mock_more.return_value = {
+            "needs_choice": True,
+            "requested_item": "tortillas",
+            "search_query": "tortillas",
+            "total_count": 37,
+            "page_start": 11,
+            "page_end": 20,
+            "has_more": True,
+            "has_back": True,
+            "results": [
+                {
+                    "description": f"Tortilla option {index}",
+                    "size": f"{index} ct",
+                }
+                for index in range(11, 21)
+            ],
+        }
+        message = InboundTextMessage(
+            chat_id="111222333",
+            user_id="111222333",
+            text="more",
+            update_id=53,
+        )
+        process_inbound(message)
+        mock_more.assert_called_once_with(CHAT_KEY)
+        body = mock_send.call_args[0][1]
+        assert "Showing 11-20 of 37" in body
+        assert "11. Tortilla option 11" in body
+        assert "- back" in body
+        assert "- more" in body
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.cart_choose")
@@ -486,14 +689,18 @@ class TestTelegramSearchSelection:
         from finch_telegram.commands import HELP_TEXT
 
         assert "prefer 1" in HELP_TEXT
-        assert "nvm" in HELP_TEXT
+        assert "more" in HELP_TEXT
+        assert "back" in HELP_TEXT
+        assert "cancel" in HELP_TEXT
         assert "FINCH_LIVE_CART" not in HELP_TEXT
         assert "Kroger is still the live cart" in HELP_TEXT
 
     def test_parse_pending_replies(self):
         from finch_telegram.commands import (
+            BackPendingCommand,
             CancelPendingCommand,
             ChooseReplyCommand,
+            MorePendingCommand,
             SearchPendingCommand,
             parse_pending_reply,
         )
@@ -506,6 +713,9 @@ class TestTelegramSearchSelection:
         assert isinstance(prefer, ChooseReplyCommand)
         assert prefer.prefer is True
         assert isinstance(parse_pending_reply("nvm"), CancelPendingCommand)
+        assert isinstance(parse_pending_reply("cancel"), CancelPendingCommand)
+        assert isinstance(parse_pending_reply("more"), MorePendingCommand)
+        assert isinstance(parse_pending_reply("back"), BackPendingCommand)
         search = parse_pending_reply("search mini bagels")
         assert isinstance(search, SearchPendingCommand)
         assert search.query == "mini bagels"

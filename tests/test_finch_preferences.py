@@ -114,10 +114,11 @@ def _mock_kroger_client():
 def _patch_search(results: list[PendingSearchResult] | None = None):
     items = results if results is not None else BAGEL_RESULTS
 
-    def fake_search(query: str, *, client=None, limit: int = 5):
-        from finch.kroger_client import KrogerProduct
+    def fake_search(query: str, *, client=None, limit: int = 10, start: int = 0):
+        from finch.kroger_client import KrogerProduct, ProductSearchResult
 
-        return [
+        page = items[start : start + limit]
+        products = [
             KrogerProduct(
                 product_id=item.product_id,
                 upc=item.upc,
@@ -125,8 +126,9 @@ def _patch_search(results: list[PendingSearchResult] | None = None):
                 size=item.size,
                 price=item.price.replace("$", "") if item.price else None,
             )
-            for item in items
+            for item in page
         ]
+        return ProductSearchResult(products=products, total_count=len(items))
 
     return patch("finch.cart_choice.run_search", side_effect=fake_search)
 
@@ -421,7 +423,8 @@ class TestTelegramPreferenceCommands:
         )
         mock_change.assert_called_once()
         body = mock_send.call_args[0][1]
-        assert "Needs choice" in body
+        assert "Found multiple matches" in body
+        assert "Thomas Plain Bagels" in body
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.preferences_list")

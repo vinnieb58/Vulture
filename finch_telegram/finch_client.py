@@ -116,6 +116,14 @@ def pending_search(chat_key: str, query: str) -> dict[str, Any]:
     )
 
 
+def pending_more(chat_key: str) -> dict[str, Any]:
+    return _request("POST", "/finch/cart/pending/more", json={"chat_key": chat_key})
+
+
+def pending_back(chat_key: str) -> dict[str, Any]:
+    return _request("POST", "/finch/cart/pending/back", json={"chat_key": chat_key})
+
+
 def cart_history(limit: int = 10, *, scope: str = "trip") -> dict[str, Any]:
     return _request("GET", "/finch/cart/history", params={"limit": limit, "scope": scope})
 
