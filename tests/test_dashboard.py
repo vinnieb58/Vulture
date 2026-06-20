@@ -494,7 +494,7 @@ class TestDashboardDockerfile:
 
         copied = set(re.findall(r"COPY ([^\n]+) \./", dockerfile))
         copied_modules = {
-            name.removesuffix(".py")
+            name.removesuffix(".py").split("/")[-1]
             for block in copied
             for name in block.split()
             if name.endswith(".py")
@@ -778,15 +778,17 @@ class TestNestCardComputation:
             "cpu_now": "42%",
             "cpu_above_90_minutes_1h": "0 min",
             "temp_now": "61°C",
-            "temp_high_today": "74°C",
-            "cpu_threads": 4,
-            "load_pressure": "0.05",
-            "load_help": "Load is runnable work, not CPU %. Compare load to CPU threads.",
+            "temp_high_24h": "74°C",
+            "peak_cpu_1h": "55%",
+            "peak_cpu_24h": "88%",
+            "peak_memory_24h": "70%",
+            "load_average": "0.2 / 0.3 / 0.4",
         }
         card = _compute_raven_card(raven, [], docker, metrics)
         assert card["cpu_now"] == "42%"
         assert card["temp_now"] == "61°C"
-        assert card["cpu_threads"] == 4
+        assert card["peak_cpu_1h"] == "55%"
+        assert card["peak_temp_24h"] == "74°C"
 
     def test_storage_card_ok_when_all_mounted_with_low_usage(self):
         from app import _compute_storage_card

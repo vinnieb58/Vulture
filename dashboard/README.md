@@ -139,11 +139,59 @@ curl -I http://localhost:8088
 
 ## Raven Health metrics
 
-The Nest Raven Health card uses **[Glances](https://github.com/nicolargo/glances)** as the
-primary live host telemetry source. Glances runs as a companion container in
+The Nest home page shows a **compact Raven Health card** (~10 high-value lines):
+status, uptime, live CPU/temp, 1h/24h peaks, CPU saturation, load averages, and
+container count. A **Details →** link opens the full Glances-driven page at
+`/raven/health`.
+
+Live telemetry uses **[Glances](https://github.com/nicolargo/glances)** as the
+primary host metrics source. Glances runs as a companion container in
 `docker-compose.dashboard.yml`, exposes its REST API on the internal compose
 network, and is bound to **localhost only** on the host (`127.0.0.1:61208`) for
 LAN/Tailscale verification — not the public internet.
+
+### Raven Health home card (Nest `/`)
+
+| Field | Source |
+|-------|--------|
+| Status pill + headline | Host health + operating thresholds |
+| Uptime | Host probe |
+| CPU now | Glances `/api/4/cpu` (fallback: `/proc`) |
+| Peak CPU 1h / 24h | JSONL history |
+| CPU >90% last hour | JSONL saturation |
+| Temp now | Glances `/api/4/sensors` (fallback: sysfs) |
+| Peak Temp 24h | JSONL history |
+| Peak Memory 24h | JSONL history |
+| Load 1/5/15 | Glances `/api/4/load` |
+| Containers running | Docker snapshot |
+
+Detailed telemetry (per-core CPU, swap, top processes, load pressure, etc.) lives
+on the details page — not the home card.
+
+### Raven Health details page (`/raven/health`)
+
+Full-page read-only telemetry powered by Glances with sections for Overview,
+CPU, Memory, Processes, Disks, Network, Sensors, and System. Overview cards
+include top CPU processes, temperatures, and simple 1h history charts from
+JSONL when samples exist.
+
+| Route | Purpose |
+|-------|---------|
+| `GET /raven/health` | Server-rendered details page (initial data + JS refresh) |
+| `GET /api/raven/health/glances` | Normalized JSON payload for live updates |
+
+Auto-refresh defaults to **5 seconds** on the details page via vanilla JS
+(`dashboard/static/raven_health.js`). Configure with
+`DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS`. The Nest home page still uses the
+global meta refresh (`DASHBOARD_AUTO_REFRESH_SECONDS`).
+
+Glances API v4 endpoints used:
+
+- Core: `/cpu`, `/load`, `/mem`, `/memswap`, `/sensors`, `/percpu`, `/processlist`
+- Details extras: `/fs`, `/network`, `/uptime`, `/system`, `/docker` (when available)
+
+Data is normalized in Python (`dashboard/raven_health_details.py`) before
+rendering so templates stay simple.
 
 ### Why Glances is preferred
 
@@ -167,7 +215,8 @@ peak reporting and as a fallback when Glances is down.
 | `DASHBOARD_USE_GLANCES` | `true` in compose | Use Glances for live Raven Health metrics |
 | `DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS` | `1.0` | Per-endpoint socket timeout |
 | `DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS` | `1.5` | Shared wall-clock budget for one snapshot (all endpoints fetched in parallel) |
-| `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Number of top CPU processes to show |
+| `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Number of top CPU processes on details/overview |
+| `DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS` | `5` | Details page JS auto-refresh interval |
 
 Glances container command:
 
@@ -180,18 +229,18 @@ Host bind mounts for accurate metrics: `/proc`, `/sys`, `/dev`, `/run/udev`
 
 ### Fallback behavior
 
-When `DASHBOARD_USE_GLANCES=true` and Glances is unreachable or slow, the Raven Health
-card shows **Glances unavailable** and falls back to:
+When `DASHBOARD_USE_GLANCES=true` and Glances is unreachable or slow:
 
+- The **home card** keeps working with fallback host probes + JSONL peaks (no crash)
+- The **details page** shows a visible **Glances unavailable** banner and uses
+  fallback data where available
 - Live CPU/load/temp from existing `/proc` + sysfs readers where possible
 - JSONL history peaks (1h/24h CPU, memory, load, temp) when samples exist
+- `/health` is unchanged — liveness probe only, no Glances dependency
 
 Glances endpoints are fetched **in parallel** with a shared budget (default **1.5s**
 total, **1.0s** per request). Page load does not wait for seven sequential slow
 responses; when the budget is exceeded, fallback is immediate.
-
-`/health` is unchanged — it remains a liveness probe only and does not call
-Glances.
 
 ### Legacy JSONL history (optional)
 
@@ -201,10 +250,12 @@ peak/saturation reporting and optional fallback sampling.
 
 | Component | Behavior |
 |-----------|----------|
-| Glances API | Primary live telemetry for Raven Health card |
-| Nest page (`/`, `/advanced`) | Read-only — calls `get_metrics_summary()` |
+| Glances API | Primary live telemetry for Raven Health details + home card live values |
+| Nest home (`/`) | Compact Raven Health summary card |
+| Raven details (`/raven/health`) | Full Glances telemetry with 5s JS refresh |
+| `/api/raven/health/glances` | Normalized JSON for details page polling |
 | Background sampler | Off by default with Glances; enable with `DASHBOARD_METRICS_SAMPLER_ENABLED=1` |
-| `/health` | No metrics — liveness probe only |
+| `/health` | No metrics — liveness probe only (Docker HEALTHCHECK) |
 
 If both Glances and the background sampler are disabled, 1h/24h aggregates may
 be sparse unless you re-enable the sampler temporarily.
@@ -276,8 +327,10 @@ curl http://localhost:61208/api/4/processlist
 Verify dashboard display and fallback:
 
 ```bash
-curl -s http://localhost:8088/ | grep -E 'CPU now|Glances unavailable|Top CPU processes'
 curl -sf http://localhost:8088/health
+curl -s http://localhost:8088/ | grep -E 'Raven Health|Details'
+curl -s http://localhost:8088/raven/health | grep -E 'Raven Health Details|Glances|Top CPU Processes'
+curl -s http://localhost:8088/api/raven/health/glances | jq '.status'
 ```
 
 Optional: confirm legacy JSONL history still works when sampler is re-enabled:

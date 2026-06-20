@@ -11,6 +11,7 @@ Routes
 /storage   Storage detail   per-drive status and usage
 /vulture   Vulture detail   scheduler / bot / hunts
 /advanced  Raven Ops        original dense operational view (v0.2)
+/raven/health  Raven Health Details  Glances-driven live telemetry
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
 from nest_hvac_formatting import format_hvac_section
 from log_readers import LOG_PATH, read_log_snapshot
+from raven_health_details import RAVEN_HEALTH_REFRESH_SECONDS, build_raven_health_details
 from raven_metrics_history import (
     CPU_SAT_CRITICAL_MINUTES_1H,
     CPU_SAT_WARN_MINUTES_1H,
@@ -177,17 +179,7 @@ def _compute_raven_card(
         status = "OK"
         headline = "Raven is healthy"
 
-    memory = raven.get("memory")
-    mem_str: str | None = None
-    if memory:
-        mem_str = f"{memory.used} / {memory.total}"
-        if memory.percent_used is not None:
-            mem_str += f" ({memory.percent_used:.0f}%)"
-
     load_average = metrics.get("load_average") or raven.get("load_average")
-    cpu_threads = metrics.get("cpu_threads")
-    load_pressure = metrics.get("load_pressure")
-    memory = metrics.get("memory_live") or mem_str
 
     return {
         "status": status,
@@ -199,19 +191,15 @@ def _compute_raven_card(
         "cpu_now": metrics.get("cpu_now"),
         "cpu_above_90_1h": metrics.get("cpu_above_90_minutes_1h"),
         "temp_now": metrics.get("temp_now"),
-        "temp_high_today": metrics.get("temp_high_today"),
         "load_average": load_average,
-        "cpu_threads": cpu_threads,
-        "load_pressure": load_pressure,
-        "load_help": metrics.get("load_help"),
-        "memory": memory,
-        "swap": metrics.get("swap"),
-        "cpu_per_core_summary": metrics.get("cpu_per_core_summary"),
-        "top_processes_summary": metrics.get("top_processes_summary"),
+        "containers_running": docker.running_count,
+        "peak_cpu_1h": metrics.get("peak_cpu_1h"),
+        "peak_cpu_24h": metrics.get("peak_cpu_24h"),
+        "peak_temp_24h": metrics.get("temp_high_24h"),
+        "peak_memory_24h": metrics.get("peak_memory_24h"),
         "glances_status": metrics.get("glances_status"),
         "glances_available": metrics.get("glances_available"),
         "metrics_source": metrics.get("metrics_source"),
-        "containers_running": docker.running_count,
         "peaks": metrics,
     }
 
@@ -642,6 +630,38 @@ async def vulture_detail(request: Request) -> HTMLResponse:
         "vulture_card": vulture_card,
     }
     return templates.TemplateResponse(request, "vulture.html", context)
+
+
+@app.get("/api/raven/health/glances")
+async def raven_health_glances_api() -> JSONResponse:
+    """Normalized Glances telemetry for the Raven Health details page."""
+    raven = get_raven_health()
+    docker = get_docker_snapshot()
+    details = build_raven_health_details(
+        raven=raven,
+        docker_running=docker.running_count,
+    )
+    return JSONResponse(details)
+
+
+@app.get("/raven/health", response_class=HTMLResponse)
+async def raven_health_detail(request: Request) -> HTMLResponse:
+    """Raven Health Details — live Glances telemetry with auto-refresh."""
+    raven = get_raven_health()
+    docker = get_docker_snapshot()
+    details = build_raven_health_details(
+        raven=raven,
+        docker_running=docker.running_count,
+    )
+    context = {
+        "title": "Raven Health Details (Glances)",
+        "version": "1.0",
+        "page": "raven_health",
+        "refreshed_at": details["updated_at"],
+        "auto_refresh_seconds": RAVEN_HEALTH_REFRESH_SECONDS,
+        "details": details,
+    }
+    return templates.TemplateResponse(request, "raven_health.html", context)
 
 
 @app.get("/advanced", response_class=HTMLResponse)

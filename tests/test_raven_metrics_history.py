@@ -406,9 +406,8 @@ class TestDashboardPeaksIntegration:
         assert response.status_code == 200
         assert "CPU now" in response.text
         assert "Temp now" in response.text
-        assert "Details" in response.text
-        assert "Peak load avg 1h" in response.text
-        assert "Load is runnable work" in response.text
+        assert "Details →" in response.text
+        assert "/raven/health" in response.text
 
     def test_sample_and_get_peaks_collecting_when_empty(self, tmp_path: Path, monkeypatch):
         history_path = tmp_path / "raven_metrics_history.jsonl"
