@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from host_cpu_metrics import NOT_AVAILABLE_LABEL, format_celsius, format_cpu_percent
@@ -17,11 +19,18 @@ logger = logging.getLogger(__name__)
 GLANCES_BASE_URL = os.environ.get(
     "DASHBOARD_GLANCES_URL", "http://glances:61208"
 ).rstrip("/")
-GLANCES_TIMEOUT_SECONDS = float(
-    os.environ.get("DASHBOARD_GLANCES_TIMEOUT_SECONDS", "2.0")
-)
 GLANCES_UNAVAILABLE_LABEL = "Glances unavailable"
 TOP_PROCESS_LIMIT = int(os.environ.get("DASHBOARD_GLANCES_TOP_PROCESSES", "5"))
+
+GLANCES_ENDPOINTS: tuple[str, ...] = (
+    "/api/4/cpu",
+    "/api/4/load",
+    "/api/4/mem",
+    "/api/4/memswap",
+    "/api/4/sensors",
+    "/api/4/percpu",
+    "/api/4/processlist",
+)
 
 # Preferred CPU/package temperature labels from Glances sensors (lower = higher priority).
 _TEMP_LABEL_PRIORITY: tuple[str, ...] = (
@@ -48,15 +57,82 @@ def glances_enabled() -> bool:
     )
 
 
-def _fetch_json(path: str) -> Any | None:
+def _request_timeout_seconds() -> float:
+    """Per-request socket timeout; read at call time for testability."""
+    return float(
+        os.environ.get(
+            "DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS",
+            os.environ.get("DASHBOARD_GLANCES_TIMEOUT_SECONDS", "1.0"),
+        )
+    )
+
+
+def _fetch_budget_seconds() -> float:
+    """Shared snapshot budget; read at call time for testability."""
+    return float(os.environ.get("DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS", "1.5"))
+
+
+def _fetch_json(path: str, *, timeout: float | None = None) -> Any | None:
     url = f"{GLANCES_BASE_URL}{path}"
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    request_timeout = (
+        timeout if timeout is not None else _request_timeout_seconds()
+    )
     try:
-        with urllib.request.urlopen(request, timeout=GLANCES_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=request_timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
         logger.debug("Glances request failed for %s: %s", path, exc)
         return None
+
+
+def _fetch_json_with_budget(path: str, deadline: float) -> tuple[str, Any | None]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        logger.debug("Glances budget exhausted before %s", path)
+        return path, None
+    timeout = min(_request_timeout_seconds(), remaining)
+    return path, _fetch_json(path, timeout=timeout)
+
+
+def _fetch_all_json(paths: tuple[str, ...] | None = None) -> dict[str, Any | None]:
+    """Fetch Glances endpoints in parallel within a shared time budget."""
+    endpoints = paths or GLANCES_ENDPOINTS
+    budget = max(0.05, _fetch_budget_seconds())
+    deadline = time.monotonic() + budget
+    results: dict[str, Any | None] = {path: None for path in endpoints}
+    if not endpoints:
+        return results
+
+    executor = ThreadPoolExecutor(max_workers=len(endpoints))
+    futures: list = []
+    try:
+        futures = [
+            executor.submit(_fetch_json_with_budget, path, deadline)
+            for path in endpoints
+        ]
+        try:
+            for future in as_completed(
+                futures,
+                timeout=max(0.01, deadline - time.monotonic()),
+            ):
+                try:
+                    path, data = future.result()
+                    results[path] = data
+                except Exception:
+                    logger.debug("Glances parallel fetch task failed", exc_info=True)
+        except TimeoutError:
+            logger.info(
+                "Glances fetch budget exceeded (%.1fs); using partial results / fallback",
+                budget,
+            )
+        for future in futures:
+            if not future.done():
+                future.cancel()
+    finally:
+        # Do not block the dashboard page on slow Glances workers.
+        executor.shutdown(wait=False, cancel_futures=True)
+    return results
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -245,14 +321,24 @@ def _parse_top_processes(data: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def fetch_glances_snapshot() -> dict[str, Any]:
-    """Fetch live host metrics from Glances API v4."""
-    cpu_data = _fetch_json("/api/4/cpu")
-    load_data = _fetch_json("/api/4/load")
-    mem_data = _fetch_json("/api/4/mem")
-    swap_data = _fetch_json("/api/4/memswap")
-    sensors_data = _fetch_json("/api/4/sensors")
-    percpu_data = _fetch_json("/api/4/percpu")
-    process_data = _fetch_json("/api/4/processlist")
+    """Fetch live host metrics from Glances API v4 within a shared time budget."""
+    started = time.monotonic()
+    payload = _fetch_all_json()
+    elapsed = time.monotonic() - started
+    if elapsed > _fetch_budget_seconds():
+        logger.info(
+            "Glances snapshot took %.2fs (budget %.1fs)",
+            elapsed,
+            _fetch_budget_seconds(),
+        )
+
+    cpu_data = payload.get("/api/4/cpu")
+    load_data = payload.get("/api/4/load")
+    mem_data = payload.get("/api/4/mem")
+    swap_data = payload.get("/api/4/memswap")
+    sensors_data = payload.get("/api/4/sensors")
+    percpu_data = payload.get("/api/4/percpu")
+    process_data = payload.get("/api/4/processlist")
 
     cpu_total, cpu_threads = _parse_cpu(cpu_data if isinstance(cpu_data, dict) else None)
     load_1, load_5, load_15, load_threads = _parse_load(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,7 @@ sys.path.insert(0, str(DASHBOARD_DIR))
 
 from glances_client import (  # noqa: E402
     GLANCES_UNAVAILABLE_LABEL,
+    _fetch_all_json,
     fetch_glances_snapshot,
 )
 from metrics_sampler import (  # noqa: E402
@@ -83,7 +85,7 @@ MOCK_PROCESSLIST = [
 ]
 
 
-def _mock_fetch(path: str):
+def _mock_fetch(path: str, *, timeout: float | None = None):
     payloads = {
         "/api/4/cpu": MOCK_CPU,
         "/api/4/load": MOCK_LOAD,
@@ -118,6 +120,39 @@ class TestGlancesClient:
 
         assert snapshot["available"] is False
         assert snapshot["status_message"] == GLANCES_UNAVAILABLE_LABEL
+
+    def test_fetch_glances_snapshot_aborts_slow_requests_within_budget(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS", "0.2")
+        monkeypatch.setenv("DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS", "5.0")
+
+        def slow_fetch(path: str, *, timeout: float | None = None):
+            time.sleep(1.0)
+            return _mock_fetch(path)
+
+        started = time.monotonic()
+        with patch("glances_client._fetch_json", side_effect=slow_fetch):
+            snapshot = fetch_glances_snapshot()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.8
+        assert snapshot["available"] is False
+        assert snapshot["status_message"] == GLANCES_UNAVAILABLE_LABEL
+
+    def test_fetch_all_json_parallel_returns_within_budget(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS", "0.5")
+        monkeypatch.setenv("DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS", "1.0")
+
+        def quick_fetch(path: str, *, timeout: float | None = None):
+            return _mock_fetch(path)
+
+        started = time.monotonic()
+        with patch("glances_client._fetch_json", side_effect=quick_fetch):
+            payload = _fetch_all_json()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.8
+        assert payload["/api/4/cpu"] == MOCK_CPU
+        assert payload["/api/4/load"] == MOCK_LOAD
 
 
 class TestMetricsSummaryWithGlances:

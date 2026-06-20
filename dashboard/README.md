@@ -165,7 +165,8 @@ peak reporting and as a fallback when Glances is down.
 |---------|---------|---------|
 | `DASHBOARD_GLANCES_URL` | `http://glances:61208` | Glances REST base URL (dashboard container) |
 | `DASHBOARD_USE_GLANCES` | `true` in compose | Use Glances for live Raven Health metrics |
-| `DASHBOARD_GLANCES_TIMEOUT_SECONDS` | `2.0` | HTTP timeout for Glances API calls |
+| `DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS` | `1.0` | Per-endpoint socket timeout |
+| `DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS` | `1.5` | Shared wall-clock budget for one snapshot (all endpoints fetched in parallel) |
 | `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Number of top CPU processes to show |
 
 Glances container command:
@@ -179,11 +180,15 @@ Host bind mounts for accurate metrics: `/proc`, `/sys`, `/dev`, `/run/udev`
 
 ### Fallback behavior
 
-When `DASHBOARD_USE_GLANCES=true` and Glances is unreachable, the Raven Health
+When `DASHBOARD_USE_GLANCES=true` and Glances is unreachable or slow, the Raven Health
 card shows **Glances unavailable** and falls back to:
 
 - Live CPU/load/temp from existing `/proc` + sysfs readers where possible
 - JSONL history peaks (1h/24h CPU, memory, load, temp) when samples exist
+
+Glances endpoints are fetched **in parallel** with a shared budget (default **1.5s**
+total, **1.0s** per request). Page load does not wait for seven sequential slow
+responses; when the budget is exceeded, fallback is immediate.
 
 `/health` is unchanged — it remains a liveness probe only and does not call
 Glances.
@@ -298,7 +303,8 @@ docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
 | `DASHBOARD_HOST_SYS` | `/host/root/sys` | Host sysfs for CPU temperature (Glances fallback) |
 | `DASHBOARD_GLANCES_URL` | `http://glances:61208` | Glances REST base URL |
 | `DASHBOARD_USE_GLANCES` | `false` (code) / `true` (compose) | Use Glances for live metrics |
-| `DASHBOARD_GLANCES_TIMEOUT_SECONDS` | `2.0` | Glances HTTP timeout |
+| `DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS` | `1.0` | Per-endpoint Glances socket timeout |
+| `DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS` | `1.5` | Shared snapshot budget (parallel fetch) |
 | `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Top CPU processes shown on card |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
