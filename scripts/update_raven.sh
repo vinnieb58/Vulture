@@ -60,6 +60,8 @@ SYSTEMD_UNITS=(
     vulture-bot.service
     vulture-scheduler.service
     vulture-scheduler.timer
+    pelican-backup.service
+    pelican-backup.timer
 )
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,8 @@ install_systemd_units() {
     sudo systemctl enable "$VULTURE_SCHEDULER_TIMER"
     echo "  Enabled: $VULTURE_SCHEDULER_TIMER"
     echo "  Note: $VULTURE_SCHEDULER_SERVICE is oneshot; the timer triggers it."
+    echo "  Note: pelican-backup.timer is installed but not enabled by deploy; use:"
+    echo "        ./scripts/install_pelican_timer.sh --enable"
 }
 
 restart_systemd_services() {

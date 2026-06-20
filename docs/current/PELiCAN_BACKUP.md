@@ -208,10 +208,100 @@ The script does **not** trust directory existence alone. It:
 
 ---
 
+## Daily systemd timer (Step 2)
+
+Pelican backups can run automatically via `pelican-backup.service` (oneshot) and `pelican-backup.timer` (daily ~3:00 AM local time with up to 15 minutes randomized delay).
+
+Unit definitions live in `deploy/systemd/`. The service executes the existing backup script only; it does not duplicate backup logic. The oneshot service has **no `[Install]` section** and must **not** be enabled directly — only the timer is enabled.
+
+Deploy installs unit files but **does not** enable the timer or run a backup automatically.
+
+### Install or update units on Raven
+
+From the repo root:
+
+```bash
+cd /home/vinnieb58/projects/vulture
+git pull
+
+# Copy units + daemon-reload (no backup run):
+./scripts/install_pelican_timer.sh
+
+# Or install and enable the daily timer:
+./scripts/install_pelican_timer.sh --enable
+```
+
+Full/quick Raven deploy (`scripts/update_raven.sh` / `scripts/update_raven_quick.sh`) also copies all `deploy/systemd/*.service` and `*.timer` files and runs `daemon-reload`, but still does **not** enable or start the Pelican timer unless you run the install script with `--enable`.
+
+### Enable and start the timer
+
+```bash
+sudo systemctl enable --now pelican-backup.timer
+```
+
+### Confirm timer state and next run
+
+```bash
+systemctl is-enabled pelican-backup.timer
+systemctl is-active pelican-backup.timer
+systemctl list-timers --all | grep pelican
+```
+
+Expected:
+
+- `pelican-backup.timer`: **enabled**, **active**
+- `pelican-backup.service`: **disabled** (or `static`), **inactive** between runs
+
+Show next scheduled trigger:
+
+```bash
+systemctl list-timers pelican-backup.timer
+```
+
+### Manually trigger one backup through systemd
+
+```bash
+sudo systemctl start pelican-backup.service
+```
+
+This runs the same script as a manual shell invocation. Exit status propagates to systemd (`SuccessExitStatus` is not overridden — non-zero script exit fails the unit).
+
+### Inspect logs and last result
+
+```bash
+systemctl status pelican-backup.service --no-pager -l
+journalctl -u pelican-backup.service -n 100 --no-pager
+journalctl -u pelican-backup.service -b --no-pager
+```
+
+Success lines include `pelican-backup: INFO: Pelican backup completed successfully`. Failures include `pelican-backup: ERROR:` and a non-zero unit result.
+
+### Disable the timer safely
+
+```bash
+sudo systemctl disable --now pelican-backup.timer
+```
+
+This stops scheduled backups without removing unit files. To remove installed units:
+
+```bash
+sudo rm -f /etc/systemd/system/pelican-backup.service /etc/systemd/system/pelican-backup.timer
+sudo systemctl daemon-reload
+```
+
+### Boot and optional-storage behavior
+
+The service has **no** `network-online` dependency and **no** hard mount requirement in systemd. If the Pelican drive is unavailable, the backup script fails cleanly and logs to journald; Raven boot is not blocked.
+
+---
+
 ## Implementation files
 
 - `scripts/pelican_backup.sh` — operator entry point
 - `scripts/pelican_backup.py` — orchestrator
 - `scripts/pelican/` — testable helpers (naming, retention, mount validation, SQLite backup, manifest)
+- `deploy/systemd/pelican-backup.service` — oneshot backup unit
+- `deploy/systemd/pelican-backup.timer` — daily timer
+- `scripts/install_pelican_timer.sh` — install/enable helper
 
-Tests: `tests/test_pelican_backup.py`
+Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_systemd_timer.py`
