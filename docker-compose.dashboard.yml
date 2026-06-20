@@ -4,8 +4,28 @@
 # Storage: bind-mount only the stable /mnt/storage parent (not individual optional
 # drive paths). Unplugged USB/HDD mountpoints must not prevent container startup.
 # Health: /health endpoint used by Docker HEALTHCHECK (curl -sf http://localhost:8088/health).
+#
+# Glances provides live host telemetry for the Raven Health card. It is bound to
+# localhost on the host (127.0.0.1:61208) and reachable from the dashboard on the
+# internal compose network only — not exposed publicly.
 
 services:
+  glances:
+    image: nicolargo/glances:ubuntu-latest-full
+    container_name: raven-glances
+    pid: host
+    command: glances -w --bind 0.0.0.0 --port 61208
+    ports:
+      - "127.0.0.1:61208:61208"
+    volumes:
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+      - /dev:/dev:ro
+      - /run/udev:/run/udev:ro
+    networks:
+      - dashboard-internal
+    restart: unless-stopped
+
   vulture-dashboard:
     build:
       context: .
@@ -16,6 +36,8 @@ services:
     ports:
       - "8088:8088"
     pid: host
+    depends_on:
+      - glances
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs:ro
@@ -34,4 +56,13 @@ services:
       DASHBOARD_HOST_ROOT: /host/root
       DASHBOARD_HOST_PROC: /host/proc
       DASHBOARD_SYSTEMD_BUS_SOCKET: /run/dbus/system_bus_socket
+      DASHBOARD_GLANCES_URL: http://glances:61208
+      DASHBOARD_USE_GLANCES: "true"
+      DASHBOARD_METRICS_SAMPLER_ENABLED: "0"
+    networks:
+      - dashboard-internal
     restart: unless-stopped
+
+networks:
+  dashboard-internal:
+    driver: bridge

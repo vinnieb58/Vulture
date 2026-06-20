@@ -448,6 +448,12 @@
         </div>
         <div class="card-headline {{ rs }}">{{ rc.headline }}</div>
         <div class="card-details">
+          {% if rc.glances_status %}
+          <div class="detail-row detail-row-muted">
+            <span>Telemetry</span>
+            <strong>{{ rc.glances_status }}</strong>
+          </div>
+          {% endif %}
           <div class="detail-row">
             <span>Host</span>
             <strong>{{ rc.hostname }}</strong>
@@ -460,6 +466,12 @@
           <div class="detail-row">
             <span>CPU now</span>
             <strong>{{ rc.cpu_now }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.cpu_per_core_summary %}
+          <div class="detail-row">
+            <span>CPU per core</span>
+            <strong>{{ rc.cpu_per_core_summary }}</strong>
           </div>
           {% endif %}
           {% if rc.cpu_above_90_1h %}
@@ -484,6 +496,18 @@
           <div class="detail-row">
             <span>Memory</span>
             <strong>{{ rc.memory }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.swap %}
+          <div class="detail-row">
+            <span>Swap</span>
+            <strong>{{ rc.swap }}</strong>
+          </div>
+          {% endif %}
+          {% if rc.top_processes_summary %}
+          <div class="detail-row">
+            <span>Top CPU processes</span>
+            <strong>{{ rc.top_processes_summary }}</strong>
           </div>
           {% endif %}
           {% if rc.load_average %}

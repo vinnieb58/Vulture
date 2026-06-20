@@ -139,23 +139,75 @@ curl -I http://localhost:8088
 
 ## Raven Health metrics
 
-The Nest Raven Health card reads from a shared JSONL history file. A **background
-sampler** inside the `vulture-dashboard` container appends one sample every 60
-seconds while the container is running — independent of browser views or page
-refreshes. Dashboard page requests only **read** history and compute live
-summaries; they do not drive sampling.
+The Nest Raven Health card uses **[Glances](https://github.com/nicolargo/glances)** as the
+primary live host telemetry source. Glances runs as a companion container in
+`docker-compose.dashboard.yml`, exposes its REST API on the internal compose
+network, and is bound to **localhost only** on the host (`127.0.0.1:61208`) for
+LAN/Tailscale verification — not the public internet.
 
-### Continuous vs request-sampled
+### Why Glances is preferred
+
+Glances provides richer, battle-tested host telemetry in one API:
+
+- Live CPU % (total and per-core)
+- Load averages (1/5/15)
+- Memory and swap
+- CPU/package temperature from sensors
+- Top processes by CPU
+
+The dashboard no longer needs its own blocking `/proc/stat` polling for the
+Raven Health card. The legacy JSONL history file remains available for 1h/24h
+peak reporting and as a fallback when Glances is down.
+
+### Glances service
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `DASHBOARD_GLANCES_URL` | `http://glances:61208` | Glances REST base URL (dashboard container) |
+| `DASHBOARD_USE_GLANCES` | `true` in compose | Use Glances for live Raven Health metrics |
+| `DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS` | `1.0` | Per-endpoint socket timeout |
+| `DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS` | `1.5` | Shared wall-clock budget for one snapshot (all endpoints fetched in parallel) |
+| `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Number of top CPU processes to show |
+
+Glances container command:
+
+```bash
+glances -w --bind 0.0.0.0 --port 61208
+```
+
+Host bind mounts for accurate metrics: `/proc`, `/sys`, `/dev`, `/run/udev`
+(read-only). The compose file maps port `61208` to `127.0.0.1` only.
+
+### Fallback behavior
+
+When `DASHBOARD_USE_GLANCES=true` and Glances is unreachable or slow, the Raven Health
+card shows **Glances unavailable** and falls back to:
+
+- Live CPU/load/temp from existing `/proc` + sysfs readers where possible
+- JSONL history peaks (1h/24h CPU, memory, load, temp) when samples exist
+
+Glances endpoints are fetched **in parallel** with a shared budget (default **1.5s**
+total, **1.0s** per request). Page load does not wait for seven sequential slow
+responses; when the budget is exceeded, fallback is immediate.
+
+`/health` is unchanged — it remains a liveness probe only and does not call
+Glances.
+
+### Legacy JSONL history (optional)
+
+The background sampler is **disabled by default** when Glances is enabled
+(`DASHBOARD_METRICS_SAMPLER_ENABLED=0` in compose). JSONL history is kept for
+peak/saturation reporting and optional fallback sampling.
 
 | Component | Behavior |
 |-----------|----------|
-| Background sampler | Continuous — daemon thread, 60s interval, starts with container |
+| Glances API | Primary live telemetry for Raven Health card |
 | Nest page (`/`, `/advanced`) | Read-only — calls `get_metrics_summary()` |
+| Background sampler | Off by default with Glances; enable with `DASHBOARD_METRICS_SAMPLER_ENABLED=1` |
 | `/health` | No metrics — liveness probe only |
 
-If the background sampler is disabled (`DASHBOARD_METRICS_SAMPLER_ENABLED=0`),
-history falls back to request-driven sampling via `record_sample_if_due()` and
-1h/24h aggregates may be sparse or misleading.
+If both Glances and the background sampler are disabled, 1h/24h aggregates may
+be sparse unless you re-enable the sampler temporarily.
 
 ### Load average vs CPU %
 
@@ -163,36 +215,34 @@ Linux **load average** counts runnable processes, not CPU utilization. On a
 4-thread Chromebox, a load of ~6 can be normal under bursty work while current
 CPU % is much lower. The card shows:
 
-- **CPU now** — utilization % from `/proc/stat`
-- **Load 1/5/15** — traditional load averages
-- **CPU threads** — logical CPU count from `/proc/cpuinfo`
+- **CPU now** — utilization % from Glances (`/api/4/cpu`)
+- **CPU per core** — per-core utilization from `/api/4/percpu` when available
+- **Load 1/5/15** — from Glances `/api/4/load`
+- **CPU threads** — logical CPU count
 - **Load pressure** — `load_1 / cpu_threads` (values above 1.0 suggest queuing)
-- **Peak load avg** — peak 1-minute load in the Details section, with tooltip:
+- **Top CPU processes** — from `/api/4/processlist`
+- **Peak load avg** — peak 1-minute load in the Details section (JSONL history), with tooltip:
   *"Load is runnable work, not CPU %. Compare load to CPU threads."*
 
 ### CPU temperature
 
-Temperature is read from host sysfs thermal zones via the `/host/root/sys`
-bind mount:
+Temperature is read from Glances `/api/4/sensors`, preferring CPU/package labels
+(`Package id 0`, `x86_pkg_temp`, `coretemp`, etc.). When Glances is unavailable,
+the dashboard falls back to host sysfs thermal zones via `/host/root/sys`.
 
-- Preferred zones: `x86_pkg_temp`, `coretemp`, `k10temp`, `cpu`, `acpitz`
-- Path: `/host/root/sys/class/thermal/thermal_zone*/temp` (millidegrees → °C)
-- If no readable sensor is found, the card shows **not available** (no crash)
-
-### Sampling and retention
+### Sampling and retention (legacy JSONL)
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL sample file |
 | `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Minimum seconds between samples |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of history to keep |
-| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Enable background 60s sampler thread |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `0` with Glances | Background sampler thread |
 
-Each sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp, CPU
-thread count, and raw jiffies (for delta-based CPU % on the next sample).
+Each legacy sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp,
+CPU thread count, and raw jiffies (for delta-based CPU % on the next sample).
 
-Samples are stored at `./data/raven_metrics_history.jsonl` (shared by the
-background sampler and dashboard reads).
+Samples are stored at `./data/raven_metrics_history.jsonl`.
 
 ### Operating thresholds
 
@@ -213,24 +263,31 @@ Configurable via environment variables (sane defaults):
 ./scripts/rebuild_docker.sh --file docker-compose.dashboard.yml
 ```
 
-Verify continuous sampling **without opening the dashboard**:
+Verify Glances API on localhost (LAN/Tailscale only — not public):
 
 ```bash
-# Line count should grow by ~1 per minute while container is up:
-watch -n 10 'wc -l ./data/raven_metrics_history.jsonl'
-
-# Or tail the file directly:
-tail -f ./data/raven_metrics_history.jsonl
-
-# Confirm dashboard container started the sampler (look for startup log line):
-docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
+curl http://localhost:61208/api/4/cpu
+curl http://localhost:61208/api/4/load
+curl http://localhost:61208/api/4/mem
+curl http://localhost:61208/api/4/sensors
+curl http://localhost:61208/api/4/processlist
 ```
 
-Verify dashboard display (optional):
+Verify dashboard display and fallback:
 
 ```bash
-curl -s http://localhost:8088/ | grep -E 'CPU now|Temp now|CPU threads'
+curl -s http://localhost:8088/ | grep -E 'CPU now|Glances unavailable|Top CPU processes'
 curl -sf http://localhost:8088/health
+```
+
+Optional: confirm legacy JSONL history still works when sampler is re-enabled:
+
+```bash
+# Re-enable sampler temporarily (e.g. while validating Glances stability):
+# DASHBOARD_METRICS_SAMPLER_ENABLED=1 in compose, then rebuild.
+watch -n 10 'wc -l ./data/raven_metrics_history.jsonl'
+tail -f ./data/raven_metrics_history.jsonl
+docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
 ```
 
 ## Environment variables
@@ -243,12 +300,17 @@ curl -sf http://localhost:8088/health
 | `DASHBOARD_AUTO_REFRESH_SECONDS` | `60` | Meta refresh interval |
 | `DASHBOARD_HOST_ROOT` | `/host/root` | Host root bind for `df` |
 | `DASHBOARD_HOST_PROC` | `/host/proc` | Host proc bind |
-| `DASHBOARD_HOST_SYS` | `/host/root/sys` | Host sysfs for CPU temperature |
+| `DASHBOARD_HOST_SYS` | `/host/root/sys` | Host sysfs for CPU temperature (Glances fallback) |
+| `DASHBOARD_GLANCES_URL` | `http://glances:61208` | Glances REST base URL |
+| `DASHBOARD_USE_GLANCES` | `false` (code) / `true` (compose) | Use Glances for live metrics |
+| `DASHBOARD_GLANCES_REQUEST_TIMEOUT_SECONDS` | `1.0` | Per-endpoint Glances socket timeout |
+| `DASHBOARD_GLANCES_FETCH_BUDGET_SECONDS` | `1.5` | Shared snapshot budget (parallel fetch) |
+| `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Top CPU processes shown on card |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
 | `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Min seconds between metric samples |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of metric history to retain |
-| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `1` | Background sampler on/off |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `0` with Glances | Background sampler on/off |
 | `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | CPU temp WARN threshold (°C) |
 | `DASHBOARD_TEMP_CRITICAL_CELSIUS` | `90` | CPU temp FAIL threshold (°C) |
 | `DASHBOARD_CPU_SAT_THRESHOLD` | `90` | CPU % saturation threshold |
@@ -259,5 +321,5 @@ curl -sf http://localhost:8088/health
 
 ```bash
 python3 -m compileall -q dashboard
-python3 -m pytest tests/test_dashboard.py tests/test_raven_metrics_history.py tests/test_dashboard_storage.py -q
+python3 -m pytest tests/test_dashboard.py tests/test_raven_metrics_history.py tests/test_glances_metrics.py tests/test_dashboard_storage.py -q
 ```
