@@ -327,6 +327,49 @@ def format_cart_blocked(detail: str | None = None) -> str:
     return message
 
 
+def _brand_in_text(brand: str, text: str) -> bool:
+    return brand.strip().lower() in text.strip().lower()
+
+
+def _should_show_brand_for_results(results: list[dict[str, Any]]) -> list[bool]:
+    brands = [str(item.get("brand") or "").strip() for item in results]
+    normalized_brands = {brand.lower() for brand in brands if brand}
+    multiple_brands = len(normalized_brands) > 1
+    show_brand: list[bool] = []
+    for item in results:
+        brand = str(item.get("brand") or "").strip()
+        description = str(item.get("description") or "item")
+        if not brand:
+            show_brand.append(False)
+            continue
+        show_brand.append(multiple_brands or not _brand_in_text(brand, description))
+    return show_brand
+
+
+def format_search_result_line(
+    index: int,
+    result: dict[str, Any],
+    *,
+    show_brand: bool = False,
+) -> str:
+    description = str(result.get("description") or "item").strip()
+    brand = str(result.get("brand") or "").strip()
+    size = str(result.get("size") or "").strip()
+    price = str(result.get("price") or "").strip()
+
+    if show_brand and brand and not _brand_in_text(brand, description):
+        title = f"{brand} {description}"
+    else:
+        title = description
+
+    parts = [title]
+    if size and not _brand_in_text(size, title):
+        parts.append(size)
+    if price:
+        parts.append(price)
+    return f"{index}. {' — '.join(parts)}"
+
+
 def format_needs_choice_response(payload: dict[str, Any]) -> str:
     requested = payload.get("requested_item") or payload.get("normalized_name") or "item"
     search_query = payload.get("search_query") or requested
@@ -352,17 +395,16 @@ def format_needs_choice_response(payload: dict[str, Any]) -> str:
     else:
         lines = [f'Found multiple matches for "{requested}":', ""]
 
-    for index, result in enumerate(results, start=page_start):
-        name = result.get("description") or "item"
-        size = result.get("size")
-        price = result.get("price")
-        detail_parts = [name]
-        if size:
-            detail_parts.append(str(size))
-        line = f"{index}. {' — '.join(detail_parts)}"
-        if price:
-            line += f" — {price}"
-        lines.append(line)
+    show_brand_flags = _should_show_brand_for_results(results)
+    for offset, result in enumerate(results):
+        index = page_start + offset
+        lines.append(
+            format_search_result_line(
+                index,
+                result,
+                show_brand=show_brand_flags[offset],
+            )
+        )
 
     lines.append("")
     lines.append("Reply with:")
@@ -374,9 +416,12 @@ def format_needs_choice_response(payload: dict[str, Any]) -> str:
         lines.append("- more")
     if has_back:
         lines.append("- back")
-    lines.append("- prefer <number> to remember it")
     lines.append("- search <query> to refine")
+    lines.append("- prefer <number> to remember this choice")
     lines.append("- cancel")
+    if has_more:
+        lines.append("")
+        lines.append('Not seeing it? Reply "more" or "search <better query>".')
     return "\n".join(lines)
 
 

@@ -543,6 +543,145 @@ class TestPendingSelectionStore:
         assert get_pending_selection(CHAT_KEY, db_path=pending_db) is None
 
 
+class TestFormatNeedsChoiceResponse:
+    def test_product_display_with_title_size_and_price(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        body = format_needs_choice_response(
+            {
+                "requested_item": "whole milk",
+                "search_query": "whole milk",
+                "page_start": 1,
+                "page_end": 2,
+                "has_more": False,
+                "has_back": False,
+                "results": [
+                    {
+                        "description": "Whole Milk",
+                        "brand": "Kroger",
+                        "size": "1 gal",
+                        "price": "$3.89",
+                    },
+                    {
+                        "description": "Whole Milk",
+                        "brand": "Fairlife",
+                        "size": "52 fl oz",
+                        "price": "$4.99",
+                    },
+                ],
+            }
+        )
+        assert "1. Kroger Whole Milk — 1 gal — $3.89" in body
+        assert "2. Fairlife Whole Milk — 52 fl oz — $4.99" in body
+
+    def test_missing_price_formats_cleanly(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        body = format_needs_choice_response(
+            {
+                "requested_item": "bagels",
+                "page_start": 1,
+                "page_end": 1,
+                "has_more": False,
+                "results": [
+                    {
+                        "description": "Plain Bagels",
+                        "size": "6 ct",
+                    }
+                ],
+            }
+        )
+        assert "1. Plain Bagels — 6 ct" in body
+        assert body.count("—") == 1
+
+    def test_missing_size_formats_cleanly(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        body = format_needs_choice_response(
+            {
+                "requested_item": "bagels",
+                "page_start": 1,
+                "page_end": 1,
+                "has_more": False,
+                "results": [
+                    {
+                        "description": "Plain Bagels",
+                        "price": "$3.99",
+                    }
+                ],
+            }
+        )
+        assert "1. Plain Bagels — $3.99" in body
+
+    def test_brand_omitted_when_already_in_title(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        body = format_needs_choice_response(
+            {
+                "requested_item": "milk",
+                "page_start": 1,
+                "page_end": 1,
+                "has_more": False,
+                "results": [
+                    {
+                        "description": "Kroger Whole Milk",
+                        "brand": "Kroger",
+                        "size": "1 gal",
+                        "price": "$3.89",
+                    }
+                ],
+            }
+        )
+        assert "1. Kroger Whole Milk — 1 gal — $3.89" in body
+        assert "Kroger Kroger" not in body
+
+    def test_prompt_includes_search_and_prefer_guidance(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        body = format_needs_choice_response(
+            {
+                "requested_item": "bagels",
+                "page_start": 1,
+                "page_end": 2,
+                "has_more": False,
+                "results": [
+                    {"description": "Plain Bagels", "size": "6 ct", "price": "$3.99"},
+                    {"description": "Everything Bagels", "size": "6 ct", "price": "$4.29"},
+                ],
+            }
+        )
+        assert "- search <query> to refine" in body
+        assert "- prefer <number> to remember this choice" in body
+        assert "- cancel" in body
+
+    def test_more_hint_only_when_more_results_available(self):
+        from finch_telegram.commands import format_needs_choice_response
+
+        without_more = format_needs_choice_response(
+            {
+                "requested_item": "bagels",
+                "page_start": 1,
+                "page_end": 1,
+                "has_more": False,
+                "results": [{"description": "Plain Bagels", "price": "$3.99"}],
+            }
+        )
+        with_more = format_needs_choice_response(
+            {
+                "requested_item": "bagels",
+                "page_start": 1,
+                "page_end": 10,
+                "has_more": True,
+                "results": [
+                    {"description": f"Bagel {index}", "price": f"${index}.99"}
+                    for index in range(1, 11)
+                ],
+            }
+        )
+        assert "Not seeing it?" not in without_more
+        assert 'Not seeing it? Reply "more" or "search <better query>".' in with_more
+
+
 class TestTelegramSearchSelection:
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.cart_add")
@@ -583,7 +722,10 @@ class TestTelegramSearchSelection:
         assert kwargs["chat_key"] == CHAT_KEY
         body = mock_send.call_args[0][1]
         assert "Found multiple matches" in body
-        assert "1. Plain Bagels 6 ct" in body
+        assert "1. Plain Bagels 6 ct — $3.99" in body
+        assert "- search <query> to refine" in body
+        assert "- prefer <number> to remember this choice" in body
+        assert "Not seeing it?" not in body
         assert "cancel" in body.lower()
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
@@ -624,9 +766,10 @@ class TestTelegramSearchSelection:
         mock_more.assert_called_once_with(CHAT_KEY)
         body = mock_send.call_args[0][1]
         assert "Showing 11-20 of 37" in body
-        assert "11. Tortilla option 11" in body
+        assert "11. Tortilla option 11 — 11 ct" in body
         assert "- back" in body
         assert "- more" in body
+        assert 'Not seeing it? Reply "more" or "search <better query>".' in body
 
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.cart_choose")
