@@ -13,20 +13,24 @@
       --text:         #e6edf3;
       --muted:        #8b949e;
       --accent:       #58a6ff;
+      --accent-soft:  rgba(88, 166, 255, 0.15);
       --ok:           #3fb950;
-      --ok-border:    #1a4a2e;
+      --ok-soft:      rgba(63, 185, 80, 0.18);
       --warn:         #d29922;
-      --warn-border:  #5c4200;
+      --warn-soft:    rgba(210, 153, 34, 0.18);
       --fail:         #f85149;
-      --fail-border:  #6b1515;
+      --fail-soft:    rgba(248, 81, 73, 0.18);
+      --purple:       #bc8cff;
+      --purple-soft:  rgba(188, 140, 255, 0.18);
       --nav-h:        64px;
       --card-radius:  14px;
+      --glow:         0 0 0 1px rgba(88, 166, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.28);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
-      height: 100%;
+      min-height: 100%;
       background: var(--bg);
       color: var(--text);
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -52,7 +56,14 @@
 
     .top-bar-title { font-size: 1.25rem; font-weight: 700; }
     .top-bar-title span { color: var(--accent); }
-    .controls { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; font-size: 0.82rem; color: var(--muted); }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      align-items: center;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
     .back-link { color: var(--accent); text-decoration: none; }
     .back-link:hover { text-decoration: underline; }
 
@@ -66,15 +77,16 @@
       border: 1px solid var(--border);
       color: var(--muted);
     }
-    .status-badge.live { color: var(--ok); border-color: var(--ok-border); }
-    .status-badge.unavailable { color: var(--warn); border-color: var(--warn-border); }
+    .status-badge.live { color: var(--ok); border-color: var(--ok-border, #1a4a2e); background: var(--ok-soft); }
+    .status-badge.unavailable { color: var(--warn); border-color: var(--warn-border, #5c4200); background: var(--warn-soft); }
+    .status-badge.stale { color: var(--warn); border-color: var(--warn-border, #5c4200); background: var(--warn-soft); }
 
     .banner {
       margin: 0.85rem 1rem 0;
-      max-width: 1100px;
+      max-width: 1200px;
       margin-left: auto;
       margin-right: auto;
-      background: var(--warn-border);
+      background: var(--warn-soft);
       border: 1px solid var(--warn);
       color: var(--warn);
       border-radius: 10px;
@@ -85,7 +97,7 @@
 
     .content {
       padding: 1rem;
-      max-width: 1100px;
+      max-width: 1200px;
       margin: 0 auto;
     }
 
@@ -107,17 +119,14 @@
     }
     .tab-link:hover { color: var(--text); border-color: var(--accent); }
 
-    .section {
-      scroll-margin-top: 1rem;
-      margin-bottom: 1rem;
-    }
+    .section { scroll-margin-top: 1rem; margin-bottom: 1.25rem; }
 
     .section-title {
       font-size: 0.78rem;
       text-transform: uppercase;
       letter-spacing: 0.07em;
       color: var(--muted);
-      margin-bottom: 0.55rem;
+      margin-bottom: 0.65rem;
     }
 
     .cards {
@@ -126,40 +135,204 @@
       gap: 0.85rem;
     }
 
-    @media (min-width: 700px) {
+    @media (min-width: 640px) {
       .cards.two-col { grid-template-columns: 1fr 1fr; }
-      .cards.three-col { grid-template-columns: repeat(3, 1fr); }
     }
 
-    .card {
-      background: var(--surface);
+    @media (min-width: 960px) {
+      .cards.three-col { grid-template-columns: repeat(3, 1fr); }
+      .cards.four-col { grid-template-columns: repeat(4, 1fr); }
+    }
+
+    .viz-card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent), var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--card-radius);
-      padding: 1rem 1.05rem;
+      padding: 1rem 1.05rem 0.95rem;
+      box-shadow: var(--glow);
     }
 
-    .card h3 {
-      font-size: 0.95rem;
-      margin-bottom: 0.55rem;
+    .viz-card h3 {
+      font-size: 0.92rem;
+      font-weight: 700;
+      margin-bottom: 0.75rem;
+      color: var(--text);
     }
 
-    .detail-row {
+    .viz-card.wide { grid-column: 1 / -1; }
+
+    .gauge-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .donut-gauge {
+      width: 110px;
+      height: 110px;
+      flex: 0 0 110px;
+    }
+
+    .gauge-center {
+      fill: var(--text);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .gauge-sub {
+      fill: var(--muted);
+      font-size: 10px;
+    }
+
+    .legend-list {
+      display: grid;
+      gap: 0.35rem;
+      flex: 1;
+      min-width: 140px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .legend-item strong { color: var(--text); font-weight: 500; }
+
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 0.35rem;
+      display: inline-block;
+    }
+
+    .load-values {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.5rem;
+      margin-top: 0.65rem;
+    }
+
+    .load-pill {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.45rem 0.55rem;
+      text-align: center;
+    }
+
+    .load-pill span {
+      display: block;
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .load-pill strong {
+      display: block;
+      font-size: 1rem;
+      margin-top: 0.15rem;
+    }
+
+    .sparkline-wrap,
+    .chart-wrap {
+      width: 100%;
+      min-height: 72px;
+    }
+
+    .chart-wrap { min-height: 150px; }
+
+    .chart-empty,
+    .viz-empty {
+      color: var(--muted);
+      font-size: 0.84rem;
+      padding: 1rem 0;
+      text-align: center;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.02);
+    }
+
+    .progress-list { display: grid; gap: 0.65rem; }
+
+    .progress-row { display: grid; gap: 0.3rem; }
+
+    .progress-head {
       display: flex;
       justify-content: space-between;
       gap: 0.75rem;
-      font-size: 0.88rem;
+      font-size: 0.82rem;
       color: var(--muted);
-      padding: 0.18rem 0;
     }
 
-    .detail-row strong {
-      color: var(--text);
-      font-weight: 500;
-      text-align: right;
+    .progress-head strong { color: var(--text); font-weight: 500; }
+
+    .progress-bar {
+      height: 8px;
+      background: var(--surface-2);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), #79c0ff);
+      transition: width 0.35s ease;
+    }
+
+    .progress-fill.warn { background: linear-gradient(90deg, var(--warn), #e3b341); }
+    .progress-fill.fail { background: linear-gradient(90deg, var(--fail), #ff7b72); }
+    .progress-fill.ok { background: linear-gradient(90deg, var(--ok), #56d364); }
+    .progress-fill.purple { background: linear-gradient(90deg, var(--purple), #d2a8ff); }
+
+    .core-bars { display: grid; gap: 0.55rem; }
+
+    .core-bar-row {
+      display: grid;
+      grid-template-columns: 52px 1fr 44px;
+      gap: 0.55rem;
+      align-items: center;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .core-bar-row strong { color: var(--text); text-align: right; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+      margin-top: 0.65rem;
+    }
+
+    .stat-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.55rem 0.65rem;
+    }
+
+    .stat-box span {
+      display: block;
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .stat-box strong {
+      display: block;
+      margin-top: 0.15rem;
+      font-size: 0.92rem;
       word-break: break-word;
     }
-
-    .detail-row.emphasis strong { color: var(--warn); }
 
     .process-table {
       width: 100%;
@@ -169,41 +342,50 @@
 
     .process-table th,
     .process-table td {
-      padding: 0.35rem 0.25rem;
+      padding: 0.45rem 0.35rem;
       border-bottom: 1px solid var(--border);
       text-align: left;
     }
 
-    .process-table th { color: var(--muted); font-weight: 600; }
+    .process-table th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
     .process-name {
-      max-width: 12rem;
+      max-width: 14rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .chart-wrap {
-      margin-top: 0.5rem;
-      min-height: 120px;
+    .metric-chip {
+      display: inline-block;
+      min-width: 3rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-align: center;
     }
-
-    .chart-empty {
-      color: var(--muted);
-      font-size: 0.85rem;
-      padding: 0.75rem 0;
-    }
-
-    .chart-line { stroke: var(--accent); fill: none; stroke-width: 2; }
-    .chart-grid { stroke: var(--border); stroke-width: 1; }
-    .chart-axis-label { fill: var(--muted); font-size: 10px; }
 
     .section-link {
       display: inline-block;
-      margin-top: 0.45rem;
+      margin-top: 0.55rem;
       font-size: 0.78rem;
       color: var(--accent);
       text-decoration: none;
     }
+
+    .chart-line { fill: none; stroke-width: 2; }
+    .chart-area { opacity: 0.22; }
+    .chart-grid { stroke: var(--border); stroke-width: 1; }
+    .chart-axis-label { fill: var(--muted); font-size: 10px; }
 
     .bottom-nav {
       position: fixed;
@@ -230,8 +412,6 @@
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
-
-    .nav-item.active { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -243,7 +423,7 @@
     </div>
     <div class="controls">
       <span id="glances-status-badge" class="status-badge {{ details.status }}">{{ 'Live' if details.glances_available else 'Unavailable' }}</span>
-      <span>Updated <strong id="updated-at">{{ details.updated_at }}</strong></span>
+      <span>Last updated <strong id="updated-at">{{ details.updated_at }}</strong></span>
       <span id="refresh-indicator">Auto-refresh {{ details.refresh_seconds }}s</span>
     </div>
   </header>
@@ -266,124 +446,117 @@
 
     <section id="overview" class="section">
       <div class="section-title">Overview</div>
-      <div class="cards two-col">
-        <div class="card" id="overview-cpu-card">
-          <h3>CPU</h3>
-          <div class="detail-row"><span>Total</span><strong data-field="cpu-total">{{ details.overview.cpu.total_display or '—' }}</strong></div>
-          {% set breakdown = details.overview.cpu.breakdown %}
-          {% if breakdown.user_display %}
-          <div class="detail-row"><span>User</span><strong>{{ breakdown.user_display }}</strong></div>
-          {% endif %}
-          {% if breakdown.system_display %}
-          <div class="detail-row"><span>System</span><strong>{{ breakdown.system_display }}</strong></div>
-          {% endif %}
-          {% if breakdown.nice_display %}
-          <div class="detail-row"><span>Nice</span><strong>{{ breakdown.nice_display }}</strong></div>
-          {% endif %}
-          {% if breakdown.idle_display %}
-          <div class="detail-row"><span>Idle</span><strong>{{ breakdown.idle_display }}</strong></div>
-          {% endif %}
-          <div class="detail-row"><span>Cores</span><strong data-field="cpu-cores">{{ details.overview.cpu.core_count or details.overview.cpu.cpu_threads or '—' }}</strong></div>
+      <div class="cards three-col">
+        <div class="viz-card" id="overview-cpu-card">
+          <h3>CPU Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-cpu" class="donut-gauge" data-gauge="cpu"></div>
+            <div id="cpu-legend" class="legend-list"></div>
+          </div>
           <a class="section-link" href="#cpu">View CPU section →</a>
         </div>
 
-        <div class="card" id="overview-load-card">
+        <div class="viz-card" id="overview-load-card">
           <h3>Load Average</h3>
-          <div class="detail-row"><span>1 / 5 / 15 min</span><strong data-field="load-average">{{ details.overview.load.average_display or '—' }}</strong></div>
-          <div class="detail-row"><span>CPU threads</span><strong data-field="cpu-threads">{{ details.overview.load.cpu_threads or '—' }}</strong></div>
-        </div>
-
-        <div class="card" id="overview-memory-card">
-          <h3>Memory</h3>
-          <div class="detail-row"><span>Used</span><strong data-field="memory-percent">{{ details.overview.memory.percent_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Used / Total</span><strong data-field="memory-used-total">{{ details.overview.memory.used_display or '—' }} / {{ details.overview.memory.total_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Free</span><strong data-field="memory-free">{{ details.overview.memory.free_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Cached</span><strong data-field="memory-cached">{{ details.overview.memory.cached_display or '—' }}</strong></div>
-        </div>
-
-        <div class="card" id="overview-swap-card">
-          <h3>Swap</h3>
-          <div class="detail-row"><span>Used</span><strong data-field="swap-percent">{{ details.overview.swap.percent_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Used / Total</span><strong data-field="swap-used-total">{{ details.overview.swap.used_display or '—' }} / {{ details.overview.swap.total_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Free</span><strong data-field="swap-free">{{ details.overview.swap.free_display or '—' }}</strong></div>
-        </div>
-
-        <div class="card" id="overview-temp-card">
-          <h3>Temperatures</h3>
-          <div id="overview-temps">
-            {% for sensor in details.overview.temperatures[:6] %}
-            <div class="detail-row{% if sensor.is_highest %} emphasis{% endif %}">
-              <span>{{ sensor.label }}</span>
-              <strong>{{ sensor.value_display }}</strong>
-            </div>
-            {% else %}
-            <div class="detail-row"><span>CPU</span><strong>—</strong></div>
-            {% endfor %}
+          <div id="sparkline-load" class="sparkline-wrap" data-chart="load-sparkline"></div>
+          <div class="load-values">
+            <div class="load-pill"><span>1 min</span><strong id="load-1">—</strong></div>
+            <div class="load-pill"><span>5 min</span><strong id="load-5">—</strong></div>
+            <div class="load-pill"><span>15 min</span><strong id="load-15">—</strong></div>
           </div>
         </div>
 
-        <div class="card" id="overview-system-card">
+        <div class="viz-card" id="overview-memory-card">
+          <h3>Memory Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-memory" class="donut-gauge" data-gauge="memory"></div>
+            <div id="memory-legend" class="legend-list"></div>
+          </div>
+        </div>
+
+        <div class="viz-card" id="overview-swap-card">
+          <h3>Swap Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-swap" class="donut-gauge" data-gauge="swap"></div>
+            <div id="swap-legend" class="legend-list"></div>
+          </div>
+        </div>
+
+        <div class="viz-card" id="overview-temp-card">
+          <h3>Temperatures</h3>
+          <div id="overview-temps" class="progress-list"></div>
+        </div>
+
+        <div class="viz-card" id="overview-containers-card">
+          <h3>Containers</h3>
+          <div class="gauge-row">
+            <div id="gauge-containers" class="donut-gauge" data-gauge="containers"></div>
+            <div id="containers-legend" class="legend-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cards two-col" style="margin-top:0.85rem;">
+        <div class="viz-card wide" id="overview-processes-card">
+          <h3>Top CPU Processes</h3>
+          <table class="process-table">
+            <thead>
+              <tr><th>Process</th><th>CPU</th><th>Memory</th></tr>
+            </thead>
+            <tbody id="overview-processes-body"></tbody>
+          </table>
+          <a class="section-link" href="#processes">View all processes →</a>
+        </div>
+
+        <div class="viz-card" id="overview-disks-card">
+          <h3>Disk Usage</h3>
+          <div id="overview-disks" class="progress-list"></div>
+        </div>
+
+        <div class="viz-card" id="overview-system-card">
           <h3>System</h3>
-          {% set sys = details.overview.system %}
-          <div class="detail-row"><span>Host</span><strong data-field="system-host">{{ sys.hostname or '—' }}</strong></div>
-          <div class="detail-row"><span>Uptime</span><strong data-field="system-uptime">{{ sys.uptime or '—' }}</strong></div>
-          <div class="detail-row"><span>CPU threads</span><strong data-field="system-threads">{{ sys.cpu_threads or '—' }}</strong></div>
-          <div class="detail-row"><span>Containers</span><strong data-field="system-containers">{{ sys.containers_running }} running</strong></div>
-          {% if sys.os %}
-          <div class="detail-row"><span>OS</span><strong data-field="system-os">{{ sys.os }}</strong></div>
-          {% endif %}
-          {% if sys.kernel %}
-          <div class="detail-row"><span>Kernel</span><strong data-field="system-kernel">{{ sys.kernel }}</strong></div>
-          {% endif %}
+          <div class="stat-grid">
+            <div class="stat-box"><span>Host</span><strong id="system-host">{{ details.system.hostname or '—' }}</strong></div>
+            <div class="stat-box"><span>Uptime</span><strong id="system-uptime">{{ details.system.uptime or '—' }}</strong></div>
+            <div class="stat-box"><span>CPU threads</span><strong id="system-threads">{{ details.system.cpu_threads or '—' }}</strong></div>
+            <div class="stat-box"><span>OS</span><strong id="system-os">{{ details.system.os or '—' }}</strong></div>
+          </div>
         </div>
       </div>
 
-      <div class="card" style="margin-top:0.85rem;" id="overview-processes-card">
-        <h3>Top CPU Processes</h3>
-        <table class="process-table">
-          <thead>
-            <tr><th>Process</th><th>CPU</th><th>Memory</th></tr>
-          </thead>
-          <tbody id="overview-processes-body">
-            {% for proc in details.overview.top_processes %}
-            <tr>
-              <td class="process-name" title="{{ proc.name }}">{{ proc.name }}</td>
-              <td>{{ proc.cpu_percent_display }}</td>
-              <td>{{ proc.memory_percent_display or '—' }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="3">No process data available.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        <a class="section-link" href="#processes">View all processes →</a>
-      </div>
-
-      <div class="cards three-col" style="margin-top:0.85rem;">
-        <div class="card">
-          <h3>CPU history (1h)</h3>
-          <div class="chart-wrap" id="chart-cpu-1h" data-chart="cpu_1h"></div>
+      <div class="cards two-col" style="margin-top:0.85rem;">
+        <div class="viz-card">
+          <h3>CPU Usage</h3>
+          <div class="chart-wrap" id="chart-cpu-1h" data-chart="cpu-history"></div>
         </div>
-        <div class="card">
-          <h3>Load average (1h)</h3>
-          <div class="chart-wrap" id="chart-load-1h" data-chart="load_1h"></div>
+        <div class="viz-card">
+          <h3>Load Average</h3>
+          <div class="chart-wrap" id="chart-load-1h" data-chart="load-history"></div>
         </div>
-        <div class="card">
-          <h3>Memory usage (1h)</h3>
-          <div class="chart-wrap" id="chart-memory-1h" data-chart="memory_1h"></div>
+        <div class="viz-card">
+          <h3>Memory Usage</h3>
+          <div class="chart-wrap" id="chart-memory-1h" data-chart="memory-history"></div>
+        </div>
+        <div class="viz-card">
+          <h3>Network</h3>
+          <div class="chart-wrap" id="chart-network-1h" data-chart="network-history"></div>
         </div>
       </div>
     </section>
 
     <section id="cpu" class="section">
       <div class="section-title">CPU</div>
-      <div class="card">
-        <div class="detail-row"><span>Total CPU</span><strong data-field="cpu-total-detail">{{ details.cpu.total_display or '—' }}</strong></div>
-        <div class="detail-row"><span>Threads</span><strong data-field="cpu-threads-detail">{{ details.cpu.cpu_threads or '—' }}</strong></div>
-        <div id="cpu-per-core">
-          {% for core in details.cpu.per_core %}
-          <div class="detail-row"><span>Core {{ core.core }}</span><strong>{{ core.cpu_percent_display }}</strong></div>
-          {% endfor %}
+      <div class="cards two-col">
+        <div class="viz-card">
+          <h3>CPU Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-cpu-detail" class="donut-gauge" data-gauge="cpu-detail"></div>
+            <div id="cpu-legend-detail" class="legend-list"></div>
+          </div>
+        </div>
+        <div class="viz-card">
+          <h3>Per-core Usage</h3>
+          <div id="cpu-per-core" class="core-bars"></div>
         </div>
       </div>
     </section>
@@ -391,112 +564,89 @@
     <section id="memory" class="section">
       <div class="section-title">Memory</div>
       <div class="cards two-col">
-        <div class="card">
-          <h3>RAM</h3>
-          <div class="detail-row"><span>Used</span><strong data-field="memory-percent-detail">{{ details.memory.percent_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Summary</span><strong data-field="memory-summary">{{ details.memory.summary or '—' }}</strong></div>
+        <div class="viz-card">
+          <h3>Memory Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-memory-detail" class="donut-gauge" data-gauge="memory-detail"></div>
+            <div id="memory-legend-detail" class="legend-list"></div>
+          </div>
         </div>
-        <div class="card">
-          <h3>Swap</h3>
-          <div class="detail-row"><span>Used</span><strong data-field="swap-percent-detail">{{ details.swap.percent_display or '—' }}</strong></div>
-          <div class="detail-row"><span>Summary</span><strong data-field="swap-summary">{{ details.swap.summary or '—' }}</strong></div>
+        <div class="viz-card">
+          <h3>Swap Usage</h3>
+          <div class="gauge-row">
+            <div id="gauge-swap-detail" class="donut-gauge" data-gauge="swap-detail"></div>
+            <div id="swap-legend-detail" class="legend-list"></div>
+          </div>
         </div>
       </div>
     </section>
 
     <section id="processes" class="section">
       <div class="section-title">Processes</div>
-      <div class="card">
+      <div class="viz-card">
+        <h3>Top CPU Processes</h3>
         <table class="process-table">
           <thead>
             <tr><th>Process</th><th>CPU</th><th>Memory</th></tr>
           </thead>
-          <tbody id="processes-body">
-            {% for proc in details.processes %}
-            <tr>
-              <td class="process-name" title="{{ proc.name }}">{{ proc.name }}</td>
-              <td>{{ proc.cpu_percent_display }}</td>
-              <td>{{ proc.memory_percent_display or '—' }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="3">No process data available.</td></tr>
-            {% endfor %}
-          </tbody>
+          <tbody id="processes-body"></tbody>
         </table>
       </div>
     </section>
 
     <section id="disks" class="section">
       <div class="section-title">Disks</div>
-      <div class="card">
-        <table class="process-table" id="disks-table">
-          <thead>
-            <tr><th>Mount</th><th>Device</th><th>Used</th><th>Free</th></tr>
-          </thead>
-          <tbody>
-            {% for disk in details.disks %}
-            <tr>
-              <td>{{ disk.mount }}</td>
-              <td>{{ disk.device }}</td>
-              <td>{{ disk.percent_display or '—' }}{% if disk.used_display %} ({{ disk.used_display }}){% endif %}</td>
-              <td>{{ disk.free_display or '—' }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="4">No filesystem data available.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="viz-card">
+        <h3>Disk Usage</h3>
+        <div id="disks-list" class="progress-list"></div>
       </div>
     </section>
 
     <section id="network" class="section">
       <div class="section-title">Network</div>
-      <div class="card">
-        <table class="process-table" id="network-table">
-          <thead>
-            <tr><th>Interface</th><th>Recv</th><th>Sent</th><th>Speed</th></tr>
-          </thead>
-          <tbody>
-            {% for iface in details.network %}
-            <tr>
-              <td>{{ iface.name }}</td>
-              <td>{{ iface.bytes_recv_display or '—' }}</td>
-              <td>{{ iface.bytes_sent_display or '—' }}</td>
-              <td>{% if iface.speed_mbps %}{{ iface.speed_mbps }} Mbps{% else %}—{% endif %}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="4">No network data available.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="cards two-col">
+        <div class="viz-card">
+          <h3>Network</h3>
+          <table class="process-table" id="network-table">
+            <thead>
+              <tr><th>Interface</th><th>Recv</th><th>Sent</th><th>Speed</th></tr>
+            </thead>
+            <tbody id="network-body"></tbody>
+          </table>
+        </div>
+        <div class="viz-card">
+          <h3>Network I/O</h3>
+          <div class="chart-wrap" id="chart-network-detail" data-chart="network-detail"></div>
+        </div>
       </div>
     </section>
 
     <section id="sensors" class="section">
       <div class="section-title">Sensors</div>
-      <div class="card" id="sensors-list">
-        {% for sensor in details.sensors %}
-        <div class="detail-row{% if sensor.is_highest %} emphasis{% endif %}">
-          <span>{{ sensor.label }}</span>
-          <strong>{{ sensor.value_display }}</strong>
-        </div>
-        {% else %}
-        <div class="detail-row"><span>Temperature</span><strong>—</strong></div>
-        {% endfor %}
+      <div class="viz-card">
+        <h3>Temperatures</h3>
+        <div id="sensors-list" class="progress-list"></div>
       </div>
     </section>
 
     <section id="system" class="section">
       <div class="section-title">System</div>
-      <div class="card">
-        {% set sys = details.system %}
-        <div class="detail-row"><span>Host</span><strong>{{ sys.hostname or '—' }}</strong></div>
-        <div class="detail-row"><span>Uptime</span><strong>{{ sys.uptime or '—' }}</strong></div>
-        <div class="detail-row"><span>CPU threads</span><strong>{{ sys.cpu_threads or '—' }}</strong></div>
-        <div class="detail-row"><span>Containers running</span><strong>{{ sys.containers_running }}</strong></div>
-        {% if sys.os %}<div class="detail-row"><span>OS</span><strong>{{ sys.os }}</strong></div>{% endif %}
-        {% if sys.kernel %}<div class="detail-row"><span>Kernel</span><strong>{{ sys.kernel }}</strong></div>{% endif %}
-        {% if sys.hardware %}<div class="detail-row"><span>Hardware</span><strong>{{ sys.hardware }}</strong></div>{% endif %}
+      <div class="cards two-col">
+        <div class="viz-card">
+          <h3>System</h3>
+          <div class="stat-grid">
+            <div class="stat-box"><span>Host</span><strong id="system-host-detail">{{ details.system.hostname or '—' }}</strong></div>
+            <div class="stat-box"><span>Uptime</span><strong id="system-uptime-detail">{{ details.system.uptime or '—' }}</strong></div>
+            <div class="stat-box"><span>CPU threads</span><strong id="system-threads-detail">{{ details.system.cpu_threads or '—' }}</strong></div>
+            <div class="stat-box"><span>Containers</span><strong id="system-containers-detail">{{ details.system.containers_running }} running</strong></div>
+            <div class="stat-box"><span>OS</span><strong id="system-os-detail">{{ details.system.os or '—' }}</strong></div>
+            <div class="stat-box"><span>Kernel</span><strong id="system-kernel-detail">{{ details.system.kernel or '—' }}</strong></div>
+          </div>
+        </div>
+        <div class="viz-card">
+          <h3>Containers</h3>
+          <div id="system-containers-list" class="progress-list"></div>
+        </div>
       </div>
     </section>
   </main>

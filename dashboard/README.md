@@ -170,20 +170,42 @@ on the details page — not the home card.
 
 ### Raven Health details page (`/raven/health`)
 
-Full-page read-only telemetry powered by Glances with sections for Overview,
-CPU, Memory, Processes, Disks, Network, Sensors, and System. Overview cards
-include top CPU processes, temperatures, and simple 1h history charts from
-JSONL when samples exist.
+Full-page read-only Glances dashboard with a dark card grid, SVG donut gauges,
+sparklines, area charts, and progress bars. No heavy charting stack — just
+vanilla JS helpers in `dashboard/static/raven_health.js`.
+
+Visual sections:
+
+- **Overview** — CPU / memory / swap / container donut gauges, load sparkline,
+  temperature and disk progress bars, top CPU process table, 1h history charts
+- **CPU** — total gauge, per-core bars, user/system/nice/idle legend
+- **Memory** — RAM and swap gauges with used/cached/free legend
+- **Processes** — compact table sorted by Glances (top CPU first)
+- **Disks** — mount usage progress bars
+- **Network** — interface table plus optional I/O history chart
+- **Sensors** — temperature bars with highest temp emphasized
+- **System** — host, uptime, OS/kernel, container summary
 
 | Route | Purpose |
 |-------|---------|
 | `GET /raven/health` | Server-rendered details page (initial data + JS refresh) |
 | `GET /api/raven/health/glances` | Normalized JSON payload for live updates |
 
-Auto-refresh defaults to **5 seconds** on the details page via vanilla JS
+Auto-refresh defaults to **5 seconds** on the details page via vanilla JS fetch
 (`dashboard/static/raven_health.js`). Configure with
-`DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS`. The Nest home page still uses the
-global meta refresh (`DASHBOARD_AUTO_REFRESH_SECONDS`).
+`DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS`. The page keeps the last good snapshot
+visible if a refresh fails (badge shows **Stale**). The Nest home page still
+uses the global meta refresh (`DASHBOARD_AUTO_REFRESH_SECONDS`).
+
+History charts use existing JSONL samples when available. The API exposes both
+legacy and normalized keys:
+
+- `cpu_1h` / `cpu_history_1h`
+- `load_1h` / `load_history_1h`
+- `memory_1h` / `memory_history_1h`
+- `network_1h` / `network_history_1h` (empty until network history exists)
+
+When history is missing, cards show a dashed empty state instead of a blank area.
 
 Glances API v4 endpoints used:
 
@@ -329,7 +351,7 @@ Verify dashboard display and fallback:
 ```bash
 curl -sf http://localhost:8088/health
 curl -s http://localhost:8088/ | grep -E 'Raven Health|Details'
-curl -s http://localhost:8088/raven/health | grep -E 'Raven Health Details|Glances|Top CPU Processes'
+curl -s http://localhost:8088/raven/health | grep -E 'CPU Usage|Load Average|Memory Usage|Disk Usage|Network|Top CPU Processes'
 curl -s http://localhost:8088/api/raven/health/glances | jq '.status'
 ```
 
