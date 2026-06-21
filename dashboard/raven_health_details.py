@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from glances_client import (
     GLANCES_UNAVAILABLE_LABEL,
     fetch_glances_details_snapshot,
+    fetch_glances_version,
     glances_enabled,
 )
 from host_cpu_metrics import NOT_AVAILABLE_LABEL, format_celsius
+from host_status import HOST_PROC
 from raven_metrics_history import (
     COLLECTING_LABEL,
     MetricsSample,
@@ -20,6 +23,13 @@ from raven_metrics_history import (
     read_history,
 )
 from storage_probe import StorageStatus, get_storage_status
+
+_CONTAINER_HOSTNAME_RE = re.compile(r"^[a-f0-9]{12}$")
+_CORE_SENSOR_RE = re.compile(r"core\s*\d|coretemp", re.IGNORECASE)
+_PACKAGE_SENSOR_RE = re.compile(
+    r"package|x86_pkg|pkg_temp|cpu.?package",
+    re.IGNORECASE,
+)
 
 RAVEN_HEALTH_REFRESH_SECONDS = int(
     os.environ.get("DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS", "5")
@@ -107,23 +117,163 @@ def _disks_from_storage_probe() -> list[dict[str, Any]]:
 
 def _resolve_disks(glances: dict[str, Any]) -> list[dict[str, Any]]:
     filesystems = glances.get("filesystems") or []
-    if filesystems:
-        return filesystems
-    fallback = _disks_from_storage_probe()
-    if fallback:
-        glances["filesystems"] = fallback
-        glances["disks_source"] = "storage_probe"
-    return fallback
+    if not filesystems:
+        fallback = _disks_from_storage_probe()
+        if fallback:
+            glances["filesystems"] = fallback
+            glances["disks_source"] = "storage_probe"
+            filesystems = fallback
+    return _prepare_disks(filesystems)
 
 
-def _history_series_1h(
-    samples: list[MetricsSample],
+def _resolve_hostname(*, raven: dict[str, Any], glances_hostname: str | None) -> str:
+    """Prefer Raven host hostname over Glances/container IDs."""
+    for candidate in (raven.get("hostname"), glances_hostname):
+        if not candidate:
+            continue
+        name = str(candidate).strip()
+        if not name:
+            continue
+        if _CONTAINER_HOSTNAME_RE.match(name):
+            continue
+        return name
+    return str(raven.get("hostname") or glances_hostname or "raven")
+
+
+def _read_host_kernel() -> str | None:
+    version = HOST_PROC / "version"
+    if version.is_file():
+        try:
+            line = version.read_text(encoding="utf-8").splitlines()[0]
+            match = re.search(r"Linux version (\S+)", line)
+            if match:
+                return match.group(1)
+        except OSError:
+            pass
+    return None
+
+
+def _prepare_disks(disks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort disks by utilization and tag storage volumes."""
+    prepared: list[dict[str, Any]] = []
+    for disk in disks:
+        mount = str(disk.get("mount") or "")
+        item = dict(disk)
+        item["is_storage"] = mount.startswith("/mnt/storage")
+        item["category"] = "storage" if item["is_storage"] else "system"
+        prepared.append(item)
+    prepared.sort(
+        key=lambda row: (
+            -num if (num := row.get("percent")) is not None else -1.0,
+            str(row.get("mount") or ""),
+        )
+    )
+    return prepared
+
+
+def _summarize_sensors(sensors: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collapse noisy temperature sensors into a compact summary."""
+    if not sensors:
+        return {"summary": [], "raw": []}
+
+    temps = [
+        s for s in sensors if s.get("value_celsius") is not None
+    ]
+    if not temps:
+        return {"summary": [], "raw": sensors}
+
+    highest = max(temps, key=lambda s: float(s["value_celsius"]))
+    package = next(
+        (s for s in temps if _PACKAGE_SENSOR_RE.search(str(s.get("label") or ""))),
+        None,
+    )
+    core_temps = [
+        s for s in temps if _CORE_SENSOR_RE.search(str(s.get("label") or ""))
+    ]
+    core_max = (
+        max(core_temps, key=lambda s: float(s["value_celsius"]))
+        if core_temps
+        else None
+    )
+
+    summary: list[dict[str, Any]] = []
+
+    def _row(label: str, sensor: dict[str, Any] | None) -> None:
+        if sensor is None:
+            return
+        summary.append(
+            {
+                "label": label,
+                "source_label": sensor.get("label"),
+                "value_celsius": sensor.get("value_celsius"),
+                "value_display": sensor.get("value_display"),
+            }
+        )
+
+    _row("CPU Package", package or highest)
+    _row("Core Max", core_max)
+    _row(
+        "Highest System Temp",
+        highest,
+    )
+
+    seen: set[str] = set()
+    deduped_summary: list[dict[str, Any]] = []
+    for item in summary:
+        key = str(item.get("source_label") or item.get("label"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_summary.append(item)
+
+    return {"summary": deduped_summary, "raw": sensors}
+
+
+def _build_meta(*, updated_at: str) -> dict[str, Any]:
+    return {
+        "dashboard_version": "1.0",
+        "build_git_commit": os.environ.get("DASHBOARD_BUILD_GIT_COMMIT", "unknown"),
+        "build_timestamp": os.environ.get("DASHBOARD_BUILD_TIMESTAMP", "unknown"),
+        "glances_version": fetch_glances_version() if glances_enabled() else None,
+        "last_updated": updated_at,
+    }
+
+
+def _build_summary(
     *,
-    now: datetime,
+    glances: dict[str, Any],
+    containers: dict[str, Any],
+    metrics: dict[str, Any],
 ) -> dict[str, Any]:
-    cutoff = now - timedelta(hours=1)
-    window = [sample for sample in samples if sample.timestamp >= cutoff]
-    window.sort(key=lambda sample: sample.timestamp)
+    """Compact at-a-glance health strip for the details page header."""
+    running = containers.get("running")
+    total = containers.get("total")
+    container_label = "—"
+    if running is not None and total is not None:
+        unhealthy = max(0, int(total) - int(running))
+        if unhealthy == 0:
+            container_label = f"{running}/{total} healthy"
+        else:
+            container_label = f"{running}/{total} ({unhealthy} down)"
+
+    temp_display = glances.get("temp_now") or metrics.get("temp_now") or "—"
+    load_1 = glances.get("load_1")
+    return {
+        "cpu_display": glances.get("cpu_now") or metrics.get("cpu_now") or "—",
+        "memory_display": (
+            f"{glances['memory_percent']:.0f}%"
+            if glances.get("memory_percent") is not None
+            else (metrics.get("memory_live") or "—")
+        ),
+        "temp_display": temp_display,
+        "load_display": f"{load_1:.2f}" if load_1 is not None else "—",
+        "containers_display": container_label,
+    }
+
+
+def _series_for_window(
+    window: list[MetricsSample],
+) -> dict[str, list[dict[str, Any]]]:
     cpu_series: list[dict[str, Any]] = []
     load_series: list[dict[str, Any]] = []
     memory_series: list[dict[str, Any]] = []
@@ -154,20 +304,42 @@ def _history_series_1h(
                     "tx_bps": tx,
                 }
             )
-    collecting = len(window) < HISTORY_MIN_CHART_POINTS
     return {
-        "cpu_1h": cpu_series,
-        "load_1h": load_series,
-        "memory_1h": memory_series,
-        "network_1h": network_series,
-        "cpu_history_1h": cpu_series,
-        "load_history_1h": load_series,
-        "memory_history_1h": memory_series,
-        "network_history_1h": network_series,
-        "collecting": collecting,
-        "sample_count_1h": len(window),
-        "collecting_label": COLLECTING_LABEL,
+        "cpu": cpu_series,
+        "load": load_series,
+        "memory": memory_series,
+        "network": network_series,
     }
+
+
+def _build_history_series(
+    samples: list[MetricsSample],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """Build 1h/6h/24h chart series from JSONL samples."""
+    windows: dict[str, list[MetricsSample]] = {}
+    for hours, key in ((1, "1h"), (6, "6h"), (24, "24h")):
+        cutoff = now - timedelta(hours=hours)
+        window = [sample for sample in samples if sample.timestamp >= cutoff]
+        window.sort(key=lambda sample: sample.timestamp)
+        windows[key] = window
+
+    history: dict[str, Any] = {
+        "collecting": len(windows["1h"]) < HISTORY_MIN_CHART_POINTS,
+        "sample_count_1h": len(windows["1h"]),
+        "collecting_label": "Collecting history — check back in a few minutes",
+        "default_range": "1h",
+        "ranges": ["1h", "6h", "24h"],
+    }
+
+    for range_key, window in windows.items():
+        series = _series_for_window(window)
+        for metric, points in series.items():
+            history[f"{metric}_{range_key}"] = points
+            history[f"{metric}_history_{range_key}"] = points
+
+    return history
 
 
 def _memory_section(glances: dict[str, Any]) -> dict[str, Any]:
@@ -218,19 +390,32 @@ def _system_section(
 ) -> dict[str, Any]:
     system_info = glances.get("system_info") or {}
     uptime = _format_uptime(glances.get("uptime_seconds")) or raven.get("uptime")
-    hostname = system_info.get("hostname") or raven.get("hostname")
-    kernel = system_info.get("kernel")
+    hostname = _resolve_hostname(
+        raven=raven,
+        glances_hostname=system_info.get("hostname"),
+    )
+    kernel = system_info.get("kernel") or _read_host_kernel()
     os_name = system_info.get("os")
     if os_name and system_info.get("os_version"):
         os_name = f"{os_name} {system_info['os_version']}"
     return {
         "hostname": hostname,
+        "host_label": hostname,
         "uptime": uptime,
         "cpu_threads": glances.get("cpu_threads"),
         "containers_running": docker_running,
         "os": os_name,
         "kernel": kernel,
         "hardware": system_info.get("hardware"),
+        "display_lines": [
+            line
+            for line in (
+                f"Host: {hostname}" if hostname else None,
+                f"OS: {os_name}" if os_name else None,
+                f"Kernel: {kernel}" if kernel else None,
+            )
+            if line
+        ],
     }
 
 
@@ -280,6 +465,9 @@ def normalize_glances_details(
         docker_running=docker_running,
         docker_containers=glances.get("docker_containers") or [],
     )
+    sensors_raw = glances.get("sensors") or []
+    sensors = _summarize_sensors(sensors_raw)
+    processes = glances.get("processes") or top_processes
 
     return {
         "status": status,
@@ -287,6 +475,12 @@ def normalize_glances_details(
         "glances_available": available,
         "glances_status": glances.get("status_message"),
         "refresh_seconds": RAVEN_HEALTH_REFRESH_SECONDS,
+        "summary": _build_summary(
+            glances=glances,
+            containers=containers,
+            metrics=metrics,
+        ),
+        "meta": _build_meta(updated_at=updated_at),
         "overview": {
             "cpu": {
                 "total_display": glances.get("cpu_now"),
@@ -304,7 +498,8 @@ def normalize_glances_details(
             },
             "memory": _memory_section(glances),
             "swap": _swap_section(glances),
-            "temperatures": glances.get("sensors") or [],
+            "temperatures": sensors.get("summary") or [],
+            "temperatures_raw": sensors.get("raw") or [],
             "top_processes": overview_processes,
             "system": _system_section(
                 glances=glances,
@@ -331,11 +526,13 @@ def normalize_glances_details(
         },
         "memory": _memory_section(glances),
         "swap": _swap_section(glances),
-        "processes": glances.get("processes") or top_processes,
+        "processes": processes,
+        "process_count": len(processes),
         "disks": disks,
         "disks_source": glances.get("disks_source"),
         "network": glances.get("network") or [],
-        "sensors": glances.get("sensors") or [],
+        "sensors": sensors.get("summary") or [],
+        "sensors_raw": sensors.get("raw") or [],
         "system": _system_section(
             glances=glances,
             raven=raven,
@@ -435,7 +632,7 @@ def build_raven_health_details(
         samples = prune_samples(read_history(), now=ts_now)
     except OSError:
         samples = []
-    history = _history_series_1h(samples, now=ts_now)
+    history = _build_history_series(samples, now=ts_now)
 
     return normalize_glances_details(
         glances,
