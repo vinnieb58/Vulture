@@ -21,7 +21,9 @@ from glances_client import GLANCES_UNAVAILABLE_LABEL  # noqa: E402
 from raven_health_details import (
     build_raven_health_details,
     normalize_glances_details,
-    _history_series_1h,
+    _build_history_series,
+    _resolve_hostname,
+    _summarize_sensors,
 )
 
 MOCK_GLANCES = {
@@ -418,9 +420,11 @@ class TestHistorySeries:
                 cpu_percent=10.0,
             )
         ]
-        history = _history_series_1h(samples, now=now)
+        history = _build_history_series(samples, now=now)
         assert history["collecting"] is True
         assert history["sample_count_1h"] == 1
+        assert "cpu_6h" in history
+        assert "cpu_24h" in history
 
     def test_history_not_collecting_with_enough_samples(self):
         from raven_metrics_history import MetricsSample
@@ -439,9 +443,55 @@ class TestHistorySeries:
             )
             for offset in (15, 10, 5)
         ]
-        history = _history_series_1h(samples, now=now)
+        history = _build_history_series(samples, now=now)
         assert history["collecting"] is False
         assert len(history["cpu_history_1h"]) == 3
+
+
+class TestHostnameAndSensors:
+    def test_resolve_hostname_prefers_raven_over_container_id(self):
+        name = _resolve_hostname(
+            raven={"hostname": "raven"},
+            glances_hostname="d96aadbdd65a",
+        )
+        assert name == "raven"
+
+    def test_summarize_sensors_collapses_to_summary_rows(self):
+        sensors = [
+            {"label": "Package id 0", "value_celsius": 61.0, "value_display": "61°C"},
+            {"label": "Core 0", "value_celsius": 55.0, "value_display": "55°C"},
+            {"label": "Core 1", "value_celsius": 58.0, "value_display": "58°C"},
+        ]
+        result = _summarize_sensors(sensors)
+        assert len(result["summary"]) >= 2
+        assert len(result["raw"]) == 3
+
+
+class TestHealthUxPayload:
+    def test_api_includes_summary_meta_and_history_ranges(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/api/raven/health/glances")
+        data = response.json()
+        assert "summary" in data
+        assert "cpu_display" in data["summary"]
+        assert "meta" in data
+        assert data["history"]["ranges"] == ["1h", "6h", "24h"]
+        assert "cpu_6h" in data["history"]
+
+    def test_details_page_renders_summary_and_chart_ranges(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/raven/health")
+        text = response.text
+        assert 'id="health-summary"' in text
+        assert 'data-range="6h"' in text
+        assert 'id="footer-meta"' in text
+        assert "All sensor readings" in text
 
 
 class TestHealthEndpointUnchanged:

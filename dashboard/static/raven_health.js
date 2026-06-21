@@ -8,6 +8,8 @@
   var REFRESH_MS = 5000;
   var lastGoodData = null;
   var refreshFailed = false;
+  var chartRange = "1h";
+  var PROCESS_NAME_MAX = 28;
 
   var COLORS = {
     accent: "#58a6ff",
@@ -64,17 +66,37 @@
     container.appendChild(empty);
   }
 
-  function getHistory(data) {
+  function getHistory(data, range) {
+    range = range || chartRange || "1h";
     var history = (data && data.history) || {};
+    function series(metric) {
+      return history[metric + "_history_" + range]
+        || history[metric + "_" + range]
+        || (range === "1h" ? (history[metric + "_history_1h"] || history[metric + "_1h"]) : [])
+        || [];
+    }
     return {
-      cpu: history.cpu_history_1h || history.cpu_1h || [],
-      load: history.load_history_1h || history.load_1h || [],
-      memory: history.memory_history_1h || history.memory_1h || [],
-      network: history.network_history_1h || history.network_1h || [],
+      cpu: series("cpu"),
+      load: series("load"),
+      memory: series("memory"),
+      network: series("network"),
+      range: range,
       collecting: !!history.collecting,
       sampleCount: history.sample_count_1h || 0,
       collectingLabel: history.collecting_label || "Collecting history — check back in a few minutes"
     };
+  }
+
+  function truncateName(name) {
+    name = name || "unknown";
+    if (name.length <= PROCESS_NAME_MAX) return name;
+    return name.slice(0, PROCESS_NAME_MAX - 1) + "…";
+  }
+
+  function diskTone(percent) {
+    if (percent > 85) return "fail";
+    if (percent >= 70) return "warn";
+    return "ok";
   }
 
   function historyEmptyText(history, fallback) {
@@ -121,6 +143,8 @@
     svg.setAttribute("viewBox", "0 0 " + size + " " + size);
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", (options.label || "Gauge") + " " + value.toFixed(0) + "%");
+    svg.style.width = "100%";
+    svg.style.height = "100%";
 
     var track = document.createElementNS(SVG_NS, "circle");
     track.setAttribute("cx", String(center));
@@ -203,6 +227,8 @@
     svg.setAttribute("viewBox", "0 0 " + width + " " + height);
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", options.title || "Sparkline");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
 
     var points = [];
     data.forEach(function (row, index) {
@@ -247,6 +273,8 @@
     svg.setAttribute("viewBox", "0 0 " + width + " " + height);
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", options.title || "History chart");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
 
     var baseline = padding.top + plotH;
     var grid = document.createElementNS(SVG_NS, "line");
@@ -306,6 +334,35 @@
     return "ok";
   }
 
+  function renderDiskList(container, disks, emptyText) {
+    if (!container) return;
+    container.innerHTML = "";
+    var rows = diskRows(disks);
+    if (!rows.length) {
+      emptyState(container, emptyText || "No filesystem data available.");
+      return;
+    }
+    var currentGroup = null;
+    rows.forEach(function (row) {
+      if (row.group !== currentGroup) {
+        currentGroup = row.group;
+        var title = document.createElement("div");
+        title.className = "disk-group-title" + (currentGroup === "storage" ? " storage" : "");
+        title.textContent = currentGroup === "storage" ? "Storage volumes" : "System volumes";
+        container.appendChild(title);
+      }
+      var wrap = document.createElement("div");
+      wrap.className = "progress-row" + (row.isStorage ? " storage-volume" : "");
+      var percent = clamp(num(row.percent, 0), 0, 100);
+      wrap.innerHTML =
+        '<div class="progress-head"><span>' + row.label + '</span><strong>' +
+        row.display + '</strong></div>' +
+        '<div class="progress-bar"><div class="progress-fill ' + (row.tone || diskTone(percent)) +
+        '" style="width:' + percent + '%"></div></div>';
+      container.appendChild(wrap);
+    });
+  }
+
   function renderProgressList(container, rows, emptyText) {
     if (!container) return;
     container.innerHTML = "";
@@ -345,7 +402,8 @@
     });
   }
 
-  function renderProcessRows(container, processes) {
+  function renderProcessTable(container, processes, options) {
+    options = options || {};
     if (!container) return;
     container.innerHTML = "";
     if (!processes || !processes.length) {
@@ -354,14 +412,33 @@
       container.appendChild(emptyRow);
       return;
     }
-    processes.forEach(function (proc) {
+    var maxCpu = Math.max.apply(null, processes.map(function (p) { return num(p.cpu_percent, 0); }).concat([1]));
+    var maxMem = Math.max.apply(null, processes.map(function (p) { return num(p.memory_percent, 0); }).concat([1]));
+    processes.forEach(function (proc, index) {
+      var cpu = num(proc.cpu_percent, 0);
+      var mem = num(proc.memory_percent, 0);
       var row = document.createElement("tr");
+      if (index === 0) row.className = "process-row-top";
+      var cpuWidth = clamp((cpu / maxCpu) * 100, 0, 100);
+      var memWidth = clamp((mem / maxMem) * 100, 0, 100);
       row.innerHTML =
-        '<td class="process-name" title="' + (proc.name || "") + '">' + (proc.name || "unknown") + "</td>" +
-        '<td><span class="metric-chip">' + (proc.cpu_percent_display || "—") + "</span></td>" +
-        "<td>" + (proc.memory_percent_display || "—") + "</td>";
+        '<td class="process-name" title="' + (proc.name || "") + '">' + truncateName(proc.name) + "</td>" +
+        '<td class="inline-bar-cell"><div class="inline-bar"><div class="inline-bar-track"><div class="inline-bar-fill" style="width:' +
+        cpuWidth + '%"></div></div><span>' + (proc.cpu_percent_display || "—") + "</span></div></td>" +
+        '<td class="inline-bar-cell"><div class="inline-bar"><div class="inline-bar-track"><div class="inline-bar-fill mem" style="width:' +
+        memWidth + '%"></div></div><span>' + (proc.memory_percent_display || "—") + "</span></div></td>";
       container.appendChild(row);
     });
+    var summaryEl = document.getElementById(options.summaryId);
+    if (summaryEl) {
+      var shown = processes.length;
+      var total = options.totalCount != null ? options.totalCount : shown;
+      summaryEl.textContent = "Showing " + shown + " of " + total + " processes · sorted by CPU";
+    }
+  }
+
+  function renderProcessRows(container, processes) {
+    renderProcessTable(container, processes, {});
   }
 
   function renderNetworkTable(container, interfaces) {
@@ -412,6 +489,21 @@
     return "ok";
   }
 
+  function sensorSummaryRows(sensors) {
+    if (!sensors || !sensors.length) return [];
+    var maxTemp = Math.max.apply(null, sensors.map(function (s) { return num(s.value_celsius, 0); }).concat([1]));
+    return sensors.map(function (sensor) {
+      var value = num(sensor.value_celsius, 0);
+      return {
+        label: sensor.label || "sensor",
+        display: sensor.value_display || value.toFixed(0) + "°C",
+        percent: clamp((value / Math.max(maxTemp, 90)) * 100, 0, 100),
+        tone: tempTone(value),
+        emphasis: sensor.label === "Highest System Temp"
+      };
+    });
+  }
+
   function sensorRows(sensors) {
     if (!sensors || !sensors.length) return [];
     var maxTemp = Math.max.apply(null, sensors.map(function (s) { return num(s.value_celsius, 0); }).concat([1]));
@@ -427,14 +519,91 @@
     });
   }
 
+  function sensorRawRows(sensors) {
+    return sensorRows(sensors || []);
+  }
+
+  function renderSensorPanels(summaryContainer, rawContainer, summarySensors, rawSensors) {
+    renderProgressList(
+      summaryContainer,
+      sensorSummaryRows(summarySensors),
+      "No temperature sensors available."
+    );
+    if (rawContainer) {
+      renderProgressList(
+        rawContainer,
+        sensorRawRows(rawSensors),
+        "No additional sensors."
+      );
+    }
+  }
+
   function diskRows(disks) {
     return (disks || []).map(function (disk) {
+      var percent = num(disk.percent, 0);
+      var usedTotal = [disk.used_display, disk.total_display].filter(Boolean).join(" / ");
+      var display = (disk.percent_display || "—") + (usedTotal ? " · " + usedTotal : "");
       return {
-        label: disk.mount + " · " + disk.device,
-        display: (disk.percent_display || "—") + (disk.used_display ? " · " + disk.used_display : ""),
-        percent: num(disk.percent, 0),
-        tone: progressClass(num(disk.percent, 0))
+        label: disk.mount || "—",
+        display: display,
+        percent: percent,
+        tone: diskTone(percent),
+        group: disk.is_storage || disk.category === "storage" ? "storage" : "system",
+        isStorage: !!(disk.is_storage || disk.category === "storage")
       };
+    });
+  }
+
+  function renderSummaryBanner(data) {
+    var banner = document.getElementById("health-summary");
+    if (!banner) return;
+    var summary = (data && data.summary) || {};
+    var items = [
+      { label: "CPU", value: summary.cpu_display || "—" },
+      { label: "RAM", value: summary.memory_display || "—" },
+      { label: "Temp", value: summary.temp_display || "—" },
+      { label: "Load", value: summary.load_display || "—" },
+      { label: "Containers", value: summary.containers_display || "—" }
+    ];
+    banner.innerHTML = items.map(function (item) {
+      return '<span class="health-summary-item"><span>' + item.label + '</span><strong>' + item.value + "</strong></span>";
+    }).join("");
+  }
+
+  function renderSystemLines(container, system) {
+    if (!container || !system) return;
+    var lines = system.display_lines || [];
+    if (!lines.length) {
+      lines = [
+        system.hostname ? "Host: " + system.hostname : null,
+        system.os ? "OS: " + system.os : null,
+        system.kernel ? "Kernel: " + system.kernel : null
+      ].filter(Boolean);
+    }
+    container.innerHTML = lines.map(function (line) {
+      var parts = line.split(": ");
+      if (parts.length >= 2) {
+        return "<div><span>" + parts[0] + ":</span> " + parts.slice(1).join(": ") + "</div>";
+      }
+      return "<div>" + line + "</div>";
+    }).join("");
+  }
+
+  function renderFooterMeta(data) {
+    var footer = document.getElementById("footer-meta");
+    if (!footer) return;
+    var meta = (data && data.meta) || {};
+    var parts = [
+      meta.glances_version ? "Glances " + meta.glances_version : null,
+      meta.build_git_commit ? "Dashboard " + meta.build_git_commit : null,
+      meta.last_updated ? "Updated " + meta.last_updated : (data.updated_at ? "Updated " + data.updated_at : null)
+    ].filter(Boolean);
+    footer.textContent = parts.join(" · ");
+  }
+
+  function syncChartRangeButtons() {
+    document.querySelectorAll(".chart-range-btn").forEach(function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-range") === chartRange);
     });
   }
 
@@ -460,6 +629,8 @@
     if (!data) return;
 
     updateBanner(data, stale);
+    renderSummaryBanner(data);
+    renderFooterMeta(data);
     setText("updated-at", data.updated_at);
 
     var overview = data.overview || {};
@@ -469,7 +640,7 @@
     var swap = overview.swap || data.swap || {};
     var system = overview.system || data.system || {};
     var containers = overview.containers || data.containers || {};
-    var history = getHistory(data);
+    var history = getHistory(data, chartRange);
     var breakdown = cpu.breakdown || {};
 
     var cpuPercent = num(cpu.total_percent, 0);
@@ -549,59 +720,66 @@
       { label: "Share", value: containers.percent_display || "—", color: COLORS.purple }
     ]);
 
-    renderProgressList(
+    renderSensorPanels(
       document.getElementById("overview-temps"),
-      sensorRows(overview.temperatures || data.sensors),
-      "No temperature sensors available."
+      document.getElementById("overview-temps-raw"),
+      overview.temperatures || data.sensors,
+      overview.temperatures_raw || data.sensors_raw
     );
-    renderProgressList(
+    renderSensorPanels(
       document.getElementById("sensors-list"),
-      sensorRows(data.sensors),
-      "No temperature sensors available."
+      document.getElementById("sensors-raw-list"),
+      data.sensors,
+      data.sensors_raw
     );
 
-    renderProgressList(
+    renderDiskList(
       document.getElementById("overview-disks"),
-      diskRows(overview.disks || data.disks),
+      overview.disks || data.disks,
       "No filesystem data available."
     );
-    renderProgressList(
+    renderDiskList(
       document.getElementById("disks-list"),
-      diskRows(data.disks),
+      data.disks,
       "No filesystem data available."
     );
 
-    renderProcessRows(
+    renderProcessTable(
       document.getElementById("overview-processes-body"),
-      overview.top_processes || (data.processes || []).slice(0, 5)
+      overview.top_processes || (data.processes || []).slice(0, 5),
+      { summaryId: "overview-process-summary", totalCount: data.process_count }
     );
-    renderProcessRows(document.getElementById("processes-body"), data.processes);
+    renderProcessTable(
+      document.getElementById("processes-body"),
+      data.processes,
+      { summaryId: "process-summary", totalCount: data.process_count }
+    );
     renderCoreBars(document.getElementById("cpu-per-core"), cpu.per_core || (data.cpu && data.cpu.per_core) || []);
     renderNetworkTable(document.getElementById("network-body"), data.network);
     renderContainerList(document.getElementById("system-containers-list"), data.docker);
 
-    setTexts(["system-host", "system-host-detail"], system.hostname);
+    renderSystemLines(document.getElementById("system-lines"), system);
+    renderSystemLines(document.getElementById("system-lines-detail"), system);
     setTexts(["system-uptime", "system-uptime-detail"], system.uptime);
     setTexts(["system-threads", "system-threads-detail"], system.cpu_threads);
-    setTexts(["system-os", "system-os-detail"], system.os);
-    setTexts(["system-kernel-detail"], system.kernel);
     setTexts(["system-containers-detail"], containers.running == null ? "—" : containers.running + " running");
 
+    var rangeLabel = chartRange.toUpperCase();
     renderAreaChart(document.getElementById("chart-cpu-1h"), history.cpu, {
-      title: "CPU usage 1h",
+      title: "CPU usage " + rangeLabel,
       emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
       liveText: cpu.total_display || null,
       color: COLORS.accent,
       max: 100
     });
     renderAreaChart(document.getElementById("chart-load-1h"), history.load, {
-      title: "Load average 1h",
+      title: "Load average " + rangeLabel,
       emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
       liveText: load.load_1 != null ? load.load_1.toFixed(2) : null,
       color: COLORS.purple
     });
     renderAreaChart(document.getElementById("chart-memory-1h"), history.memory, {
-      title: "Memory usage 1h",
+      title: "Memory usage " + rangeLabel,
       emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
       liveText: memory.percent_display || null,
       color: COLORS.ok,
@@ -621,13 +799,13 @@
       : (history.collecting ? "Collecting network rates…" : null);
 
     renderAreaChart(document.getElementById("chart-network-1h"), history.network, {
-      title: "Network I/O 1h",
+      title: "Network I/O " + rangeLabel,
       emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
       liveText: networkLiveText,
       color: COLORS.purple
     });
     renderAreaChart(document.getElementById("chart-network-detail"), history.network, {
-      title: "Network I/O 1h",
+      title: "Network I/O " + rangeLabel,
       emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
       liveText: networkLiveText,
       color: COLORS.purple
@@ -653,6 +831,15 @@
   }
 
   if (lastGoodData) applyDetails(lastGoodData, false);
+
+  document.querySelectorAll(".chart-range-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      chartRange = btn.getAttribute("data-range") || "1h";
+      syncChartRangeButtons();
+      if (lastGoodData) applyDetails(lastGoodData, refreshFailed);
+    });
+  });
+  syncChartRangeButtons();
 
   (function initGlancesUiLink() {
     var link = document.getElementById("glances-ui-link");

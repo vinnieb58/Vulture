@@ -16,6 +16,8 @@ from host_cpu_metrics import NOT_AVAILABLE_LABEL, format_celsius, format_cpu_per
 
 logger = logging.getLogger(__name__)
 
+_cached_glances_version: str | None = None
+
 GLANCES_BASE_URL = os.environ.get(
     "DASHBOARD_GLANCES_URL", "http://glances:61208"
 ).rstrip("/")
@@ -687,6 +689,21 @@ def fetch_glances_details_snapshot() -> dict[str, Any]:
             _fetch_budget_seconds(),
         )
     return snapshot
+
+
+def fetch_glances_version(*, force: bool = False) -> str | None:
+    """Return Glances version string, cached after first successful fetch."""
+    global _cached_glances_version
+    if _cached_glances_version is not None and not force:
+        return _cached_glances_version
+    for path in ("/api/4/status", "/api/4/help"):
+        data = _fetch_json(path, timeout=0.5)
+        if isinstance(data, dict):
+            version = data.get("version") or data.get("glances_version")
+            if version:
+                _cached_glances_version = str(version)
+                return _cached_glances_version
+    return None
 
 
 def fetch_glances_history_metrics() -> dict[str, Any]:

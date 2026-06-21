@@ -36,6 +36,7 @@
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       line-height: 1.5;
       -webkit-text-size-adjust: 100%;
+      overflow-x: hidden;
     }
 
     .page {
@@ -99,6 +100,157 @@
       padding: 1rem;
       max-width: 1200px;
       margin: 0 auto;
+      overflow-x: hidden;
+    }
+
+    .health-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 0.75rem;
+      margin-bottom: 0.9rem;
+      padding: 0.75rem 0.9rem;
+      background: linear-gradient(180deg, rgba(63,185,80,0.08), transparent), var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 0.84rem;
+    }
+
+    .health-summary-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.25rem 0.55rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .health-summary-item strong { color: var(--text); font-weight: 600; }
+
+    .chart-range-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-bottom: 0.55rem;
+    }
+
+    .chart-range-btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+
+    .chart-range-btn.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .disk-group-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0.35rem 0 0.15rem;
+    }
+
+    .disk-group-title.storage { color: var(--purple); }
+
+    .progress-row.storage-volume {
+      border-left: 3px solid var(--purple);
+      padding-left: 0.55rem;
+    }
+
+    .system-lines {
+      display: grid;
+      gap: 0.35rem;
+      font-size: 0.88rem;
+      color: var(--text);
+    }
+
+    .system-lines span { color: var(--muted); }
+
+    .process-summary {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.55rem;
+    }
+
+    .process-row-top td { background: rgba(88, 166, 255, 0.08); }
+
+    .inline-bar-cell { min-width: 5.5rem; }
+
+    .inline-bar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.35rem;
+      align-items: center;
+    }
+
+    .inline-bar-track {
+      height: 6px;
+      background: var(--surface-2);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .inline-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #79c0ff);
+      border-radius: 999px;
+    }
+
+    .inline-bar-fill.mem { background: linear-gradient(90deg, var(--purple), #d2a8ff); }
+
+    .sensor-details {
+      margin-top: 0.65rem;
+      font-size: 0.82rem;
+    }
+
+    .sensor-details summary {
+      cursor: pointer;
+      color: var(--accent);
+      user-select: none;
+    }
+
+    .footer-meta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.35rem 0.85rem;
+      margin-top: 0.65rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    .table-scroll {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      max-width: 100%;
+    }
+    .chart-wrap svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      max-width: 100%;
+    }
+
+    @media (max-width: 639px) {
+      .top-bar { padding-inline: 0.85rem; }
+      .content { padding-inline: 0.75rem; }
+      .load-values { grid-template-columns: 1fr; }
+      .stat-grid { grid-template-columns: 1fr; }
+      .process-table { font-size: 0.78rem; }
+      .process-name { max-width: 8rem; }
+      .health-summary { font-size: 0.78rem; }
     }
 
     .tabs {
@@ -462,6 +614,10 @@
     Glances unavailable — showing fallback data where available.
   </div>
 
+  <div class="content" style="padding-top:0; padding-bottom:0; max-width:1200px; margin:0 auto;">
+    <div id="health-summary" class="health-summary" aria-label="Health summary"></div>
+  </div>
+
   <main class="content" id="raven-health-root">
     <nav class="tabs" aria-label="Raven Health sections">
       <a class="tab-link" href="#overview">Overview</a>
@@ -515,6 +671,10 @@
         <div class="viz-card" id="overview-temp-card">
           <h3>Temperatures</h3>
           <div id="overview-temps" class="progress-list"></div>
+          <details class="sensor-details" id="overview-temps-raw-details">
+            <summary>All sensor readings</summary>
+            <div id="overview-temps-raw" class="progress-list" style="margin-top:0.55rem;"></div>
+          </details>
         </div>
 
         <div class="viz-card" id="overview-containers-card">
@@ -527,14 +687,17 @@
       </div>
 
       <div class="cards two-col" style="margin-top:0.85rem;">
-        <div class="viz-card wide" id="overview-processes-card">
+        <div class="viz-card" id="overview-processes-card">
           <h3>Top CPU Processes</h3>
+          <div id="overview-process-summary" class="process-summary"></div>
+          <div class="table-scroll">
           <table class="process-table">
             <thead>
               <tr><th>Process</th><th>CPU</th><th>Memory</th></tr>
             </thead>
             <tbody id="overview-processes-body"></tbody>
           </table>
+          </div>
           <a class="section-link" href="#processes">View all processes →</a>
         </div>
 
@@ -545,16 +708,21 @@
 
         <div class="viz-card" id="overview-system-card">
           <h3>System</h3>
-          <div class="stat-grid">
-            <div class="stat-box"><span>Host</span><strong id="system-host">{{ details.system.hostname or '—' }}</strong></div>
+          <div id="system-lines" class="system-lines"></div>
+          <div class="stat-grid" style="margin-top:0.65rem;">
             <div class="stat-box"><span>Uptime</span><strong id="system-uptime">{{ details.system.uptime or '—' }}</strong></div>
             <div class="stat-box"><span>CPU threads</span><strong id="system-threads">{{ details.system.cpu_threads or '—' }}</strong></div>
-            <div class="stat-box"><span>OS</span><strong id="system-os">{{ details.system.os or '—' }}</strong></div>
           </div>
         </div>
       </div>
 
-      <div class="cards two-col" style="margin-top:0.85rem;">
+      <div class="chart-range-bar" id="chart-range-bar" aria-label="History range">
+        <button type="button" class="chart-range-btn active" data-range="1h">1h</button>
+        <button type="button" class="chart-range-btn" data-range="6h">6h</button>
+        <button type="button" class="chart-range-btn" data-range="24h">24h</button>
+      </div>
+
+      <div class="cards two-col" style="margin-top:0.35rem;">
         <div class="viz-card">
           <h3>CPU Usage</h3>
           <div class="chart-wrap" id="chart-cpu-1h" data-chart="cpu-history"></div>
@@ -615,12 +783,15 @@
       <div class="section-title">Processes</div>
       <div class="viz-card">
         <h3>Top CPU Processes</h3>
+        <div id="process-summary" class="process-summary"></div>
+        <div class="table-scroll">
         <table class="process-table">
           <thead>
             <tr><th>Process</th><th>CPU</th><th>Memory</th></tr>
           </thead>
           <tbody id="processes-body"></tbody>
         </table>
+        </div>
       </div>
     </section>
 
@@ -656,6 +827,10 @@
       <div class="viz-card">
         <h3>Temperatures</h3>
         <div id="sensors-list" class="progress-list"></div>
+        <details class="sensor-details" id="sensors-raw-details">
+          <summary>All sensor readings</summary>
+          <div id="sensors-raw-list" class="progress-list" style="margin-top:0.55rem;"></div>
+        </details>
       </div>
     </section>
 
@@ -665,13 +840,11 @@
         <div class="viz-card">
           <h3>System</h3>
           <div class="stat-grid">
-            <div class="stat-box"><span>Host</span><strong id="system-host-detail">{{ details.system.hostname or '—' }}</strong></div>
             <div class="stat-box"><span>Uptime</span><strong id="system-uptime-detail">{{ details.system.uptime or '—' }}</strong></div>
             <div class="stat-box"><span>CPU threads</span><strong id="system-threads-detail">{{ details.system.cpu_threads or '—' }}</strong></div>
             <div class="stat-box"><span>Containers</span><strong id="system-containers-detail">{{ details.system.containers_running }} running</strong></div>
-            <div class="stat-box"><span>OS</span><strong id="system-os-detail">{{ details.system.os or '—' }}</strong></div>
-            <div class="stat-box"><span>Kernel</span><strong id="system-kernel-detail">{{ details.system.kernel or '—' }}</strong></div>
           </div>
+          <div id="system-lines-detail" class="system-lines" style="margin-top:0.65rem;"></div>
         </div>
         <div class="viz-card">
           <h3>Containers</h3>
@@ -683,6 +856,7 @@
     <footer class="glances-footer" id="glances-ui-footer">
       <a id="glances-ui-link" href="#" target="_blank" rel="noopener noreferrer">Open Glances UI →</a>
       <span class="glances-footer-note">Raw Glances interface (localhost/LAN/Tailscale only — port 61208)</span>
+      <div class="footer-meta" id="footer-meta"></div>
     </footer>
   </main>
 
