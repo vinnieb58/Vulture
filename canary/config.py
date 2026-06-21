@@ -47,6 +47,27 @@ DASHBOARD_CONTAINER = (
     os.getenv("CANARY_DASHBOARD_CONTAINER", "vulture-dashboard").strip() or "vulture-dashboard"
 )
 
+PELICAN_TIMER_UNIT = (
+    os.getenv("CANARY_PELICAN_TIMER_UNIT", "pelican-backup.timer").strip() or "pelican-backup.timer"
+)
+PELICAN_SERVICE_UNIT = (
+    os.getenv("CANARY_PELICAN_SERVICE_UNIT", "pelican-backup.service").strip()
+    or "pelican-backup.service"
+)
+PELICAN_BACKUP_TARGET = (
+    os.getenv("CANARY_PELICAN_BACKUP_TARGET", "/mnt/storage/pelican_backup").strip()
+    or "/mnt/storage/pelican_backup"
+)
+PELICAN_STALE_HOURS = float(os.getenv("CANARY_PELICAN_STALE_HOURS", "36"))
+PELICAN_STALE_WARN_HOURS = float(os.getenv("CANARY_PELICAN_STALE_WARN_HOURS", "30"))
+
+DISCORD_WEBHOOK_URL = (
+    os.getenv("CANARY_DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
+)
+ALERT_STATE_PATH = Path(
+    os.getenv("CANARY_ALERT_STATE_PATH", str(DATA_DIR / "canary_alert_state.json"))
+)
+
 # Raven external/storage mount paths (UUIDs resolved from fstab or CANARY_STORAGE_VOLUMES)
 RAVEN_STORAGE_PATHS: list[tuple[str, str]] = [
     ("toshiba_ext", "/mnt/storage/toshiba_ext"),

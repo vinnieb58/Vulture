@@ -18,6 +18,7 @@ from canary.parsers import (
     parse_systemctl_failed,
     parse_tmux_sessions,
 )
+from canary.pelican_backup import check_pelican_backup
 from canary.storage import check_raven_storage, host_path
 from canary.subprocess_util import is_timeout, run_command
 
@@ -422,7 +423,7 @@ def get_hostname() -> str:
 
 def _collect_alerts(checks: dict[str, Any]) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
-    for section in ("storage", "services", "docker", "systemd_failed"):
+    for section in ("storage", "services", "docker", "systemd_failed", "pelican_backup"):
         section_alerts = checks.get(section, {}).get("alerts", [])
         if isinstance(section_alerts, list):
             alerts.extend(section_alerts)
@@ -449,6 +450,7 @@ def run_all_checks() -> dict[str, Any]:
         "docker": _safe("docker", check_docker),
         "vulture_runtime": _safe("vulture_runtime", check_vulture_runtime),
         "systemd_failed": _safe("systemd_failed", check_systemd_failed),
+        "pelican_backup": _safe("pelican_backup", check_pelican_backup),
     }
 
     section_statuses = [checks[key].get("status", "warning") for key in checks]

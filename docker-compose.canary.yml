@@ -1,4 +1,4 @@
-# Canary v0.1 — read-only Raven monitoring (no Discord alerts, no restarts).
+# Canary v0.2 — read-only Raven monitoring with optional Pelican Discord alerts.
 # On Raven, host mounts + network_mode: host let Canary inspect systemd, storage, and Tailscale.
 
 services:
@@ -16,6 +16,9 @@ services:
       CANARY_DATA_DIR: /app/data
       CANARY_LOGS_DIR: /app/logs
       CANARY_TIMEZONE: ${CANARY_TIMEZONE:-America/Chicago}
+      CANARY_DISCORD_WEBHOOK_URL: ${CANARY_DISCORD_WEBHOOK_URL:-${DISCORD_WEBHOOK_URL:-}}
+      CANARY_PELICAN_STALE_HOURS: ${CANARY_PELICAN_STALE_HOURS:-36}
+      CANARY_PELICAN_STALE_WARN_HOURS: ${CANARY_PELICAN_STALE_WARN_HOURS:-30}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

@@ -305,3 +305,130 @@ The service has **no** `network-online` dependency and **no** hard mount require
 - `scripts/install_pelican_timer.sh` — install/enable helper
 
 Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_systemd_timer.py`
+
+---
+
+## Canary monitoring
+
+Canary (v0.2+) monitors Pelican backup health on each check cycle and can send **Discord alerts** when backup health changes. This complements the existing storage-volume check (`/mnt/storage/pelican_backup` mounted) with timer, service-result, archive freshness, and checksum validation.
+
+### Configuration variables
+
+Set in `docker-compose.canary.yml` environment or repo `.env`:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CANARY_PELICAN_STALE_HOURS` | `36` | Critical when the newest completed archive is older than this |
+| `CANARY_PELICAN_STALE_WARN_HOURS` | `30` | Warning when approaching stale (below critical threshold) |
+| `CANARY_PELICAN_BACKUP_TARGET` | `/mnt/storage/pelican_backup` | Directory scanned for `raven-recovery-*` bundles |
+| `CANARY_PELICAN_TIMER_UNIT` | `pelican-backup.timer` | Timer unit to inspect |
+| `CANARY_PELICAN_SERVICE_UNIT` | `pelican-backup.service` | Oneshot service for last-run result |
+| `CANARY_DISCORD_WEBHOOK_URL` | (empty) | Webhook for Pelican alerts; falls back to `DISCORD_WEBHOOK_URL` |
+
+### Inspect current monitoring state
+
+```bash
+# Full Canary snapshot (includes checks.pelican_backup)
+cat data/canary_status.json | python3 -m json.tool
+
+# Pelican section only
+python3 -m json.tool data/canary_status.json | jq '.checks.pelican_backup'
+
+# Alert dedup / last notified state
+cat data/canary_alert_state.json
+```
+
+Healthy Pelican backup reports `"status": "ok"` with timer active, service last result success, real mount, valid checksum, and archive age below threshold.
+
+### Manually run the Pelican check
+
+One-shot JSON (host paths; use `CANARY_HOST_ROOT=/host` inside Canary container):
+
+```bash
+cd /home/vinnieb58/projects/vulture
+CANARY_HOST_ROOT=/host python3 -m canary.pelican_backup
+```
+
+Or trigger a full Canary cycle (updates status + evaluates Discord alerts):
+
+```bash
+docker compose -f docker-compose.canary.yml restart canary
+tail -f logs/canary.log
+```
+
+### Safe failure simulation (no backup deletion)
+
+These tests do not remove real recovery bundles:
+
+**Simulate stale backup alert** — temporarily lower the stale threshold:
+
+```bash
+CANARY_PELICAN_STALE_HOURS=0.001 CANARY_HOST_ROOT=/host python3 -m canary.pelican_backup
+```
+
+Expect `"status": "critical"` and issue code `BACKUP_STALE`. Restore default threshold before leaving Canary running with alerts enabled.
+
+**Simulate timer failure** — disable timer briefly (re-enable after test):
+
+```bash
+sudo systemctl disable --now pelican-backup.timer
+# wait for next Canary cycle or run manual check
+sudo systemctl enable --now pelican-backup.timer
+```
+
+**Simulate checksum failure** — rename sidecar temporarily (do not modify the archive):
+
+```bash
+sudo mv /mnt/storage/pelican_backup/raven-recovery-NEWEST.tar.zst.sha256 /tmp/pelican-test.sha256.bak
+# run check / wait for Canary
+sudo mv /tmp/pelican-test.sha256.bak /mnt/storage/pelican_backup/raven-recovery-NEWEST.tar.zst.sha256
+```
+
+Replace `NEWEST` with the actual newest bundle stamp from `ls /mnt/storage/pelican_backup/raven-recovery-*.tar.zst`.
+
+### Confirm duplicate alert suppression
+
+1. Ensure Canary is unhealthy (e.g. stale threshold trick above) with webhook configured.
+2. Note the first Discord alert.
+3. Wait for two or more Canary intervals (~10 minutes at default 300s).
+4. Confirm **no repeated identical alerts**; `data/canary_alert_state.json` should show stable `fingerprint` and `severity`.
+
+### Confirm recovery alerting
+
+1. From an alerting state, restore health (re-enable timer, restore checksum, reset threshold).
+2. After the next Canary cycle, expect **one** Discord message containing `Pelican backup RECOVERED`.
+3. Further healthy cycles should not send additional recovery messages.
+
+### Expected Discord messages
+
+**Critical alert example:**
+
+```text
+**Raven / Pelican backup CRITICAL**
+Latest backup is 40.0h old (threshold 36h)
+timer pelican-backup.timer: enabled=enabled, active=active, next=...
+service pelican-backup.service: active=inactive, result=success, exit=0
+latest backup: raven-recovery-20260618T030015Z.tar.zst, age=40.0h
+host: raven
+```
+
+**Recovery example:**
+
+```text
+**Raven / Pelican backup RECOVERED**
+Pelican backup monitoring returned to healthy.
+timer pelican-backup.timer: enabled=enabled, active=active, next=...
+service pelican-backup.service: active=inactive, result=success, exit=0
+latest backup: raven-recovery-20260620T030015Z.tar.zst, age=12.0h
+host: raven
+```
+
+Messages never include `.env` contents, manifest bodies, or secret values.
+
+### Implementation files (monitoring)
+
+- `canary/pelican_backup.py` — Pelican health check logic
+- `canary/alerting.py` — Discord delivery + dedup state
+- `canary/checks.py` — registers `pelican_backup` section
+- `tests/test_canary_pelican.py` — focused monitoring tests
+

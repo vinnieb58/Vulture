@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from canary import __version__
+from canary.alerting import process_pelican_alerts
 from canary.checks import run_all_checks
 from canary.config import INTERVAL_SECONDS, LOG_PATH, LOGS_DIR, STATUS_PATH
 
@@ -48,6 +49,10 @@ def write_status(payload: dict) -> Path:
 def run_once(logger: logging.Logger) -> dict:
     logger.info("Starting Canary check run (v%s)", __version__)
     payload = run_all_checks()
+    pelican_check = payload.get("checks", {}).get("pelican_backup", {})
+    if isinstance(pelican_check, dict):
+        alert_result = process_pelican_alerts(pelican_check, host=str(payload.get("host", "")))
+        payload["pelican_alert"] = alert_result
     path = write_status(payload)
     logger.info(
         "Check run complete: overall=%s host=%s wrote=%s warnings=%d critical=%d",
