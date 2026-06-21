@@ -1,5 +1,7 @@
 """
-Pelican backup health checks — timer, service result, mount, archive freshness.
+Raven recovery bundle backup checker — first Pelican-managed backup definition.
+
+Validates pelican-backup timer/service, real mount, archive freshness, and checksum.
 """
 
 from __future__ import annotations
@@ -7,14 +9,15 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from canary import config
-from canary.path_util import path_access_check
-from canary.storage import host_path
-from canary.subprocess_util import is_timeout, run_command
+from pelican_monitor import config
+from pelican_monitor.path_util import host_path, path_access_check
+from pelican_monitor.results import BackupCheckResult, combine_status
+from pelican_monitor.subprocess_util import is_timeout, run_command
 
 BACKUP_BUNDLE_RE = re.compile(
     r"^raven-recovery-(?P<stamp>\d{8}T\d{6}Z)\.tar\.(?:zst|gz)$"
@@ -30,13 +33,9 @@ class CompletedArchive:
     mtime: datetime
 
 
-def _parse_backup_stamp(name: str) -> str | None:
-    match = BACKUP_BUNDLE_RE.match(name)
-    return match.group("stamp") if match else None
-
-
-def _stamp_to_datetime(stamp: str) -> datetime:
-    return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+def _checked_at() -> str:
+    tz = ZoneInfo(config.DISPLAY_TIMEZONE)
+    return datetime.now(tz=timezone.utc).astimezone(tz).isoformat(timespec="seconds")
 
 
 def _normalize_systemctl_value(raw: str, *, ok: bool) -> str:
@@ -112,11 +111,7 @@ def evaluate_service_result(service_unit: str) -> dict[str, Any]:
     exec_status_raw = _systemctl_property(service_unit, "ExecMainStatus")
     started_raw = _systemctl_property(service_unit, "ExecMainStartTimestamp")
 
-    try:
-        exec_status = int(exec_status_raw) if exec_status_raw.isdigit() else None
-    except ValueError:
-        exec_status = None
-
+    exec_status = int(exec_status_raw) if exec_status_raw.isdigit() else None
     has_run = bool(started_raw and started_raw not in ("", "n/a", "unknown", "unavailable"))
     failed = False
     failure_reason: str | None = None
@@ -131,14 +126,11 @@ def evaluate_service_result(service_unit: str) -> dict[str, Any]:
         failed = True
         failure_reason = f"last run exit status={exec_status}"
 
-    # Oneshot services are inactive/dead between successful runs — expected.
     inactive_ok = active in ("inactive", "dead") and not failed
-
     issues: list[tuple[str, str, str]] = []
     if failed:
         issues.append(("critical", "SERVICE_LAST_RUN_FAILED", failure_reason or "backup service failed"))
 
-    status = "critical" if failed else "ok"
     return {
         "unit": service_unit,
         "active": active,
@@ -147,7 +139,7 @@ def evaluate_service_result(service_unit: str) -> dict[str, Any]:
         "last_run_started": started_raw if has_run else None,
         "has_run": has_run,
         "inactive_between_runs_ok": inactive_ok,
-        "status": status,
+        "status": "critical" if failed else "ok",
         "issues": issues,
     }
 
@@ -158,26 +150,13 @@ def _is_autofs_placeholder(source: str | None, fstype: str | None) -> bool:
     return source_l in AUTOFS_SOURCES or fstype_l == "autofs"
 
 
-def _parse_findmnt(source_fstype_line: str) -> tuple[str | None, str | None]:
-    parts = source_fstype_line.split()
-    if len(parts) < 2:
-        return None, None
-    return parts[0], parts[1]
-
-
 def evaluate_backup_target_mount(target: str) -> dict[str, Any]:
     resolved = host_path(target)
     issues: list[tuple[str, str, str]] = []
 
     ok_access, access_err = path_access_check(resolved, timeout=config.TIMEOUT_PATH)
     if not ok_access:
-        issues.append(
-            (
-                "critical",
-                "MOUNT_UNAVAILABLE",
-                f"Pelican backup target unavailable: {access_err}",
-            )
-        )
+        issues.append(("critical", "MOUNT_UNAVAILABLE", f"Backup target unavailable: {access_err}"))
         return {
             "path": target,
             "resolved_path": resolved,
@@ -193,13 +172,7 @@ def evaluate_backup_target_mount(target: str) -> dict[str, Any]:
         timeout=config.TIMEOUT_FINDMNT,
     )
     if not ok or not out.strip():
-        issues.append(
-            (
-                "critical",
-                "MOUNT_UNAVAILABLE",
-                "Backup target is not a mountpoint with a backing device",
-            )
-        )
+        issues.append(("critical", "MOUNT_UNAVAILABLE", "Backup target is not a mountpoint with a backing device"))
         return {
             "path": target,
             "resolved_path": resolved,
@@ -215,9 +188,10 @@ def evaluate_backup_target_mount(target: str) -> dict[str, Any]:
     real_source: str | None = None
     real_fstype: str | None = None
     for line in out.splitlines():
-        source, fstype = _parse_findmnt(line)
-        if source is None:
+        parts = line.split()
+        if len(parts) < 2:
             continue
+        source, fstype = parts[0], parts[1]
         if not _is_autofs_placeholder(source, fstype):
             real_source, real_fstype = source, fstype
             break
@@ -285,29 +259,22 @@ def find_latest_completed_archive(target_dir: Path) -> CompletedArchive | None:
     for entry in entries:
         if not entry.is_file():
             continue
-        name = entry.name
-        if not BACKUP_BUNDLE_RE.match(name):
+        match = BACKUP_BUNDLE_RE.match(entry.name)
+        if not match:
             continue
-        stamp = _parse_backup_stamp(name)
-        if stamp is None:
-            continue
+        stamp = match.group("stamp")
         try:
             mtime = datetime.fromtimestamp(entry.stat().st_mtime, tz=timezone.utc)
         except OSError:
             continue
-        candidate = CompletedArchive(path=entry, name=name, stamp=stamp, mtime=mtime)
+        candidate = CompletedArchive(path=entry, name=entry.name, stamp=stamp, mtime=mtime)
         if latest is None or candidate.stamp > latest.stamp:
             latest = candidate
     return latest
 
 
-def _archive_readable(path: Path) -> tuple[bool, str | None]:
-    try:
-        with path.open("rb") as handle:
-            handle.read(1)
-    except OSError as exc:
-        return False, str(exc)
-    return True, None
+def _stamp_to_datetime(stamp: str) -> datetime:
+    return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
 
 
 def _parse_sha256_sidecar(text: str) -> str | None:
@@ -351,73 +318,52 @@ def evaluate_latest_archive(
             "checksum_path": None,
             "checksum_valid": None,
             "readable": None,
+            "checksum_status": "not_checked",
             "status": "critical",
             "issues": issues,
         }
 
-    readable, read_err = _archive_readable(archive.path)
-    if not readable:
-        issues.append(
-            (
-                "critical",
-                "ARCHIVE_UNREADABLE",
-                f"Latest archive not readable: {read_err}",
-            )
-        )
+    readable = True
+    try:
+        with archive.path.open("rb") as handle:
+            handle.read(1)
+    except OSError as exc:
+        readable = False
+        issues.append(("critical", "ARCHIVE_UNREADABLE", f"Latest archive not readable: {exc}"))
 
     checksum_path = Path(f"{archive.path}.sha256")
     checksum_valid: bool | None = None
+    checksum_status = "not_checked"
     if not checksum_path.is_file():
-        issues.append(
-            (
-                "critical",
-                "CHECKSUM_MISSING",
-                f"Missing checksum sidecar for {archive.name}",
-            )
-        )
+        checksum_status = "missing"
+        issues.append(("critical", "CHECKSUM_MISSING", f"Missing checksum sidecar for {archive.name}"))
     else:
         try:
             sidecar_text = checksum_path.read_text(encoding="utf-8")
         except OSError as exc:
-            issues.append(
-                (
-                    "critical",
-                    "CHECKSUM_MISSING",
-                    f"Cannot read checksum sidecar: {exc}",
-                )
-            )
+            checksum_status = "missing"
+            issues.append(("critical", "CHECKSUM_MISSING", f"Cannot read checksum sidecar: {exc}"))
         else:
             expected = _parse_sha256_sidecar(sidecar_text)
             if expected is None:
-                issues.append(
-                    (
-                        "critical",
-                        "CHECKSUM_INVALID",
-                        "Checksum sidecar has no valid sha256 digest",
-                    )
-                )
+                checksum_status = "invalid"
+                issues.append(("critical", "CHECKSUM_INVALID", "Checksum sidecar has no valid sha256 digest"))
             else:
                 actual = _compute_sha256(archive.path)
                 checksum_valid = actual == expected
+                checksum_status = "ok" if checksum_valid else "invalid"
                 if not checksum_valid:
-                    issues.append(
-                        (
-                            "critical",
-                            "CHECKSUM_INVALID",
-                            f"Checksum mismatch for {archive.name}",
-                        )
-                    )
+                    issues.append(("critical", "CHECKSUM_INVALID", f"Checksum mismatch for {archive.name}"))
 
     stamp_time = _stamp_to_datetime(archive.stamp)
-    age = datetime.now(timezone.utc) - stamp_time
-    age_hours = age.total_seconds() / 3600.0
+    age_hours = (datetime.now(timezone.utc) - stamp_time).total_seconds() / 3600.0
 
     if age_hours >= stale_hours:
         issues.append(
             (
                 "critical",
                 "BACKUP_STALE",
-                f"Latest backup is {age_hours:.1f}h old (threshold {stale_hours:.0f}h)",
+                f"Latest recovery bundle is {age_hours:.0f} hours old (threshold {stale_hours:.0f}h)",
             )
         )
     elif age_hours >= warn_hours:
@@ -425,7 +371,7 @@ def evaluate_latest_archive(
             (
                 "warning",
                 "BACKUP_APPROACHING_STALE",
-                f"Latest backup is {age_hours:.1f}h old (warn at {warn_hours:.0f}h, stale at {stale_hours:.0f}h)",
+                f"Latest recovery bundle is {age_hours:.0f} hours old (warn at {warn_hours:.0f}h, stale at {stale_hours:.0f}h)",
             )
         )
 
@@ -446,49 +392,34 @@ def evaluate_latest_archive(
         "age_hours": round(age_hours, 2),
         "checksum_path": str(checksum_path),
         "checksum_valid": checksum_valid,
+        "checksum_status": checksum_status,
         "readable": readable,
         "status": status,
         "issues": issues,
     }
 
 
-def _issues_to_alerts(issues: list[tuple[str, str, str]]) -> list[dict[str, str]]:
-    alerts: list[dict[str, str]] = []
-    for severity, code, message in issues:
-        alerts.append(
-            {
-                "severity": severity,
-                "category": "pelican_backup",
-                "code": code,
-                "volume": "pelican",
-                "mount_path": config.PELICAN_BACKUP_TARGET,
-                "message": message,
-            }
-        )
-    return alerts
+def _primary_reason(issues: list[tuple[str, str, str]]) -> str:
+    if not issues:
+        return "Backup healthy"
+    for severity in ("critical", "warning"):
+        for sev, _code, message in issues:
+            if sev == severity:
+                return message
+    return issues[0][2]
 
 
-def _combine_issue_statuses(*statuses: str) -> str:
-    if any(s == "critical" for s in statuses):
-        return "critical"
-    if any(s == "warning" for s in statuses):
-        return "warning"
-    return "ok"
+def check_raven_recovery() -> BackupCheckResult:
+    """Run the Raven recovery bundle backup check and return a standardized result."""
+    timer = evaluate_timer_health(config.RAVEN_RECOVERY_TIMER_UNIT)
+    service = evaluate_service_result(config.RAVEN_RECOVERY_SERVICE_UNIT)
+    mount = evaluate_backup_target_mount(config.RAVEN_RECOVERY_TARGET)
 
-
-def check_pelican_backup() -> dict[str, Any]:
-    """Run Pelican backup health checks (timer, service, mount, archive)."""
-    timer = evaluate_timer_health(config.PELICAN_TIMER_UNIT)
-    service = evaluate_service_result(config.PELICAN_SERVICE_UNIT)
-    mount = evaluate_backup_target_mount(config.PELICAN_BACKUP_TARGET)
-
-    archive: dict[str, Any]
     if mount["status"] == "ok":
-        target_dir = Path(mount["resolved_path"])
         archive = evaluate_latest_archive(
-            target_dir,
-            stale_hours=config.PELICAN_STALE_HOURS,
-            warn_hours=config.PELICAN_STALE_WARN_HOURS,
+            Path(mount["resolved_path"]),
+            stale_hours=config.RAVEN_RECOVERY_CRITICAL_HOURS,
+            warn_hours=config.RAVEN_RECOVERY_WARN_HOURS,
         )
     else:
         archive = {
@@ -498,6 +429,7 @@ def check_pelican_backup() -> dict[str, Any]:
             "age_hours": None,
             "checksum_path": None,
             "checksum_valid": None,
+            "checksum_status": "not_checked",
             "readable": None,
             "status": "critical",
             "issues": [("critical", "MOUNT_UNAVAILABLE", "Skipping archive check: mount unavailable")],
@@ -507,26 +439,26 @@ def check_pelican_backup() -> dict[str, Any]:
     for section in (timer, service, mount, archive):
         all_issues.extend(section.get("issues", []))
 
-    status = _combine_issue_statuses(timer["status"], service["status"], mount["status"], archive["status"])
-    alerts = _issues_to_alerts(all_issues)
+    status = combine_status(timer["status"], service["status"], mount["status"], archive["status"])
+    issue_codes = sorted({code for _, code, _ in all_issues})
 
-    return {
-        "status": status,
-        "timer": timer,
-        "service": service,
-        "mount": mount,
-        "archive": archive,
-        "alerts": alerts,
-        "issue_codes": sorted({code for _, code, _ in all_issues}),
-    }
-
-
-def main() -> None:
-    """Operator entry point for a one-shot Pelican backup health check."""
-    import json
-
-    print(json.dumps(check_pelican_backup(), indent=2, sort_keys=False))
-
-
-if __name__ == "__main__":
-    main()
+    return BackupCheckResult(
+        backup_id="raven_recovery",
+        display_name="Pelican backup",
+        status=status,
+        reason=_primary_reason(all_issues),
+        checked_at=_checked_at(),
+        newest_backup_timestamp=archive.get("latest_mtime"),
+        backup_age_hours=archive.get("age_hours"),
+        warn_threshold_hours=config.RAVEN_RECOVERY_WARN_HOURS,
+        critical_threshold_hours=config.RAVEN_RECOVERY_CRITICAL_HOURS,
+        target_available=bool(mount.get("mounted")),
+        checksum_status=str(archive.get("checksum_status") or "not_checked"),
+        timer=timer,
+        service=service,
+        issue_codes=issue_codes,
+        details={
+            "mount": mount,
+            "archive": archive,
+        },
+    )

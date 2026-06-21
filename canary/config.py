@@ -47,23 +47,11 @@ DASHBOARD_CONTAINER = (
     os.getenv("CANARY_DASHBOARD_CONTAINER", "vulture-dashboard").strip() or "vulture-dashboard"
 )
 
-PELICAN_TIMER_UNIT = (
-    os.getenv("CANARY_PELICAN_TIMER_UNIT", "pelican-backup.timer").strip() or "pelican-backup.timer"
+BACKUP_MONITOR_STATUS_PATH = Path(
+    os.getenv("CANARY_BACKUP_MONITOR_STATUS_PATH", str(DATA_DIR / "backup_monitor_status.json"))
 )
-PELICAN_SERVICE_UNIT = (
-    os.getenv("CANARY_PELICAN_SERVICE_UNIT", "pelican-backup.service").strip()
-    or "pelican-backup.service"
-)
-PELICAN_BACKUP_TARGET = (
-    os.getenv("CANARY_PELICAN_BACKUP_TARGET", "/mnt/storage/pelican_backup").strip()
-    or "/mnt/storage/pelican_backup"
-)
-PELICAN_STALE_HOURS = float(os.getenv("CANARY_PELICAN_STALE_HOURS", "36"))
-PELICAN_STALE_WARN_HOURS = float(os.getenv("CANARY_PELICAN_STALE_WARN_HOURS", "30"))
+BACKUP_MONITOR_SNAPSHOT_STALE_HOURS = float(os.getenv("CANARY_BACKUP_MONITOR_SNAPSHOT_STALE_HOURS", "8"))
 
-DISCORD_WEBHOOK_URL = (
-    os.getenv("CANARY_DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
-)
 ALERT_STATE_PATH = Path(
     os.getenv("CANARY_ALERT_STATE_PATH", str(DATA_DIR / "canary_alert_state.json"))
 )

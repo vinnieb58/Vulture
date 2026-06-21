@@ -1,0 +1,17 @@
+[Unit]
+Description=Pelican backup health monitor (oneshot)
+Documentation=file:/home/vinnieb58/projects/vulture/docs/current/PELiCAN_BACKUP.md
+
+[Service]
+Type=oneshot
+User=vinnieb58
+Group=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+UMask=0077
+ExecStart=/home/vinnieb58/projects/vulture/scripts/pelican_monitor.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pelican-monitor
+NoNewPrivileges=true
+TimeoutStartSec=600
+Restart=no
