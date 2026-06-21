@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +18,11 @@ sys.path.insert(0, str(DASHBOARD_DIR))
 
 import app as dashboard_app  # noqa: E402
 from glances_client import GLANCES_UNAVAILABLE_LABEL  # noqa: E402
-from raven_health_details import build_raven_health_details, normalize_glances_details  # noqa: E402
+from raven_health_details import (
+    build_raven_health_details,
+    normalize_glances_details,
+    _history_series_1h,
+)
 
 MOCK_GLANCES = {
     "available": True,
@@ -303,6 +308,83 @@ class TestRavenHealthGlancesAPI:
         assert len(data["history"]["load_history_1h"]) == 1
         assert len(data["history"]["memory_history_1h"]) == 1
 
+    def test_api_history_collecting_when_empty(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/api/raven/health/glances")
+        data = response.json()
+        assert data["history"]["collecting"] is True
+        assert data["history"]["sample_count_1h"] == 0
+
+    def test_api_includes_network_history_when_samples_exist(
+        self, client, tmp_path, monkeypatch
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from raven_metrics_history import MetricsSample
+
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        history_path = tmp_path / "history.jsonl"
+        now = datetime.now(timezone.utc)
+        sample = MetricsSample(
+            timestamp=now - timedelta(minutes=5),
+            load_1=1.0,
+            load_5=0.9,
+            load_15=0.8,
+            memory_used_percent=50.0,
+            memory_used_bytes=4_000_000_000,
+            memory_total_bytes=8_000_000_000,
+            cpu_percent=25.0,
+            network_rx_bps=1024.0 * 1024,
+            network_tx_bps=512.0 * 1024,
+        )
+        history_path.write_text(sample.to_json_line() + "\n", encoding="utf-8")
+        monkeypatch.setenv("DASHBOARD_METRICS_HISTORY_PATH", str(history_path))
+        monkeypatch.setattr("raven_metrics_history.HISTORY_PATH", history_path)
+
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/api/raven/health/glances")
+        data = response.json()
+        assert len(data["history"]["network_history_1h"]) == 1
+        assert data["history"]["network_history_1h"][0]["rx_bps"] == 1024.0 * 1024
+
+    def test_disk_fallback_when_glances_fs_empty(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        glances = dict(MOCK_GLANCES)
+        glances["filesystems"] = []
+        probe_disk = {
+            "device": "/dev/sda2",
+            "mount": "/",
+            "percent": 42.0,
+            "percent_display": "42%",
+            "used_display": "10G",
+            "total_display": "24G",
+            "free_display": "14G",
+            "source": "storage_probe",
+        }
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=glances):
+            with patch("raven_health_details._disks_from_storage_probe", return_value=[probe_disk]):
+                with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                    with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                        response = client.get("/api/raven/health/glances")
+        data = response.json()
+        assert data["disks"][0]["mount"] == "/"
+        assert data["disks_source"] == "storage_probe"
+
+    def test_details_page_includes_glances_ui_link(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        with patch("raven_health_details.fetch_glances_details_snapshot", return_value=MOCK_GLANCES):
+            with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+                with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                    response = client.get("/raven/health")
+        assert "Open Glances UI" in response.text
+        assert 'rel="noopener noreferrer"' in response.text
+        assert 'id="glances-ui-link"' in response.text
+
 
 class TestNormalizeGlancesDetails:
     def test_normalize_includes_sections(self):
@@ -311,12 +393,55 @@ class TestNormalizeGlancesDetails:
             raven={"hostname": "raven", "uptime": "1 day"},
             docker_running=3,
             metrics={"peak_cpu_1h": "88%"},
-            history={"cpu_1h": [], "load_1h": [], "memory_1h": []},
+            history={"cpu_1h": [], "load_1h": [], "memory_1h": [], "collecting": True},
             updated_at="2026-06-20 12:00:00 UTC",
         )
         assert payload["status"] == "live"
         assert payload["overview"]["load"]["average_display"] == "1.23 / 0.98 / 0.75"
         assert payload["system"]["containers_running"] == 3
+
+
+class TestHistorySeries:
+    def test_history_collecting_until_enough_samples(self):
+        from raven_metrics_history import MetricsSample
+
+        now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+        samples = [
+            MetricsSample(
+                timestamp=now - timedelta(minutes=5),
+                load_1=1.0,
+                load_5=0.9,
+                load_15=0.8,
+                memory_used_percent=50.0,
+                memory_used_bytes=1,
+                memory_total_bytes=2,
+                cpu_percent=10.0,
+            )
+        ]
+        history = _history_series_1h(samples, now=now)
+        assert history["collecting"] is True
+        assert history["sample_count_1h"] == 1
+
+    def test_history_not_collecting_with_enough_samples(self):
+        from raven_metrics_history import MetricsSample
+
+        now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+        samples = [
+            MetricsSample(
+                timestamp=now - timedelta(minutes=offset),
+                load_1=1.0,
+                load_5=0.9,
+                load_15=0.8,
+                memory_used_percent=50.0,
+                memory_used_bytes=1,
+                memory_total_bytes=2,
+                cpu_percent=10.0,
+            )
+            for offset in (15, 10, 5)
+        ]
+        history = _history_series_1h(samples, now=now)
+        assert history["collecting"] is False
+        assert len(history["cpu_history_1h"]) == 3
 
 
 class TestHealthEndpointUnchanged:

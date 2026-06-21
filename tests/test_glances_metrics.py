@@ -213,8 +213,13 @@ class TestMetricsSummaryWithGlances:
         assert summary["glances_status"] == GLANCES_UNAVAILABLE_LABEL
         assert summary["cpu_now"] == "15%"
 
-    def test_sampler_disabled_by_default_when_glances_enabled(self, monkeypatch):
+    def test_sampler_enabled_by_default_when_glances_enabled(self, monkeypatch):
         monkeypatch.delenv("DASHBOARD_METRICS_SAMPLER_ENABLED", raising=False)
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        assert is_sampler_enabled() is True
+
+    def test_sampler_disabled_when_explicitly_off(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_METRICS_SAMPLER_ENABLED", "0")
         monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
         assert is_sampler_enabled() is False
 
@@ -222,3 +227,71 @@ class TestMetricsSummaryWithGlances:
         monkeypatch.delenv("DASHBOARD_METRICS_SAMPLER_ENABLED", raising=False)
         monkeypatch.setenv("DASHBOARD_USE_GLANCES", "false")
         assert is_sampler_enabled() is True
+
+
+class TestGlancesHistorySampler:
+    def test_collect_glances_sample_writes_compact_fields(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        glances_metrics = {
+            "available": True,
+            "cpu_total_percent": 42.5,
+            "load_1": 1.2,
+            "load_5": 1.0,
+            "load_15": 0.8,
+            "cpu_threads": 4,
+            "memory_used_percent": 55.0,
+            "memory_used_bytes": 4_000_000_000,
+            "memory_total_bytes": 8_000_000_000,
+            "network_rx_bps": 1024.0,
+            "network_tx_bps": 512.0,
+        }
+        with patch(
+            "raven_metrics_history.fetch_glances_history_metrics",
+            return_value=glances_metrics,
+        ):
+            from raven_metrics_history import collect_glances_sample
+
+            sample = collect_glances_sample(
+                now=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+            )
+        assert sample is not None
+        assert sample.cpu_percent == 42.5
+        assert sample.network_rx_bps == 1024.0
+        assert sample.network_tx_bps == 512.0
+        assert sample.cpu_total_jiffies is None
+        parsed = json.loads(sample.to_json_line())
+        assert "network_rx_bps" in parsed
+        assert "network_tx_bps" in parsed
+
+    def test_record_sample_if_due_uses_glances_when_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DASHBOARD_USE_GLANCES", "true")
+        monkeypatch.setattr("raven_metrics_history.GLANCES_HISTORY_INTERVAL_SECONDS", 1)
+        history_path = tmp_path / "history.jsonl"
+        now = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+        glances_metrics = {
+            "available": True,
+            "cpu_total_percent": 10.0,
+            "load_1": 0.5,
+            "load_5": 0.4,
+            "load_15": 0.3,
+            "cpu_threads": 4,
+            "memory_used_percent": 40.0,
+            "memory_used_bytes": 3_000_000_000,
+            "memory_total_bytes": 8_000_000_000,
+            "network_rx_bps": 100.0,
+            "network_tx_bps": 50.0,
+        }
+        with patch(
+            "raven_metrics_history.fetch_glances_history_metrics",
+            return_value=glances_metrics,
+        ):
+            from raven_metrics_history import record_sample_if_due
+
+            assert record_sample_if_due(path=history_path, now=now) is True
+            lines = history_path.read_text(encoding="utf-8").splitlines()
+            assert len(lines) == 1
+            row = json.loads(lines[0])
+            assert row["cpu_percent"] == 10.0
+            assert row["network_rx_bps"] == 100.0

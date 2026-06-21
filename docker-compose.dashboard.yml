@@ -22,6 +22,9 @@ services:
       - /sys:/sys:ro
       - /dev:/dev:ro
       - /run/udev:/run/udev:ro
+      # Host root for filesystem stats (/api/4/fs). Without this, Glances sees
+      # container mount namespace only and /mnt/storage paths may be missing.
+      - /:/rootfs:ro
     networks:
       - dashboard-internal
     restart: unless-stopped
@@ -58,7 +61,7 @@ services:
       DASHBOARD_SYSTEMD_BUS_SOCKET: /run/dbus/system_bus_socket
       DASHBOARD_GLANCES_URL: http://glances:61208
       DASHBOARD_USE_GLANCES: "true"
-      DASHBOARD_METRICS_SAMPLER_ENABLED: "0"
+      DASHBOARD_GLANCES_HISTORY_INTERVAL_SECONDS: "10"
     networks:
       - dashboard-internal
     restart: unless-stopped

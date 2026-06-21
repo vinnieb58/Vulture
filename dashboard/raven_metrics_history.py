@@ -16,7 +16,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from glances_client import GLANCES_UNAVAILABLE_LABEL, fetch_glances_snapshot, glances_enabled
+from glances_client import (
+    GLANCES_UNAVAILABLE_LABEL,
+    fetch_glances_history_metrics,
+    fetch_glances_snapshot,
+    glances_enabled,
+)
 from host_cpu_metrics import (
     NOT_AVAILABLE_LABEL,
     compute_cpu_percent,
@@ -43,6 +48,9 @@ HISTORY_PATH = Path(
 RETENTION_HOURS = int(os.environ.get("DASHBOARD_METRICS_RETENTION_HOURS", "48"))
 MIN_SAMPLE_INTERVAL_SECONDS = int(
     os.environ.get("DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS", "60")
+)
+GLANCES_HISTORY_INTERVAL_SECONDS = int(
+    os.environ.get("DASHBOARD_GLANCES_HISTORY_INTERVAL_SECONDS", "10")
 )
 CPU_SATURATION_THRESHOLD = float(
     os.environ.get("DASHBOARD_CPU_SAT_THRESHOLD", "90")
@@ -73,6 +81,8 @@ class MetricsSample:
     cpu_total_jiffies: int | None = None
     cpu_idle_jiffies: int | None = None
     cpu_threads: int | None = None
+    network_rx_bps: float | None = None
+    network_tx_bps: float | None = None
 
     def to_json_line(self) -> str:
         payload = {
@@ -88,6 +98,8 @@ class MetricsSample:
             "cpu_total_jiffies": self.cpu_total_jiffies,
             "cpu_idle_jiffies": self.cpu_idle_jiffies,
             "cpu_threads": self.cpu_threads,
+            "network_rx_bps": self.network_rx_bps,
+            "network_tx_bps": self.network_tx_bps,
         }
         return json.dumps(payload, separators=(",", ":"))
 
@@ -146,6 +158,16 @@ class MetricsSample:
                 cpu_threads=(
                     int(data["cpu_threads"])
                     if data.get("cpu_threads") is not None
+                    else None
+                ),
+                network_rx_bps=(
+                    float(data["network_rx_bps"])
+                    if data.get("network_rx_bps") is not None
+                    else None
+                ),
+                network_tx_bps=(
+                    float(data["network_tx_bps"])
+                    if data.get("network_tx_bps") is not None
                     else None
                 ),
             )
@@ -261,6 +283,39 @@ def _compute_cpu_percent_for_sample(
     return None, total, idle
 
 
+def collect_glances_sample(
+    now: datetime | None = None,
+) -> MetricsSample | None:
+    """Build a compact history sample from normalized Glances metrics."""
+    metrics = fetch_glances_history_metrics()
+    if not metrics.get("available"):
+        return None
+    loads = (
+        metrics.get("load_1"),
+        metrics.get("load_5"),
+        metrics.get("load_15"),
+    )
+    if all(value is None for value in loads):
+        return None
+    ts = now or datetime.now(timezone.utc)
+    return MetricsSample(
+        timestamp=ts,
+        load_1=float(metrics.get("load_1") or 0.0),
+        load_5=float(metrics.get("load_5") or metrics.get("load_1") or 0.0),
+        load_15=float(metrics.get("load_15") or metrics.get("load_1") or 0.0),
+        memory_used_percent=metrics.get("memory_used_percent"),
+        memory_used_bytes=metrics.get("memory_used_bytes"),
+        memory_total_bytes=metrics.get("memory_total_bytes"),
+        cpu_percent=metrics.get("cpu_total_percent"),
+        cpu_temp_celsius=None,
+        cpu_total_jiffies=None,
+        cpu_idle_jiffies=None,
+        cpu_threads=metrics.get("cpu_threads"),
+        network_rx_bps=metrics.get("network_rx_bps"),
+        network_tx_bps=metrics.get("network_tx_bps"),
+    )
+
+
 def collect_current_sample(
     now: datetime | None = None,
     *,
@@ -329,11 +384,17 @@ def prune_samples(
     return [sample for sample in samples if sample.timestamp >= cutoff]
 
 
+def _sample_interval_seconds() -> int:
+    if glances_enabled():
+        return max(1, GLANCES_HISTORY_INTERVAL_SECONDS)
+    return max(1, MIN_SAMPLE_INTERVAL_SECONDS)
+
+
 def _should_append_sample(samples: list[MetricsSample], now: datetime) -> bool:
     if not samples:
         return True
     last = max(samples, key=lambda sample: sample.timestamp)
-    return (now - last.timestamp).total_seconds() >= MIN_SAMPLE_INTERVAL_SECONDS
+    return (now - last.timestamp).total_seconds() >= _sample_interval_seconds()
 
 
 def append_sample(
@@ -660,6 +721,15 @@ def record_sample_if_due(
     history = prune_samples(read_history(path), now=ts_now)
     if not _should_append_sample(history, ts_now):
         return False
+
+    if glances_enabled():
+        sample = collect_glances_sample(now=ts_now)
+        if sample is None:
+            logger.warning("Glances history sample skipped: metrics unavailable")
+            return False
+        append_sample(sample, path=path, now=ts_now)
+        return True
+
     previous = _latest_sample(history)
     sample = collect_current_sample(now=ts_now, previous=previous)
     if sample is None:

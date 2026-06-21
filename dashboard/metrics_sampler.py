@@ -12,7 +12,11 @@ import os
 import threading
 
 from glances_client import glances_enabled
-from raven_metrics_history import MIN_SAMPLE_INTERVAL_SECONDS, record_sample_if_due
+from raven_metrics_history import (
+    GLANCES_HISTORY_INTERVAL_SECONDS,
+    MIN_SAMPLE_INTERVAL_SECONDS,
+    record_sample_if_due,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +24,21 @@ logger = logging.getLogger(__name__)
 def is_sampler_enabled() -> bool:
     explicit = os.environ.get("DASHBOARD_METRICS_SAMPLER_ENABLED")
     if explicit is None:
-        return not glances_enabled()
+        return True
     return explicit.lower() not in ("0", "false", "no")
+
+
+def _sampler_interval_seconds() -> int:
+    if glances_enabled():
+        return max(1, GLANCES_HISTORY_INTERVAL_SECONDS)
+    return max(1, MIN_SAMPLE_INTERVAL_SECONDS)
 
 
 class MetricsSampler:
     """Daemon thread that records Raven host metrics on a fixed interval."""
 
-    def __init__(self, *, interval_seconds: int = MIN_SAMPLE_INTERVAL_SECONDS) -> None:
-        self._interval = max(1, interval_seconds)
+    def __init__(self, *, interval_seconds: int | None = None) -> None:
+        self._interval = max(1, interval_seconds or _sampler_interval_seconds())
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -47,8 +57,9 @@ class MetricsSampler:
         )
         self._thread.start()
         logger.info(
-            "Background metrics sampler started (interval=%ss)",
+            "Background metrics sampler started (interval=%ss, glances=%s)",
             self._interval,
+            glances_enabled(),
         )
 
     def stop(self) -> None:

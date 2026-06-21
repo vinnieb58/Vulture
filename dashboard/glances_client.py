@@ -32,6 +32,13 @@ GLANCES_ENDPOINTS: tuple[str, ...] = (
     "/api/4/processlist",
 )
 
+GLANCES_HISTORY_ENDPOINTS: tuple[str, ...] = (
+    "/api/4/cpu",
+    "/api/4/load",
+    "/api/4/mem",
+    "/api/4/network",
+)
+
 GLANCES_DETAILS_EXTRA_ENDPOINTS: tuple[str, ...] = (
     "/api/4/fs",
     "/api/4/network",
@@ -420,6 +427,31 @@ def _parse_filesystems(data: list[Any] | None) -> list[dict[str, Any]]:
     return filesystems
 
 
+def _network_rate_bps(entry: dict[str, Any], direction: str) -> float | None:
+    """Return receive/send rate in bytes/sec from Glances network plugin fields."""
+    if direction == "recv":
+        keys = (
+            "bytes_recv_rate",
+            "bytes_recv_rate_per_sec",
+            "speed_recv",
+            "rx",
+            "cumulative_rx",
+        )
+    else:
+        keys = (
+            "bytes_sent_rate",
+            "bytes_sent_rate_per_sec",
+            "speed_sent",
+            "tx",
+            "cumulative_tx",
+        )
+    for key in keys:
+        value = _coerce_float(entry.get(key))
+        if value is not None and value >= 0:
+            return value
+    return None
+
+
 def _parse_network_interfaces(data: list[Any] | None) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         return []
@@ -433,15 +465,57 @@ def _parse_network_interfaces(data: list[Any] | None) -> list[dict[str, Any]]:
         recv_bytes = _coerce_int(entry.get("bytes_recv"))
         sent_bytes = _coerce_int(entry.get("bytes_sent"))
         speed = _coerce_int(entry.get("speed"))
-        interfaces.append(
-            {
-                "name": name,
-                "bytes_recv_display": _format_bytes(recv_bytes),
-                "bytes_sent_display": _format_bytes(sent_bytes),
-                "speed_mbps": speed,
-            }
-        )
+        rx_rate = _network_rate_bps(entry, "recv")
+        tx_rate = _network_rate_bps(entry, "sent")
+        iface: dict[str, Any] = {
+            "name": name,
+            "bytes_recv_display": _format_bytes(recv_bytes),
+            "bytes_sent_display": _format_bytes(sent_bytes),
+            "speed_mbps": speed,
+        }
+        if rx_rate is not None:
+            iface["rx_rate_bps"] = rx_rate
+            iface["rx_rate_display"] = _format_rate_bps(rx_rate)
+        if tx_rate is not None:
+            iface["tx_rate_bps"] = tx_rate
+            iface["tx_rate_display"] = _format_rate_bps(tx_rate)
+        interfaces.append(iface)
     return interfaces
+
+
+def _format_rate_bps(rate_bps: float | None) -> str | None:
+    if rate_bps is None:
+        return None
+    if rate_bps >= 1024**2:
+        return f"{rate_bps / (1024**2):.1f} MB/s"
+    if rate_bps >= 1024:
+        return f"{rate_bps / 1024:.1f} KB/s"
+    return f"{rate_bps:.0f} B/s"
+
+
+def _aggregate_network_rates(data: list[Any] | None) -> tuple[float | None, float | None]:
+    """Sum non-loopback interface rx/tx rates (bytes/sec)."""
+    if not isinstance(data, list):
+        return None, None
+    rx_total = 0.0
+    tx_total = 0.0
+    rx_seen = False
+    tx_seen = False
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("interface_name") or entry.get("name") or "").lower()
+        if name in ("lo", "loopback"):
+            continue
+        rx = _network_rate_bps(entry, "recv")
+        tx = _network_rate_bps(entry, "sent")
+        if rx is not None:
+            rx_total += rx
+            rx_seen = True
+        if tx is not None:
+            tx_total += tx
+            tx_seen = True
+    return (rx_total if rx_seen else None, tx_total if tx_seen else None)
 
 
 def _parse_uptime(data: Any | None) -> float | None:
@@ -613,3 +687,44 @@ def fetch_glances_details_snapshot() -> dict[str, Any]:
             _fetch_budget_seconds(),
         )
     return snapshot
+
+
+def fetch_glances_history_metrics() -> dict[str, Any]:
+    """Fetch compact Glances metrics for JSONL history sampling (no raw blobs)."""
+    payload = _fetch_all_json(GLANCES_HISTORY_ENDPOINTS)
+    cpu_data = payload.get("/api/4/cpu")
+    load_data = payload.get("/api/4/load")
+    mem_data = payload.get("/api/4/mem")
+    network_data = payload.get("/api/4/network")
+
+    cpu_total, cpu_threads = _parse_cpu(cpu_data if isinstance(cpu_data, dict) else None)
+    load_1, load_5, load_15, load_threads = _parse_load(
+        load_data if isinstance(load_data, dict) else None
+    )
+    mem_percent, mem_used, mem_total = _parse_mem(mem_data if isinstance(mem_data, dict) else None)
+    rx_rate, tx_rate = _aggregate_network_rates(
+        network_data if isinstance(network_data, list) else None
+    )
+    if cpu_threads is None:
+        cpu_threads = load_threads
+
+    available = (
+        cpu_total is not None
+        or load_1 is not None
+        or mem_percent is not None
+        or rx_rate is not None
+        or tx_rate is not None
+    )
+    return {
+        "available": available,
+        "cpu_total_percent": cpu_total,
+        "load_1": load_1,
+        "load_5": load_5,
+        "load_15": load_15,
+        "cpu_threads": cpu_threads,
+        "memory_used_percent": mem_percent,
+        "memory_used_bytes": mem_used,
+        "memory_total_bytes": mem_total,
+        "network_rx_bps": rx_rate,
+        "network_tx_bps": tx_rate,
+    }
