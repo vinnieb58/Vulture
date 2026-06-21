@@ -259,6 +259,36 @@
       background: rgba(255,255,255,0.02);
     }
 
+    .viz-live-now {
+      margin-top: 0.55rem;
+      font-size: 0.82rem;
+      color: var(--text);
+      text-align: center;
+    }
+
+    .glances-footer {
+      margin: 1.5rem 0 0.5rem;
+      padding: 1rem 0 0.25rem;
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+
+    .glances-footer a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.92rem;
+    }
+
+    .glances-footer a:hover { text-decoration: underline; }
+
+    .glances-footer-note {
+      display: block;
+      margin-top: 0.35rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
     .progress-list { display: grid; gap: 0.65rem; }
 
     .progress-row { display: grid; gap: 0.3rem; }
@@ -609,7 +639,7 @@
           <h3>Network</h3>
           <table class="process-table" id="network-table">
             <thead>
-              <tr><th>Interface</th><th>Recv</th><th>Sent</th><th>Speed</th></tr>
+              <tr><th>Interface</th><th>Recv</th><th>Sent</th><th>Rx rate</th><th>Tx rate</th><th>Speed</th></tr>
             </thead>
             <tbody id="network-body"></tbody>
           </table>
@@ -649,6 +679,11 @@
         </div>
       </div>
     </section>
+
+    <footer class="glances-footer" id="glances-ui-footer">
+      <a id="glances-ui-link" href="#" target="_blank" rel="noopener noreferrer">Open Glances UI →</a>
+      <span class="glances-footer-note">Raw Glances interface (localhost/LAN/Tailscale only — port 61208)</span>
+    </footer>
   </main>
 
   <nav class="bottom-nav" aria-label="Nest navigation">

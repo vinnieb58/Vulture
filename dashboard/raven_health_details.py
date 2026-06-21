@@ -13,11 +13,13 @@ from glances_client import (
 )
 from host_cpu_metrics import NOT_AVAILABLE_LABEL, format_celsius
 from raven_metrics_history import (
+    COLLECTING_LABEL,
     MetricsSample,
     get_metrics_summary,
     prune_samples,
     read_history,
 )
+from storage_probe import StorageStatus, get_storage_status
 
 RAVEN_HEALTH_REFRESH_SECONDS = int(
     os.environ.get("DASHBOARD_RAVEN_HEALTH_REFRESH_SECONDS", "5")
@@ -25,6 +27,9 @@ RAVEN_HEALTH_REFRESH_SECONDS = int(
 HISTORY_PATH = os.environ.get(
     "DASHBOARD_METRICS_HISTORY_PATH",
     "/app/data/raven_metrics_history.jsonl",
+)
+HISTORY_MIN_CHART_POINTS = int(
+    os.environ.get("DASHBOARD_HISTORY_MIN_CHART_POINTS", "3")
 )
 
 
@@ -50,17 +55,79 @@ def _format_uptime(seconds: float | None) -> str | None:
     return " ".join(parts)
 
 
+def _format_rate_bps(rate_bps: float | None) -> str | None:
+    if rate_bps is None:
+        return None
+    if rate_bps >= 1024**2:
+        return f"{rate_bps / (1024**2):.1f} MB/s"
+    if rate_bps >= 1024:
+        return f"{rate_bps / 1024:.1f} KB/s"
+    return f"{rate_bps:.0f} B/s"
+
+
+def _storage_status_to_disk(status: StorageStatus) -> dict[str, Any] | None:
+    """Map a storage probe row to the Glances-style disk dict used by the UI."""
+    if status.percent_used is None and not status.used:
+        if status.status not in ("OK", "OK_AUTOMOUNTED"):
+            return None
+    mount = status.path
+    if mount.startswith("/host/root"):
+        mount = mount.removeprefix("/host/root") or "/"
+    return {
+        "device": status.actual_source or status.name or "—",
+        "mount": mount,
+        "percent": status.percent_used,
+        "percent_display": (
+            f"{status.percent_used:.0f}%" if status.percent_used is not None else None
+        ),
+        "used_display": status.used,
+        "total_display": status.size,
+        "free_display": status.available,
+        "source": "storage_probe",
+        "status": status.status,
+    }
+
+
+def _disks_from_storage_probe() -> list[dict[str, Any]]:
+    """Fallback disk usage when Glances /api/4/fs is empty or unavailable."""
+    try:
+        rows = get_storage_status()
+    except Exception:
+        return []
+    disks: list[dict[str, Any]] = []
+    for row in rows:
+        if row.legacy and row.status == "LEGACY_PATH":
+            continue
+        if row.role == "root" or row.path.startswith("/mnt/storage"):
+            disk = _storage_status_to_disk(row)
+            if disk is not None:
+                disks.append(disk)
+    return disks
+
+
+def _resolve_disks(glances: dict[str, Any]) -> list[dict[str, Any]]:
+    filesystems = glances.get("filesystems") or []
+    if filesystems:
+        return filesystems
+    fallback = _disks_from_storage_probe()
+    if fallback:
+        glances["filesystems"] = fallback
+        glances["disks_source"] = "storage_probe"
+    return fallback
+
+
 def _history_series_1h(
     samples: list[MetricsSample],
     *,
     now: datetime,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     cutoff = now - timedelta(hours=1)
     window = [sample for sample in samples if sample.timestamp >= cutoff]
     window.sort(key=lambda sample: sample.timestamp)
     cpu_series: list[dict[str, Any]] = []
     load_series: list[dict[str, Any]] = []
     memory_series: list[dict[str, Any]] = []
+    network_series: list[dict[str, Any]] = []
     for sample in window:
         label = sample.timestamp.strftime("%H:%M")
         if sample.cpu_percent is not None:
@@ -75,7 +142,19 @@ def _history_series_1h(
                     "value": round(sample.memory_used_percent, 1),
                 }
             )
-    network_series: list[dict[str, Any]] = []
+        rx = sample.network_rx_bps
+        tx = sample.network_tx_bps
+        if rx is not None or tx is not None:
+            total_bps = (rx or 0.0) + (tx or 0.0)
+            network_series.append(
+                {
+                    "label": label,
+                    "value": round(total_bps / (1024**2), 2),
+                    "rx_bps": rx,
+                    "tx_bps": tx,
+                }
+            )
+    collecting = len(window) < HISTORY_MIN_CHART_POINTS
     return {
         "cpu_1h": cpu_series,
         "load_1h": load_series,
@@ -85,6 +164,9 @@ def _history_series_1h(
         "load_history_1h": load_series,
         "memory_history_1h": memory_series,
         "network_history_1h": network_series,
+        "collecting": collecting,
+        "sample_count_1h": len(window),
+        "collecting_label": COLLECTING_LABEL,
     }
 
 
@@ -184,7 +266,7 @@ def normalize_glances_details(
     raven: dict[str, Any],
     docker_running: int,
     metrics: dict[str, Any],
-    history: dict[str, list[dict[str, Any]]],
+    history: dict[str, Any],
     updated_at: str,
 ) -> dict[str, Any]:
     """Build a template-friendly Glances payload for the details page."""
@@ -193,6 +275,7 @@ def normalize_glances_details(
     cpu_breakdown = glances.get("cpu_breakdown") or {}
     top_processes = glances.get("top_processes") or glances.get("processes") or []
     overview_processes = top_processes[:5]
+    disks = _resolve_disks(glances)
     containers = _containers_section(
         docker_running=docker_running,
         docker_containers=glances.get("docker_containers") or [],
@@ -236,7 +319,7 @@ def normalize_glances_details(
                 "temp_high_24h": metrics.get("temp_high_24h"),
             },
             "containers": containers,
-            "disks": glances.get("filesystems") or [],
+            "disks": disks,
             "network": glances.get("network") or [],
         },
         "cpu": {
@@ -249,7 +332,8 @@ def normalize_glances_details(
         "memory": _memory_section(glances),
         "swap": _swap_section(glances),
         "processes": glances.get("processes") or top_processes,
-        "disks": glances.get("filesystems") or [],
+        "disks": disks,
+        "disks_source": glances.get("disks_source"),
         "network": glances.get("network") or [],
         "sensors": glances.get("sensors") or [],
         "system": _system_section(
@@ -344,6 +428,8 @@ def build_raven_health_details(
     else:
         glances = _fallback_glances_from_metrics(metrics)
         glances["status_message"] = "Glances disabled"
+
+    _resolve_disks(glances)
 
     try:
         samples = prune_samples(read_history(), now=ts_now)

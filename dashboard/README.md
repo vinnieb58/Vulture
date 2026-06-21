@@ -197,15 +197,28 @@ Auto-refresh defaults to **5 seconds** on the details page via vanilla JS fetch
 visible if a refresh fails (badge shows **Stale**). The Nest home page still
 uses the global meta refresh (`DASHBOARD_AUTO_REFRESH_SECONDS`).
 
-History charts use existing JSONL samples when available. The API exposes both
-legacy and normalized keys:
+History charts use compact JSONL samples written by the dashboard background
+sampler (Glances-normalized when enabled). The API exposes both legacy and
+normalized keys:
 
 - `cpu_1h` / `cpu_history_1h`
 - `load_1h` / `load_history_1h`
 - `memory_1h` / `memory_history_1h`
-- `network_1h` / `network_history_1h` (empty until network history exists)
+- `network_1h` / `network_history_1h`
+- `collecting` — true until enough samples exist for 1h charts
+- `sample_count_1h` — samples in the last hour window
 
-When history is missing, cards show a dashed empty state instead of a blank area.
+When history is still collecting, cards show **Collecting history — check back
+in a few minutes** and display the current live value where available.
+
+**Disk usage** on the details page prefers Glances `/api/4/fs`. When that
+endpoint is empty (common when Glances lacks host filesystem visibility), the
+dashboard falls back to the same storage/Roost probe used on the Nest home
+page (`/`, `/mnt/storage/*`).
+
+A link at the bottom of `/raven/health` opens the raw Glances web UI on port
+61208 using the browser's current hostname (works from LAN/Tailscale). Glances
+is bound to localhost on the host unless you intentionally expose it further.
 
 Glances API v4 endpoints used:
 
@@ -246,8 +259,9 @@ Glances container command:
 glances -w --bind 0.0.0.0 --port 61208
 ```
 
-Host bind mounts for accurate metrics: `/proc`, `/sys`, `/dev`, `/run/udev`
-(read-only). The compose file maps port `61208` to `127.0.0.1` only.
+Host bind mounts for accurate metrics: `/proc`, `/sys`, `/dev`, `/run/udev`,
+and `/:/rootfs:ro` (filesystem stats). The compose file maps port `61208` to
+`127.0.0.1` only.
 
 ### Fallback behavior
 
@@ -264,11 +278,12 @@ Glances endpoints are fetched **in parallel** with a shared budget (default **1.
 total, **1.0s** per request). Page load does not wait for seven sequential slow
 responses; when the budget is exceeded, fallback is immediate.
 
-### Legacy JSONL history (optional)
+### JSONL history sampler (Glances-backed)
 
-The background sampler is **disabled by default** when Glances is enabled
-(`DASHBOARD_METRICS_SAMPLER_ENABLED=0` in compose). JSONL history is kept for
-peak/saturation reporting and optional fallback sampling.
+When Glances is enabled, the dashboard runs a lightweight background sampler
+that every **10 seconds** fetches normalized Glances metrics (CPU, load, memory,
+network rx/tx rates) and appends compact samples to JSONL — not raw Glances
+blobs. Retention defaults to **48 hours** at `./data/raven_metrics_history.jsonl`.
 
 | Component | Behavior |
 |-----------|----------|
@@ -276,11 +291,12 @@ peak/saturation reporting and optional fallback sampling.
 | Nest home (`/`) | Compact Raven Health summary card |
 | Raven details (`/raven/health`) | Full Glances telemetry with 5s JS refresh |
 | `/api/raven/health/glances` | Normalized JSON for details page polling |
-| Background sampler | Off by default with Glances; enable with `DASHBOARD_METRICS_SAMPLER_ENABLED=1` |
+| Background sampler | On by default; writes Glances-normalized samples every 10s |
+| Disk fallback | Storage/Roost probe when Glances `/api/4/fs` is empty |
 | `/health` | No metrics — liveness probe only (Docker HEALTHCHECK) |
 
-If both Glances and the background sampler are disabled, 1h/24h aggregates may
-be sparse unless you re-enable the sampler temporarily.
+Disable the sampler with `DASHBOARD_METRICS_SAMPLER_ENABLED=0` if needed.
+Without the sampler, 1h charts show a collecting state until samples exist.
 
 ### Load average vs CPU %
 
@@ -303,17 +319,20 @@ Temperature is read from Glances `/api/4/sensors`, preferring CPU/package labels
 (`Package id 0`, `x86_pkg_temp`, `coretemp`, etc.). When Glances is unavailable,
 the dashboard falls back to host sysfs thermal zones via `/host/root/sys`.
 
-### Sampling and retention (legacy JSONL)
+### Sampling and retention
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | JSONL sample file |
-| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Minimum seconds between samples |
+| `DASHBOARD_GLANCES_HISTORY_INTERVAL_SECONDS` | `10` | Seconds between Glances history samples |
+| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Seconds between host-probe samples (Glances off) |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of history to keep |
-| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `0` with Glances | Background sampler thread |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | on | Background sampler thread |
+| `DASHBOARD_HISTORY_MIN_CHART_POINTS` | `3` | Minimum 1h samples before charts leave collecting state |
 
-Each legacy sample records: timestamp, CPU %, memory %, load 1/5/15, CPU temp,
-CPU thread count, and raw jiffies (for delta-based CPU % on the next sample).
+Each sample records: timestamp, CPU %, memory %, load 1/5/15, network rx/tx
+rates (bytes/sec), and CPU thread count. Legacy host-probe samples may also
+include CPU temp and jiffies when Glances is disabled.
 
 Samples are stored at `./data/raven_metrics_history.jsonl`.
 
@@ -346,20 +365,20 @@ curl http://localhost:61208/api/4/sensors
 curl http://localhost:61208/api/4/processlist
 ```
 
-Verify dashboard display and fallback:
+Verify dashboard display, disk fallback, and history:
 
 ```bash
 curl -sf http://localhost:8088/health
+curl -s http://localhost:61208/api/4/fs | jq .
+curl -s http://localhost:8088/api/raven/health/glances | jq '.disks, .history'
+curl -s http://localhost:8088/raven/health | grep -E 'Disk Usage|Collecting history|CPU Usage|Network|Open Glances UI'
 curl -s http://localhost:8088/ | grep -E 'Raven Health|Details'
-curl -s http://localhost:8088/raven/health | grep -E 'CPU Usage|Load Average|Memory Usage|Disk Usage|Network|Top CPU Processes'
 curl -s http://localhost:8088/api/raven/health/glances | jq '.status'
 ```
 
-Optional: confirm legacy JSONL history still works when sampler is re-enabled:
+Confirm JSONL history sampler (every ~10s when Glances enabled):
 
 ```bash
-# Re-enable sampler temporarily (e.g. while validating Glances stability):
-# DASHBOARD_METRICS_SAMPLER_ENABLED=1 in compose, then rebuild.
 watch -n 10 'wc -l ./data/raven_metrics_history.jsonl'
 tail -f ./data/raven_metrics_history.jsonl
 docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
@@ -383,9 +402,11 @@ docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
 | `DASHBOARD_GLANCES_TOP_PROCESSES` | `5` | Top CPU processes shown on card |
 | `DASHBOARD_SCHEDULER_FRESH_MINUTES` | `30` | Freshness window for scheduler logs |
 | `DASHBOARD_METRICS_HISTORY_PATH` | `/app/data/raven_metrics_history.jsonl` | Metrics JSONL path |
-| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Min seconds between metric samples |
+| `DASHBOARD_GLANCES_HISTORY_INTERVAL_SECONDS` | `10` | Glances history sample interval (seconds) |
+| `DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS` | `60` | Host-probe sample interval when Glances off |
 | `DASHBOARD_METRICS_RETENTION_HOURS` | `48` | Hours of metric history to retain |
-| `DASHBOARD_METRICS_SAMPLER_ENABLED` | `0` with Glances | Background sampler on/off |
+| `DASHBOARD_METRICS_SAMPLER_ENABLED` | on (unset) | Background sampler on/off |
+| `DASHBOARD_HISTORY_MIN_CHART_POINTS` | `3` | Min 1h samples before charts leave collecting state |
 | `DASHBOARD_TEMP_WARN_CELSIUS` | `80` | CPU temp WARN threshold (°C) |
 | `DASHBOARD_TEMP_CRITICAL_CELSIUS` | `90` | CPU temp FAIL threshold (°C) |
 | `DASHBOARD_CPU_SAT_THRESHOLD` | `90` | CPU % saturation threshold |
@@ -396,5 +417,5 @@ docker logs vulture-dashboard 2>&1 | grep -i "metrics sampler"
 
 ```bash
 python3 -m compileall -q dashboard
-python3 -m pytest tests/test_dashboard.py tests/test_raven_metrics_history.py tests/test_glances_metrics.py tests/test_dashboard_storage.py -q
+python3 -m pytest tests/test_dashboard.py tests/test_raven_metrics_history.py tests/test_glances_metrics.py tests/test_raven_health_details.py tests/test_dashboard_storage.py -q
 ```

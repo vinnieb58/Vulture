@@ -70,8 +70,33 @@
       cpu: history.cpu_history_1h || history.cpu_1h || [],
       load: history.load_history_1h || history.load_1h || [],
       memory: history.memory_history_1h || history.memory_1h || [],
-      network: history.network_history_1h || history.network_1h || []
+      network: history.network_history_1h || history.network_1h || [],
+      collecting: !!history.collecting,
+      sampleCount: history.sample_count_1h || 0,
+      collectingLabel: history.collecting_label || "Collecting history — check back in a few minutes"
     };
+  }
+
+  function historyEmptyText(history, fallback) {
+    if (history && history.collecting) {
+      return history.collectingLabel || "Collecting history — check back in a few minutes";
+    }
+    return fallback || "No history data yet.";
+  }
+
+  function emptyStateWithLive(container, message, liveLine) {
+    if (!container) return;
+    container.innerHTML = "";
+    var empty = document.createElement("div");
+    empty.className = "viz-empty";
+    empty.textContent = message || "No data yet.";
+    container.appendChild(empty);
+    if (liveLine) {
+      var live = document.createElement("div");
+      live.className = "viz-live-now";
+      live.textContent = "Current: " + liveLine;
+      container.appendChild(live);
+    }
   }
 
   function renderDonutGauge(container, percent, options) {
@@ -161,7 +186,11 @@
     if (!container) return;
     container.innerHTML = "";
     if (!data || !data.length) {
-      emptyState(container, options.emptyText || "No load history yet.");
+      emptyStateWithLive(
+        container,
+        options.emptyText || "No load history yet.",
+        options.liveText
+      );
       return;
     }
 
@@ -197,7 +226,11 @@
     container.innerHTML = "";
 
     if (!data || !data.length) {
-      emptyState(container, options.emptyText || "No history data yet.");
+      emptyStateWithLive(
+        container,
+        options.emptyText || "No history data yet.",
+        options.liveText
+      );
       return;
     }
 
@@ -336,7 +369,7 @@
     container.innerHTML = "";
     if (!interfaces || !interfaces.length) {
       var emptyRow = document.createElement("tr");
-      emptyRow.innerHTML = '<td colspan="4">No network data available.</td>';
+      emptyRow.innerHTML = '<td colspan="5">No network data available.</td>';
       container.appendChild(emptyRow);
       return;
     }
@@ -346,6 +379,8 @@
         "<td>" + iface.name + "</td>" +
         "<td>" + (iface.bytes_recv_display || "—") + "</td>" +
         "<td>" + (iface.bytes_sent_display || "—") + "</td>" +
+        "<td>" + (iface.rx_rate_display || "—") + "</td>" +
+        "<td>" + (iface.tx_rate_display || "—") + "</td>" +
         "<td>" + (iface.speed_mbps ? iface.speed_mbps + " Mbps" : "—") + "</td>";
       container.appendChild(row);
     });
@@ -462,7 +497,8 @@
 
     renderSparkline(document.getElementById("sparkline-load"), history.load, {
       title: "Load sparkline",
-      emptyText: "No load history for the last hour.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: load.load_1 != null ? load.load_1.toFixed(2) + " (1 min)" : null,
       color: COLORS.purple
     });
 
@@ -553,29 +589,47 @@
 
     renderAreaChart(document.getElementById("chart-cpu-1h"), history.cpu, {
       title: "CPU usage 1h",
-      emptyText: "No CPU history for the last hour.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: cpu.total_display || null,
       color: COLORS.accent,
       max: 100
     });
     renderAreaChart(document.getElementById("chart-load-1h"), history.load, {
       title: "Load average 1h",
-      emptyText: "No load history for the last hour.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: load.load_1 != null ? load.load_1.toFixed(2) : null,
       color: COLORS.purple
     });
     renderAreaChart(document.getElementById("chart-memory-1h"), history.memory, {
       title: "Memory usage 1h",
-      emptyText: "No memory history for the last hour.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: memory.percent_display || null,
       color: COLORS.ok,
       max: 100
     });
+
+    var networkLiveParts = (data.network || []).slice(0, 3).map(function (iface) {
+      var rx = iface.rx_rate_display;
+      var tx = iface.tx_rate_display;
+      if (rx || tx) {
+        return iface.name + " ↓" + (rx || "—") + " ↑" + (tx || "—");
+      }
+      return null;
+    }).filter(Boolean);
+    var networkLiveText = networkLiveParts.length
+      ? networkLiveParts.join(" · ")
+      : (history.collecting ? "Collecting network rates…" : null);
+
     renderAreaChart(document.getElementById("chart-network-1h"), history.network, {
       title: "Network I/O 1h",
-      emptyText: "Network history not available yet.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: networkLiveText,
       color: COLORS.purple
     });
     renderAreaChart(document.getElementById("chart-network-detail"), history.network, {
       title: "Network I/O 1h",
-      emptyText: "Network history not available yet.",
+      emptyText: historyEmptyText(history, "Collecting history — check back in a few minutes"),
+      liveText: networkLiveText,
       color: COLORS.purple
     });
   }
@@ -599,5 +653,13 @@
   }
 
   if (lastGoodData) applyDetails(lastGoodData, false);
+
+  (function initGlancesUiLink() {
+    var link = document.getElementById("glances-ui-link");
+    if (!link) return;
+    var port = 61208;
+    link.href = window.location.protocol + "//" + window.location.hostname + ":" + port + "/";
+  })();
+
   window.setInterval(refreshDetails, REFRESH_MS);
 })();
