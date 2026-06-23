@@ -21,6 +21,8 @@ from pelican_monitor.definitions import BackupDefinition, enabled_backup_definit
 from pelican_monitor.results import BackupCheckResult, checker_error_result, combine_status
 from pelican_monitor.runner import run_monitor
 from pelican_monitor.subprocess_util import set_command_runner
+from pelican_monitor.timer_parse import parse_next_elapse_realtime
+from zoneinfo import ZoneInfo
 
 
 def _systemctl_prop(args: list[str]) -> str | None:
@@ -48,6 +50,93 @@ def _healthy_result() -> dict:
         "issue_codes": [],
         "details": {"archive": {"latest_name": "raven-recovery-20260620T030015Z.tar.zst"}},
     }
+
+
+class TestTimerNextRunParsing:
+    CHICAGO = ZoneInfo("America/Chicago")
+
+    def test_valid_future_realtime_value(self):
+        raw = "Tue 2026-06-23 03:02:08 CDT"
+        now = datetime(2026, 6, 22, 12, 0, 0, tzinfo=self.CHICAGO)
+        has_future, next_run = parse_next_elapse_realtime(raw, local_tz=self.CHICAGO, now=now)
+        assert has_future is True
+        assert next_run is not None
+        assert "2026-06-23" in next_run
+
+    def test_raven_observed_output_regression(self):
+        """Exact NextElapseUSecRealtime observed on Raven (2026-06-22)."""
+        raw = "Tue 2026-06-23 03:02:08 CDT"
+        now = datetime(2026, 6, 22, 15, 0, 0, tzinfo=self.CHICAGO)
+        has_future, next_run = parse_next_elapse_realtime(raw, local_tz=self.CHICAGO, now=now)
+        assert has_future is True
+        assert next_run == "2026-06-23T03:02:08-05:00"
+
+    def test_na_value(self):
+        has_future, next_run = parse_next_elapse_realtime("n/a", local_tz=self.CHICAGO)
+        assert has_future is False
+        assert next_run is None
+
+    def test_empty_value(self):
+        has_future, next_run = parse_next_elapse_realtime("", local_tz=self.CHICAGO)
+        assert has_future is False
+        assert next_run is None
+
+    def test_zero_value(self):
+        has_future, next_run = parse_next_elapse_realtime("0", local_tz=self.CHICAGO)
+        assert has_future is False
+        assert next_run is None
+
+    def test_past_timestamp(self):
+        raw = "Tue 2026-06-23 03:02:08 CDT"
+        now = datetime(2026, 6, 24, 12, 0, 0, tzinfo=self.CHICAGO)
+        has_future, next_run = parse_next_elapse_realtime(raw, local_tz=self.CHICAGO, now=now)
+        assert has_future is False
+        assert next_run is not None
+
+    def test_timezone_abbreviation_present(self):
+        raw = "Tue 2026-06-23 03:02:08 CDT"
+        has_future, next_run = parse_next_elapse_realtime(
+            raw,
+            local_tz=self.CHICAGO,
+            now=datetime(2026, 6, 22, 0, 0, 0, tzinfo=self.CHICAGO),
+        )
+        assert has_future is True
+        assert next_run is not None
+
+    def test_integer_microseconds_still_supported(self):
+        future_usec = int(datetime(2026, 6, 23, 8, 2, 8, tzinfo=timezone.utc).timestamp() * 1_000_000)
+        now = datetime(2026, 6, 22, 12, 0, 0, tzinfo=timezone.utc)
+        has_future, next_run = parse_next_elapse_realtime(
+            str(future_usec),
+            local_tz=self.CHICAGO,
+            now=now,
+        )
+        assert has_future is True
+        assert next_run is not None
+
+    def test_evaluate_timer_healthy_with_raven_realtime_and_monotonic_zero(self):
+        """NextElapseUSecMonotonic=0 must not affect health when realtime is valid."""
+        raven_realtime = "Tue 2026-06-23 03:02:08 CDT"
+
+        def runner(args, timeout):  # noqa: ARG001
+            if args[0] == "systemctl" and "pelican-backup.timer" in args:
+                prop = _systemctl_prop(args)
+                if prop == "UnitFileState":
+                    return True, "enabled"
+                if prop == "ActiveState":
+                    return True, "active"
+                if prop == "NextElapseUSecRealtime":
+                    return True, raven_realtime
+            return False, "unexpected"
+
+        set_command_runner(runner)
+        with patch("pelican_monitor.checkers.raven_recovery.config.DISPLAY_TIMEZONE", "America/Chicago"):
+            result = raven_recovery.evaluate_timer_health("pelican-backup.timer")
+
+        assert result["status"] == "ok"
+        assert result["has_future_run"] is True
+        assert result["next_run"] == "2026-06-23T03:02:08-05:00"
+        assert not any(code == "TIMER_NO_FUTURE_RUN" for _, code, _ in result["issues"])
 
 
 class TestRavenRecoveryChecker:

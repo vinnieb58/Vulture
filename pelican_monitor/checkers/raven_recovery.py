@@ -18,6 +18,7 @@ from pelican_monitor import config
 from pelican_monitor.path_util import host_path, path_access_check
 from pelican_monitor.results import BackupCheckResult, combine_status
 from pelican_monitor.subprocess_util import is_timeout, run_command
+from pelican_monitor.timer_parse import parse_next_elapse_realtime
 
 BACKUP_BUNDLE_RE = re.compile(
     r"^raven-recovery-(?P<stamp>\d{8}T\d{6}Z)\.tar\.(?:zst|gz)$"
@@ -60,21 +61,21 @@ def _systemctl_property(unit: str, prop: str) -> str:
     return _normalize_systemctl_value(out, ok=ok)
 
 
+def _systemctl_property_raw(unit: str, prop: str) -> str:
+    """Return raw systemctl show value without lowercasing (needed for datetimes)."""
+    ok, out = run_command(
+        ["systemctl", "show", unit, f"--property={prop}", "--value"],
+        timeout=config.TIMEOUT_SYSTEMCTL,
+    )
+    if not ok:
+        return _normalize_systemctl_value(out, ok=ok)
+    return (out or "").strip().splitlines()[0].strip() if out else ""
+
+
 def _timer_next_run(unit: str) -> tuple[bool, str | None]:
-    raw = _systemctl_property(unit, "NextElapseUSecRealtime")
-    if raw in ("unknown", "unavailable", "not-found", ""):
-        return False, None
-    try:
-        usec = int(raw)
-    except ValueError:
-        return False, None
-    if usec <= 0:
-        return False, None
-    try:
-        ts = datetime.fromtimestamp(usec / 1_000_000, tz=timezone.utc)
-    except (OSError, OverflowError, ValueError):
-        return False, None
-    return True, ts.isoformat(timespec="seconds")
+    raw = _systemctl_property_raw(unit, "NextElapseUSecRealtime")
+    tz = ZoneInfo(config.DISPLAY_TIMEZONE)
+    return parse_next_elapse_realtime(raw, local_tz=tz)
 
 
 def evaluate_timer_health(timer_unit: str) -> dict[str, Any]:
