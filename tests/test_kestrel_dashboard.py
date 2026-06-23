@@ -206,7 +206,7 @@ class TestKestrelDashboardHTTP:
         response = self._stub_host(client).get("/kestrel")
         text = response.text
         assert "HVAC Runtime" in text
-        assert "Energy + HVAC Correlation" in text
+        assert "Energy + HVAC Correlation — Latest Overlapping 24h" in text
         assert "Nest Collection" in text
         assert "Downstairs" in text or "House any" in text
 

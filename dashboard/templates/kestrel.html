@@ -610,7 +610,7 @@
       </div>
 
       <div class="card full-width">
-        <div class="card-title">Energy + HVAC Correlation</div>
+        <div class="card-title">Energy + HVAC Correlation — Latest Overlapping 24h</div>
         {% if hvac.correlation.warning %}
         <div class="section-warning">{{ hvac.correlation.warning }}</div>
         {% endif %}
@@ -625,7 +625,7 @@
         </div>
         {% endif %}
         {% if hvac.correlation.available and hvac.correlation.rows %}
-        <div class="card-subtitle">Last {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
+        <div class="card-subtitle">Latest overlapping {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
         <table class="data-table">
           <thead>
             <tr>
