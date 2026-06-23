@@ -55,6 +55,15 @@ class TestPelicanMonitorServiceUnit:
         unit = _read_unit(SERVICE_FILE)
         assert not unit.has_section("Install")
 
+    def test_service_loads_optional_env_file(self) -> None:
+        text = SERVICE_FILE.read_text(encoding="utf-8")
+        assert "EnvironmentFile=-/home/vinnieb58/projects/vulture/.env" in text
+
+    def test_service_does_not_embed_webhook_secrets(self) -> None:
+        text = SERVICE_FILE.read_text(encoding="utf-8")
+        assert "DISCORD_WEBHOOK" not in text
+        assert "webhooks/" not in text
+
 
 class TestPelicanMonitorTimerUnit:
     def test_timer_unit_exists(self) -> None:

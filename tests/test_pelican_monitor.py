@@ -19,6 +19,7 @@ from canary.checks import check_backup_monitor, run_all_checks
 from pelican_monitor.checkers import raven_recovery
 from pelican_monitor.definitions import BackupDefinition, enabled_backup_definitions, registered_backup_definitions
 from pelican_monitor.results import BackupCheckResult, checker_error_result, combine_status
+from pelican_monitor.config import resolve_discord_webhook_url
 from pelican_monitor.runner import run_monitor
 from pelican_monitor.subprocess_util import set_command_runner
 from pelican_monitor.timer_parse import parse_next_elapse_realtime
@@ -287,6 +288,58 @@ class TestRavenRecoveryChecker:
         with patch("pelican_monitor.checkers.raven_recovery._compute_sha256", return_value=digest):
             result = raven_recovery.evaluate_latest_archive(tmp_path, stale_hours=36, warn_hours=30)
         assert result["status"] == "ok"
+
+
+class TestWebhookConfig:
+    def test_discord_webhook_url_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("PELICAN_MONITOR_DISCORD_WEBHOOK_URL", raising=False)
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.test/discord-fallback")
+        assert resolve_discord_webhook_url() == "https://example.test/discord-fallback"
+
+    def test_pelican_webhook_overrides_generic(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.test/discord-fallback")
+        monkeypatch.setenv("PELICAN_MONITOR_DISCORD_WEBHOOK_URL", "https://example.test/pelican-specific")
+        assert resolve_discord_webhook_url() == "https://example.test/pelican-specific"
+
+    def test_webhook_not_written_to_status_or_logs(self, tmp_path: Path, caplog):
+        secret_url = "https://discord.com/api/webhooks/1234567890/abcdefghijklmnop"
+        unhealthy = BackupCheckResult(
+            backup_id="raven_recovery",
+            display_name="Pelican backup",
+            status="critical",
+            reason="timer disabled",
+            checked_at="now",
+            issue_codes=["TIMER_DISABLED"],
+        )
+
+        defn = BackupDefinition(
+            backup_id="raven_recovery",
+            display_name="Pelican backup",
+            enabled=True,
+            checker=lambda: unhealthy,
+            target_path="/tmp",
+            archive_pattern=None,
+            warn_threshold_hours=30,
+            critical_threshold_hours=36,
+            checksum_expected=False,
+        )
+
+        with (
+            patch("pelican_monitor.runner.config.STATUS_PATH", tmp_path / "status.json"),
+            patch("pelican_monitor.runner.config.ALERT_STATE_PATH", tmp_path / "alert_state.json"),
+            patch("pelican_monitor.runner.config.DISCORD_WEBHOOK_URL", secret_url),
+            patch("pelican_monitor.runner.process_backup_alerts") as mock_alerts,
+        ):
+            mock_alerts.return_value = [{"backup_id": "raven_recovery", "sent": True, "decision": "alert"}]
+            payload, _ = run_monitor(definitions=[defn], send_alerts=True)
+
+        status_text = (tmp_path / "status.json").read_text(encoding="utf-8")
+        assert secret_url not in status_text
+        assert "webhooks/" not in status_text
+        assert secret_url not in caplog.text
+        assert secret_url not in json.dumps(payload)
+        mock_alerts.assert_called_once()
+        assert mock_alerts.call_args.kwargs["webhook_url"] == secret_url
 
 
 class TestRegistryAndRunner:

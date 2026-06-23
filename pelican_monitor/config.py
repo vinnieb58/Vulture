@@ -21,9 +21,15 @@ ALERT_STATE_PATH = Path(
 HOST_ROOT = Path(os.getenv("PELICAN_MONITOR_HOST_ROOT", "/")).resolve()
 DISPLAY_TIMEZONE = os.getenv("PELICAN_MONITOR_TIMEZONE", "America/Chicago").strip() or "America/Chicago"
 
-DISCORD_WEBHOOK_URL = (
-    os.getenv("PELICAN_MONITOR_DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
-)
+
+def resolve_discord_webhook_url() -> str:
+    """Return Pelican monitor webhook; Pelican-specific env overrides DISCORD_WEBHOOK_URL."""
+    return (
+        os.getenv("PELICAN_MONITOR_DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL", "")).strip()
+    )
+
+
+DISCORD_WEBHOOK_URL = resolve_discord_webhook_url()
 
 # Comma-separated backup IDs; empty means all registered definitions use their default enabled flag.
 _enabled_raw = os.getenv("PELICAN_MONITOR_ENABLED_BACKUPS", "").strip()
