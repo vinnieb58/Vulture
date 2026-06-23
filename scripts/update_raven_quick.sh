@@ -46,6 +46,12 @@ DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
 SCHEDULER_TIMER_UNIT="${VULTURE_SCHEDULER_TIMER%.timer}"
+FINCH_API_SERVICE="${FINCH_API_SERVICE:-finch-api.service}"
+FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
+
+RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/raven_finch_services.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_finch_services.sh"
 
 usage() {
     cat <<'EOF'
@@ -173,6 +179,10 @@ restart_systemd_services() {
             echo "        Scheduler service is not restarted automatically (use --run-once or full deploy)."
         fi
     fi
+
+    if ! restart_finch_services; then
+        exit 1
+    fi
 }
 
 run_scheduler_once() {
@@ -220,6 +230,8 @@ show_final_status() {
     print_unit_state "$VULTURE_BOT_SERVICE"
     print_unit_state "$VULTURE_SCHEDULER_TIMER"
     print_unit_state "$VULTURE_SCHEDULER_SERVICE" " (inactive/dead between timer runs is OK)"
+    print_unit_state "$FINCH_API_SERVICE"
+    print_unit_state "$FINCH_TELEGRAM_SERVICE"
 
     echo ""
     echo "  scheduler timers:"

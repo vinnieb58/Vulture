@@ -28,6 +28,8 @@
 #   VULTURE_SCHEDULER_TIMER    — scheduler timer unit (default: vulture-scheduler.timer)
 #   SKIP_SYSTEMD_RESTART       — set to 1 to skip service restarts (tests / dry run)
 #   SKIP_DASHBOARD_RESTART     — set to 1 to skip dashboard Docker compose up (tests / dry run)
+#   FINCH_API_SERVICE          — Finch API unit (default: finch-api.service)
+#   FINCH_TELEGRAM_SERVICE     — Finch Telegram unit (default: finch-telegram.service)
 
 set -euo pipefail
 
@@ -39,6 +41,12 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 VULTURE_BOT_SERVICE="${VULTURE_BOT_SERVICE:-vulture-bot.service}"
 VULTURE_SCHEDULER_SERVICE="${VULTURE_SCHEDULER_SERVICE:-vulture-scheduler.service}"
 VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
+FINCH_API_SERVICE="${FINCH_API_SERVICE:-finch-api.service}"
+FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
+
+RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/raven_finch_services.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_finch_services.sh"
 
 # Track whether the caller supplied BRANCH so we know whether to show prompts.
 BRANCH_PROVIDED=0
@@ -60,6 +68,8 @@ SYSTEMD_UNITS=(
     vulture-bot.service
     vulture-scheduler.service
     vulture-scheduler.timer
+    finch-api.service
+    finch-telegram.service
     pelican-backup.service
     pelican-backup.timer
 )
@@ -125,6 +135,10 @@ restart_systemd_services() {
         exit 1
     fi
     echo "  Restarted: $VULTURE_SCHEDULER_TIMER"
+
+    if ! restart_finch_services; then
+        exit 1
+    fi
 }
 
 STORAGE_MOUNTPOINT_PARENT="/mnt/storage"
@@ -194,12 +208,20 @@ show_runtime_status() {
     echo "    $VULTURE_BOT_SERVICE        — discord_bot.py (long-running)"
     echo "    $VULTURE_SCHEDULER_TIMER    — schedules hunt cycles"
     echo "    $VULTURE_SCHEDULER_SERVICE  — oneshot main.py cycle (inactive between runs is OK)"
+    echo "    $FINCH_API_SERVICE            — Finch local API"
+    echo "    $FINCH_TELEGRAM_SERVICE       — Finch Telegram bridge"
     echo ""
     echo "  systemctl is-active $BOT_UNIT:"
     systemctl is-active "$BOT_UNIT" 2>&1 || true
     echo ""
     echo "  systemctl is-active $SCHEDULER_TIMER_UNIT:"
     systemctl is-active "$SCHEDULER_TIMER_UNIT" 2>&1 || true
+    echo ""
+    echo "  systemctl is-active ${FINCH_API_SERVICE%.service}:"
+    systemctl is-active "${FINCH_API_SERVICE%.service}" 2>&1 || true
+    echo ""
+    echo "  systemctl is-active ${FINCH_TELEGRAM_SERVICE%.service}:"
+    systemctl is-active "${FINCH_TELEGRAM_SERVICE%.service}" 2>&1 || true
     echo ""
     echo "  systemctl list-timers --all | grep vulture:"
     systemctl list-timers --all 2>&1 | grep vulture || echo "  (no vulture timers listed)"
@@ -345,8 +367,10 @@ echo "    systemctl status $SCHEDULER_TIMER_UNIT --no-pager -l"
 echo "    systemctl status $SCHEDULER_UNIT --no-pager -l"
 echo "    systemctl list-timers --all | grep vulture"
 echo "    journalctl -u $SCHEDULER_UNIT -n 80 --no-pager"
-echo "    systemctl status $BOT_UNIT --no-pager -l"
-echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
+    echo "    systemctl status $BOT_UNIT --no-pager -l"
+    echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
+    echo "    systemctl status ${FINCH_API_SERVICE%.service} --no-pager -l"
+    echo "    systemctl status ${FINCH_TELEGRAM_SERVICE%.service} --no-pager -l"
 echo "    docker ps"
 echo "    curl -I http://localhost:8088"
 echo ""
