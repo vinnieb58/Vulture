@@ -485,16 +485,204 @@ class TestAlerting:
         unhealthy["reason"] = "Latest recovery bundle is 40 hours old."
 
         first = decide_backup_alert(unhealthy, {"severity": "healthy", "fingerprint": "healthy"})
-        second = decide_backup_alert(unhealthy, {"severity": "critical", "fingerprint": "BACKUP_STALE"})
+        second = decide_backup_alert(
+            unhealthy,
+            {
+                "severity": "critical",
+                "fingerprint": "BACKUP_STALE",
+                "last_sent_fingerprint": "BACKUP_STALE",
+            },
+        )
         assert first.should_send is True
         assert second.should_send is False
 
     def test_recovery_alert_per_backup_id(self):
         healthy = _healthy_result()
-        decision = decide_backup_alert(healthy, {"severity": "critical", "fingerprint": "BACKUP_STALE"})
+        decision = decide_backup_alert(
+            healthy,
+            {
+                "severity": "critical",
+                "fingerprint": "BACKUP_STALE",
+                "last_sent_fingerprint": "BACKUP_STALE",
+            },
+        )
         assert decision.should_send is True
         assert decision.kind == "recovery"
         assert "RECOVERED" in decision.message
+
+    def test_failed_delivery_does_not_set_last_sent_fingerprint(self, tmp_path: Path):
+        unhealthy = _healthy_result()
+        unhealthy["status"] = "critical"
+        unhealthy["issue_codes"] = ["TIMER_DISABLED", "TIMER_INACTIVE"]
+        unhealthy["reason"] = "timer disabled"
+
+        state_path = tmp_path / "alert_state.json"
+        with patch("canary.alerting.send_discord_message", return_value=False):
+            process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))["backups"]["raven_recovery"]
+        assert saved["fingerprint"] == "TIMER_DISABLED|TIMER_INACTIVE"
+        assert saved["last_sent_fingerprint"] is None
+
+    def test_same_fingerprint_retried_after_failed_delivery(self, tmp_path: Path):
+        unhealthy = _healthy_result()
+        unhealthy["status"] = "critical"
+        unhealthy["issue_codes"] = ["TIMER_DISABLED", "TIMER_INACTIVE"]
+
+        state_path = tmp_path / "alert_state.json"
+        with patch("canary.alerting.send_discord_message", return_value=False) as mock_send:
+            first = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        assert first[0]["sent"] is False
+        assert second[0]["sent"] is False
+        assert mock_send.call_count == 2
+
+    def test_successful_retry_sets_last_sent_fingerprint(self, tmp_path: Path):
+        unhealthy = _healthy_result()
+        unhealthy["status"] = "critical"
+        unhealthy["issue_codes"] = ["TIMER_DISABLED", "TIMER_INACTIVE"]
+
+        state_path = tmp_path / "alert_state.json"
+        with patch("canary.alerting.send_discord_message", side_effect=[False, True]):
+            process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))["backups"]["raven_recovery"]
+        assert saved["last_sent_fingerprint"] == "TIMER_DISABLED|TIMER_INACTIVE"
+        assert second[0]["sent"] is True
+
+    def test_successfully_delivered_fingerprint_suppressed_afterward(self, tmp_path: Path):
+        unhealthy = _healthy_result()
+        unhealthy["status"] = "critical"
+        unhealthy["issue_codes"] = ["TIMER_DISABLED", "TIMER_INACTIVE"]
+
+        state_path = tmp_path / "alert_state.json"
+        with patch("canary.alerting.send_discord_message", return_value=True) as mock_send:
+            process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        assert second[0]["sent"] is False
+        assert mock_send.call_count == 1
+
+    def test_missing_webhook_does_not_count_as_successful_delivery(self, tmp_path: Path):
+        unhealthy = _healthy_result()
+        unhealthy["status"] = "critical"
+        unhealthy["issue_codes"] = ["TIMER_DISABLED"]
+
+        state_path = tmp_path / "alert_state.json"
+        with patch("canary.alerting.send_discord_message", return_value=True) as mock_send:
+            first = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": unhealthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        mock_send.assert_called_once()
+        assert first[0]["sent"] is False
+        assert second[0]["sent"] is True
+        saved = json.loads(state_path.read_text(encoding="utf-8"))["backups"]["raven_recovery"]
+        assert saved["last_sent_fingerprint"] == "TIMER_DISABLED"
+
+    def test_recovery_delivery_failure_is_retried(self, tmp_path: Path):
+        healthy = _healthy_result()
+        state_path = tmp_path / "alert_state.json"
+        prior = {
+            "severity": "critical",
+            "fingerprint": "TIMER_DISABLED",
+            "last_sent_fingerprint": "TIMER_DISABLED",
+        }
+        state_path.write_text(json.dumps({"backups": {"raven_recovery": prior}}), encoding="utf-8")
+
+        with patch("canary.alerting.send_discord_message", return_value=False) as mock_send:
+            process_backup_alerts(
+                {"raven_recovery": healthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": healthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))["backups"]["raven_recovery"]
+        assert saved["last_sent_fingerprint"] == "TIMER_DISABLED"
+        assert mock_send.call_count == 2
+        assert second[0]["decision"] == "recovery"
+
+    def test_successful_recovery_sent_once(self, tmp_path: Path):
+        healthy = _healthy_result()
+        state_path = tmp_path / "alert_state.json"
+        prior = {
+            "severity": "critical",
+            "fingerprint": "TIMER_DISABLED",
+            "last_sent_fingerprint": "TIMER_DISABLED",
+        }
+        state_path.write_text(json.dumps({"backups": {"raven_recovery": prior}}), encoding="utf-8")
+
+        with patch("canary.alerting.send_discord_message", return_value=True) as mock_send:
+            process_backup_alerts(
+                {"raven_recovery": healthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+            second = process_backup_alerts(
+                {"raven_recovery": healthy},
+                host="raven",
+                state_path=state_path,
+                webhook_url="https://example.test/webhook",
+            )
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))["backups"]["raven_recovery"]
+        assert saved["last_sent_fingerprint"] == "healthy"
+        assert mock_send.call_count == 1
+        assert second[0]["sent"] is False
 
     def test_generic_alert_formatting(self):
         unhealthy = _healthy_result()
@@ -529,7 +717,7 @@ class TestAlerting:
         assert first[0]["sent"] is True
         assert second[0]["sent"] is False
         saved = json.loads(state_path.read_text(encoding="utf-8"))
-        assert "raven_recovery" in saved["backups"]
+        assert saved["backups"]["raven_recovery"]["last_sent_fingerprint"] == "TIMER_DISABLED"
 
     def test_secret_non_disclosure(self, tmp_path: Path):
         unhealthy = _healthy_result()

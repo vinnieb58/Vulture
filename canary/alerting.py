@@ -76,11 +76,21 @@ def decide_backup_alert(
     severity = _effective_severity(result)
     fingerprint = _fingerprint(result)
     prev_severity = previous_state.get("severity", "healthy")
-    prev_fingerprint = previous_state.get("fingerprint", "healthy")
+    last_sent = previous_state.get("last_sent_fingerprint")
     display_name = result.get("display_name", "Backup")
 
     if severity == "healthy":
-        if prev_severity in ("warning", "critical"):
+        if last_sent == "healthy":
+            return BackupAlertDecision(
+                should_send=False,
+                kind="none",
+                severity="healthy",
+                fingerprint="healthy",
+                message="",
+            )
+        if prev_severity in ("warning", "critical") or (
+            last_sent is not None and last_sent != "healthy"
+        ):
             return BackupAlertDecision(
                 should_send=True,
                 kind="recovery",
@@ -96,39 +106,22 @@ def decide_backup_alert(
             message="",
         )
 
-    if prev_severity == "healthy":
+    # Unhealthy: deduplicate only after a successful delivery of this fingerprint.
+    if last_sent == fingerprint:
         return BackupAlertDecision(
-            should_send=True,
-            kind="alert",
+            should_send=False,
+            kind="none",
             severity=severity,
             fingerprint=fingerprint,
-            message=_build_alert_message(display_name, result, severity),
-        )
-
-    if _severity_rank(severity) > _severity_rank(prev_severity):
-        return BackupAlertDecision(
-            should_send=True,
-            kind="alert",
-            severity=severity,
-            fingerprint=fingerprint,
-            message=_build_alert_message(display_name, result, severity),
-        )
-
-    if fingerprint != prev_fingerprint:
-        return BackupAlertDecision(
-            should_send=True,
-            kind="alert",
-            severity=severity,
-            fingerprint=fingerprint,
-            message=_build_alert_message(display_name, result, severity),
+            message="",
         )
 
     return BackupAlertDecision(
-        should_send=False,
-        kind="none",
+        should_send=True,
+        kind="alert",
         severity=severity,
         fingerprint=fingerprint,
-        message="",
+        message=_build_alert_message(display_name, result, severity),
     )
 
 
@@ -273,7 +266,7 @@ def process_backup_alerts(
         backups_state[backup_id] = {
             "severity": _effective_severity(result),
             "fingerprint": _fingerprint(result),
-            "last_kind": decision.kind if decision.should_send else previous.get("last_kind"),
+            "last_kind": decision.kind if sent else previous.get("last_kind"),
             "last_sent_fingerprint": (
                 decision.fingerprint if sent else previous.get("last_sent_fingerprint")
             ),
