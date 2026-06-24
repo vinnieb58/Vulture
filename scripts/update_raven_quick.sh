@@ -17,6 +17,7 @@
 #   ./scripts/update_raven_quick.sh --run-once    # quick deploy + one scheduler cycle
 #   ./scripts/update_raven_quick.sh --no-docker   # skip Docker stack rebuild/restart
 #   ./scripts/update_raven_quick.sh --no-services # skip systemd restarts
+#   ./scripts/update_raven_quick.sh --no-preupdate-backup
 #   ./scripts/update_raven_quick.sh --help
 #
 # Environment overrides (optional):
@@ -37,6 +38,7 @@ VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
 SKIP_DOCKER=0
 SKIP_SERVICES=0
 RUN_ONCE=0
+SKIP_PREUPDATE_BACKUP="${SKIP_PREUPDATE_BACKUP:-0}"
 
 PIP="${APP_DIR}/.venv/bin/pip"
 PYTHON_BIN="${APP_DIR}/${PYTHON}"
@@ -52,6 +54,8 @@ FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
 RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/raven_finch_services.sh
 source "${RAVEN_SCRIPTS_DIR}/raven_finch_services.sh"
+# shellcheck source=scripts/raven_preupdate_backup.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_preupdate_backup.sh"
 
 usage() {
     cat <<'EOF'
@@ -62,6 +66,8 @@ Fast Raven deploy without an immediate full hunt cycle.
 Options:
   --no-docker    Skip Docker stack rebuild/restart
   --no-services  Skip systemd unit install and service restarts
+  --no-preupdate-backup
+                 Skip pre-update backup of .env and critical data files
   --run-once     After deploy, run one scheduler cycle via:
                  systemctl start vulture-scheduler.service
   --help         Show this help and exit
@@ -272,6 +278,9 @@ parse_args() {
             --run-once)
                 RUN_ONCE=1
                 ;;
+            --no-preupdate-backup)
+                SKIP_PREUPDATE_BACKUP=1
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -291,6 +300,12 @@ main() {
 
     section "CD into ${APP_DIR}"
     cd "$APP_DIR"
+
+    if [[ $SKIP_PREUPDATE_BACKUP -eq 1 ]]; then
+        section "Skipping pre-update backup (--no-preupdate-backup)"
+    else
+        run_raven_preupdate_backup "$APP_DIR"
+    fi
 
     section "Git state (before update)"
     print_git_state "current"
