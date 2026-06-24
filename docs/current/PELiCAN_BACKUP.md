@@ -305,3 +305,102 @@ The service has **no** `network-online` dependency and **no** hard mount require
 - `scripts/install_pelican_timer.sh` — install/enable helper
 
 Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_systemd_timer.py`
+
+---
+
+## Raven database snapshots (twice daily)
+
+The daily **recovery bundle** above backs up `data/vulture.db` only (plus git, `.env`, config, and docs). It does **not** cover:
+
+- Other Raven SQLite databases under `data/*.db` (for example Finch activity DBs)
+- `data/kestrel/*.db`
+- Nest operational JSON state (`data/kestrel_nest_history.jsonl`, `data/kestrel_nest_status.json`)
+- Twice-daily scheduling
+
+For dedicated database backups independent of deploy/update scripts, use the **database snapshot** job. It publishes compressed archives to:
+
+```text
+/mnt/storage/pelican_backup/raven-db-snapshots/
+  raven-db-snapshot-YYYYMMDDTHHMMSSZ.tar.gz      # or .tar.zst when zstd(1) is installed
+  raven-db-snapshot-YYYYMMDDTHHMMSSZ.tar.gz.sha256
+  .pelican-staging/                              # transient; removed after success
+```
+
+Each snapshot includes:
+
+| Source | Notes |
+|--------|-------|
+| `data/*.db` | Online SQLite backup + `PRAGMA integrity_check` per database |
+| `data/kestrel/*.db` | Same SQLite-safe backup path |
+| `data/kestrel_nest_history.jsonl` | Included only when present and below size limit (default 5 MiB) |
+| `data/kestrel_nest_status.json` | Included only when present and below size limit |
+
+`data/vulture.db` is required. Other databases are included when present. Failed SQLite backup or integrity check aborts the run without publishing a partial archive.
+
+Retention keeps snapshots from the last **14 days** (default). Configure with `PELICAN_DB_SNAPSHOT_RETENTION_DAYS`.
+
+### Manual command
+
+```bash
+cd /home/vinnieb58/projects/vulture
+bash scripts/pelican_db_snapshot.sh
+```
+
+Optional overrides:
+
+```bash
+PELICAN_DB_SNAPSHOT_TARGET=/mnt/storage/pelican_backup/raven-db-snapshots \
+PELICAN_DB_SNAPSHOT_RETENTION_DAYS=14 \
+bash scripts/pelican_db_snapshot.sh
+```
+
+### Recognizing success
+
+```text
+pelican-db-snapshot: INFO: Pelican backup target verified
+pelican-db-snapshot: INFO: Backed up data/vulture.db: SQLite backup integrity check passed
+...
+pelican-db-snapshot: INFO: Published database snapshot: /mnt/storage/pelican_backup/raven-db-snapshots/raven-db-snapshot-....tar.gz
+pelican-db-snapshot: INFO: Pelican database snapshot completed successfully
+```
+
+Failures print `pelican-db-snapshot: ERROR:` lines and exit non-zero (same journald pattern as the recovery bundle).
+
+### Twice-daily systemd timer
+
+`pelican-db-snapshot.service` (oneshot) and `pelican-db-snapshot.timer` run at **~03:00** and **~15:00** local time (each with up to 15 minutes randomized delay). The oneshot service must **not** be enabled directly — only the timer.
+
+```bash
+cd /home/vinnieb58/projects/vulture
+./scripts/install_pelican_db_snapshot_timer.sh --enable
+```
+
+Or enable the timer directly after units are installed:
+
+```bash
+sudo systemctl enable --now pelican-db-snapshot.timer
+```
+
+Confirm schedule:
+
+```bash
+systemctl list-timers pelican-db-snapshot.timer
+journalctl -u pelican-db-snapshot.service -n 50 --no-pager
+```
+
+Disable without removing units:
+
+```bash
+sudo systemctl disable --now pelican-db-snapshot.timer
+```
+
+### Implementation files
+
+- `scripts/pelican_db_snapshot.sh` — operator entry point
+- `scripts/pelican_db_snapshot.py` — orchestrator
+- `scripts/pelican/db_snapshot_*.py` — discovery, naming, retention
+- `deploy/systemd/pelican-db-snapshot.service` — oneshot snapshot unit
+- `deploy/systemd/pelican-db-snapshot.timer` — twice-daily timer
+- `scripts/install_pelican_db_snapshot_timer.sh` — install/enable helper
+
+Tests: `tests/test_pelican_db_snapshot.py`, `tests/test_pelican_db_snapshot_systemd_timer.py`

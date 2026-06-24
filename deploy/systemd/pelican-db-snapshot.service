@@ -1,0 +1,17 @@
+[Unit]
+Description=Pelican Raven database snapshot backup (oneshot)
+Documentation=file:/home/vinnieb58/projects/vulture/docs/current/PELiCAN_BACKUP.md
+
+[Service]
+Type=oneshot
+User=vinnieb58
+Group=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+UMask=0077
+ExecStart=/home/vinnieb58/projects/vulture/scripts/pelican_db_snapshot.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pelican-db-snapshot
+NoNewPrivileges=true
+TimeoutStartSec=1800
+Restart=no
