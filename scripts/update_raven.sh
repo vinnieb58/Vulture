@@ -28,10 +28,29 @@
 #   VULTURE_SCHEDULER_TIMER    — scheduler timer unit (default: vulture-scheduler.timer)
 #   SKIP_SYSTEMD_RESTART       — set to 1 to skip service restarts (tests / dry run)
 #   SKIP_DASHBOARD_RESTART     — set to 1 to skip dashboard Docker compose up (tests / dry run)
+#   SKIP_PREUPDATE_BACKUP      — set to 1 to skip pre-update mutable-state backup
+#
+# Options:
+#   --no-preupdate-backup      — skip pre-update backup of .env and critical data files
 #   FINCH_API_SERVICE          — Finch API unit (default: finch-api.service)
 #   FINCH_TELEGRAM_SERVICE     — Finch Telegram unit (default: finch-telegram.service)
 
 set -euo pipefail
+
+SKIP_PREUPDATE_BACKUP="${SKIP_PREUPDATE_BACKUP:-0}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-preupdate-backup)
+            SKIP_PREUPDATE_BACKUP=1
+            ;;
+        *)
+            echo "ERROR: unknown option: $1" >&2
+            echo "Usage: bash scripts/update_raven.sh [--no-preupdate-backup]" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 # ---------------------------------------------------------------------------
 # Config — detect which values were explicitly provided before applying defaults
@@ -47,6 +66,8 @@ FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
 RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/raven_finch_services.sh
 source "${RAVEN_SCRIPTS_DIR}/raven_finch_services.sh"
+# shellcheck source=scripts/raven_preupdate_backup.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_preupdate_backup.sh"
 
 # Track whether the caller supplied BRANCH so we know whether to show prompts.
 BRANCH_PROVIDED=0
@@ -238,6 +259,15 @@ show_runtime_status() {
 # ---------------------------------------------------------------------------
 section "CD into $APP_DIR"
 cd "$APP_DIR"
+
+# ---------------------------------------------------------------------------
+# 1b. Pre-update backup (before any code changes)
+# ---------------------------------------------------------------------------
+if [[ "${SKIP_PREUPDATE_BACKUP}" == "1" ]]; then
+    section "Skipping pre-update backup (SKIP_PREUPDATE_BACKUP=1)"
+else
+    run_raven_preupdate_backup "$APP_DIR"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Git fetch (needed before branch picker can list branches)

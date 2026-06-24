@@ -8,6 +8,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UPDATE_RAVEN = REPO_ROOT / "scripts" / "update_raven.sh"
 UPDATE_RAVEN_QUICK = REPO_ROOT / "scripts" / "update_raven_quick.sh"
 FINCH_HELPER = REPO_ROOT / "scripts" / "raven_finch_services.sh"
+PREUPDATE_BACKUP = REPO_ROOT / "scripts" / "raven_preupdate_backup.sh"
+PREUPDATE_BACKUP_PY = REPO_ROOT / "scripts" / "raven_preupdate_backup.py"
 
 
 def _read(path: Path) -> str:
@@ -88,3 +90,51 @@ def test_update_raven_skip_systemd_restart_skips_finch() -> None:
     skip_block = skip_block[: skip_block.index("else")]
     assert "restart_finch_services" not in skip_block
     assert "restart_systemd_services" not in skip_block
+
+
+def test_preupdate_backup_helper_exists() -> None:
+    assert PREUPDATE_BACKUP.is_file()
+    assert PREUPDATE_BACKUP_PY.is_file()
+
+
+def test_preupdate_backup_targets_pelican_subdirectory() -> None:
+    text = _read(PREUPDATE_BACKUP_PY)
+    assert "raven-preupdate" in text
+    assert "/mnt/storage/pelican_backup" in text
+
+
+def test_preupdate_backup_excludes_metrics_history() -> None:
+    text = _read(PREUPDATE_BACKUP_PY)
+    assert "raven_metrics_history.jsonl" in text
+
+
+def test_update_raven_runs_preupdate_backup_before_git_fetch() -> None:
+    text = _read(UPDATE_RAVEN)
+    backup_idx = text.index("run_raven_preupdate_backup")
+    fetch_idx = text.index('section "Fetching origin"')
+    assert backup_idx < fetch_idx
+
+
+def test_update_raven_quick_runs_preupdate_backup_before_git_fetch() -> None:
+    text = _read(UPDATE_RAVEN_QUICK)
+    backup_idx = text.index("run_raven_preupdate_backup")
+    fetch_idx = text.index('section "Fetching origin"')
+    assert backup_idx < fetch_idx
+
+
+def test_update_raven_supports_no_preupdate_backup_flag() -> None:
+    text = _read(UPDATE_RAVEN)
+    assert "--no-preupdate-backup" in text
+    assert "SKIP_PREUPDATE_BACKUP" in text
+
+
+def test_update_raven_quick_supports_no_preupdate_backup_flag() -> None:
+    text = _read(UPDATE_RAVEN_QUICK)
+    assert "--no-preupdate-backup" in text
+    assert "SKIP_PREUPDATE_BACKUP" in text
+
+
+def test_preupdate_backup_does_not_print_secret_values() -> None:
+    text = _read(PREUPDATE_BACKUP)
+    assert "cat .env" not in text
+    assert "Files included" in text
