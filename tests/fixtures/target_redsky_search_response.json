@@ -1,0 +1,95 @@
+{
+  "data": {
+    "search": {
+      "search_response": {
+        "metadata": {
+          "keyword": "steam deck",
+          "total_results": 42,
+          "auto_corrected_keyword": null
+        },
+        "facet_list": [
+          {
+            "facet_id": "d_brand_all",
+            "display_name": "Brand"
+          }
+        ]
+      },
+      "products": [
+        {
+          "__typename": "ProductSummary",
+          "tcin": "87767195",
+          "item": {
+            "product_description": {
+              "title": "Valve Steam Deck OLED 512GB Handheld Gaming Console"
+            },
+            "primary_brand": {
+              "name": "Valve"
+            },
+            "enrichment": {
+              "buy_url": "https://www.target.com/p/valve-steam-deck-oled-512gb/-/A-87767195",
+              "image_info": {
+                "primary_image": {
+                  "url": "https://target.scene7.com/is/image/Target/GUEST_steam-deck-example"
+                }
+              }
+            }
+          },
+          "price": {
+            "formatted_current_price": "$549.99",
+            "current_retail": 549.99,
+            "formatted_comparison_price": null
+          },
+          "ratings_and_reviews": {
+            "statistics": {
+              "rating": {
+                "average": 4.7,
+                "count": 128
+              }
+            }
+          }
+        },
+        {
+          "__typename": "ProductSummary",
+          "tcin": "89456123",
+          "item": {
+            "product_description": {
+              "title": "ASUS ROG Ally Z1 Extreme Handheld Gaming Console"
+            },
+            "primary_brand": {
+              "name": "ASUS"
+            },
+            "enrichment": {
+              "buy_url": "https://www.target.com/p/asus-rog-ally-z1-extreme/-/A-89456123",
+              "image_info": {
+                "primary_image": {
+                  "url": "https://target.scene7.com/is/image/Target/GUEST_rog-ally-example"
+                }
+              }
+            }
+          },
+          "price": {
+            "formatted_current_price": "See price in cart",
+            "current_retail": 699.99,
+            "formatted_comparison_price": null
+          }
+        },
+        {
+          "__typename": "AdPlaceholder",
+          "tcin": "00000000"
+        },
+        {
+          "__typename": "ProductSummary",
+          "tcin": "80000001",
+          "item": {
+            "product_description": {
+              "title": "Broken card missing buy url"
+            }
+          },
+          "price": {
+            "formatted_current_price": "$10.00"
+          }
+        }
+      ]
+    }
+  }
+}
