@@ -587,6 +587,9 @@
           </div>
           {% endfor %}
         </div>
+        {% if hc.warning %}
+        <div class="section-warning">{{ hc.warning }}</div>
+        {% endif %}
         {% if hc.updated_display %}
         <div class="house-updated">{{ hc.updated_display }}</div>
         {% endif %}

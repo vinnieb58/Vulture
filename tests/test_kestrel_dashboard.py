@@ -209,3 +209,62 @@ class TestKestrelDashboardHTTP:
         assert "Energy + HVAC Correlation" in text
         assert "Nest Collection" in text
         assert "Downstairs" in text or "House any" in text
+
+    def test_kestrel_page_shows_nest_auth_failure_when_stale_and_error_file(
+        self, client, tmp_path, monkeypatch
+    ):
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        history_path = tmp_path / "nest_history.jsonl"
+        error_path = tmp_path / "kestrel_nest_error.json"
+        _write_status(status_path)
+        _seed_db(db_path)
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", history_path)
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", history_path)
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", history_path)
+        monkeypatch.setattr("nest_error_status.NEST_ERROR_PATH", error_path)
+
+        from kestrel.nest_history import append_history_from_snapshot
+
+        append_history_from_snapshot(
+            {
+                "updated_at": "2026-06-16T04:30:00+00:00",
+                "thermostats": {
+                    "downstairs": {"action": "COOLING", "online": True},
+                    "upstairs": {"action": "OFF", "online": True},
+                },
+            },
+            path=history_path,
+            now=datetime(2026, 6, 16, 4, 30, tzinfo=ZoneInfo("UTC")),
+        )
+        error_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-16T05:10:00+00:00",
+                    "error_type": "oauth",
+                    "message": 'OAuth token request failed: {"error":"invalid_grant"}',
+                    "last_success": "2026-06-16T04:30:00+00:00",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        from nest_hvac_formatting import format_hvac_section as _format_hvac_section
+
+        fixed_now = datetime(2026, 6, 16, 5, 10, tzinfo=ZoneInfo("UTC"))
+        monkeypatch.setattr(
+            dashboard_app,
+            "format_hvac_section",
+            lambda: _format_hvac_section(now=fixed_now),
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+
+        text = response.text
+        assert response.status_code == 200
+        assert "Nest auth failure" in text
+        assert "Auth failure" in text
+        assert "invalid_grant" not in text

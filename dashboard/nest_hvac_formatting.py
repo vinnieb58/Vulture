@@ -7,8 +7,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from kestrel_formatting import KESTREL_DISPLAY_TZ, format_timestamp_friendly
-from nest_collection_health import STATUS_MISSING, get_nest_collection_health
+from nest_collection_health import STATUS_MISSING, STATUS_STALE, get_nest_collection_health
 from nest_energy_correlation import get_energy_hvac_correlation
+from nest_error_status import (
+    nest_poll_warning_for_stale_data,
+    read_nest_poll_error,
+)
 from nest_hvac_runtime import (
     HvacRuntimeSummary,
     ThermostatRuntime,
@@ -130,7 +134,22 @@ def format_hvac_section(
 ) -> dict[str, Any]:
     """Build display payloads for HVAC runtime and energy correlation."""
     ts_now = now or datetime.now(timezone.utc)
+    poll_error = read_nest_poll_error()
     collection = format_collection_health_display(now=ts_now, tz_name=tz_name)
+    if collection.get("status_key") == STATUS_STALE and poll_error:
+        warning = nest_poll_warning_for_stale_data(is_stale=True, poll_error=poll_error)
+        if warning == "Nest auth failure":
+            collection = {
+                **collection,
+                "status": "Auth failure",
+                "style": "fail",
+            }
+        elif warning == "Nest stale":
+            collection = {
+                **collection,
+                "status": "Stale",
+                "style": "fail",
+            }
     runtime = get_hvac_runtime_summaries(now=ts_now)
     correlation = get_energy_hvac_correlation(now=ts_now)
 
@@ -215,6 +234,12 @@ def format_hvac_section(
         )
 
     warnings: list[str] = []
+    stale_warning = nest_poll_warning_for_stale_data(
+        is_stale=collection.get("status_key") == STATUS_STALE,
+        poll_error=poll_error,
+    )
+    if stale_warning:
+        warnings.append(stale_warning)
     for warning in (runtime.get("warning"), correlation.get("warning")):
         if isinstance(warning, str) and warning:
             warnings.append(warning)

@@ -32,6 +32,9 @@ THERMOSTAT_TYPE = "sdm.devices.types.THERMOSTAT"
 
 _GOOGLE_ACCESS_TOKEN = re.compile(r"\bya29\.[A-Za-z0-9._-]+\b")
 _CLIENT_SECRET = re.compile(r"(?i)\b(client_secret|refresh_token|access_token)\s*[:=]\s*\S+")
+_JSON_SECRET = re.compile(
+    r'(?i)"(client_secret|refresh_token|access_token)"\s*:\s*"[^"]*"'
+)
 
 
 class NestConfigError(Exception):
@@ -61,6 +64,7 @@ def redact_nest_message(text: str | None) -> str | None:
         return text
     result = redact_text(text)
     result = _GOOGLE_ACCESS_TOKEN.sub("[REDACTED_TOKEN]", result)
+    result = _JSON_SECRET.sub(r'"\1": "[REDACTED]"', result)
     result = _CLIENT_SECRET.sub(r"\1=[REDACTED]", result)
     return result
 

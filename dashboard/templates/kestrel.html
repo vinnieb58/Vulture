@@ -453,6 +453,8 @@
         <div class="section-note" style="margin-top:0.65rem;">
           No Nest history yet. Samples appear after the poll timer runs.
         </div>
+        {% elif hvac.warning in ('Nest auth failure', 'Nest stale') %}
+        <div class="section-warning" style="margin-top:0.65rem;">{{ hvac.warning }}</div>
         {% endif %}
       </div>
 
