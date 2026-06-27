@@ -303,13 +303,16 @@ def _require_tinytuya():
         ) from exc
 
 
-def scan_local_devices(*, max_retries: int = 15) -> dict[str, Any]:
-    """Run a TinyTuya UDP scan (discovery only, no writes)."""
+def scan_local_devices(*, maxretry: int | None = 15) -> dict[str, Any]:
+    """Run a TinyTuya UDP scan (discovery only, no writes).
+
+    TinyTuya 1.18.x expects ``maxretry`` (not ``max_retries``).
+    """
     _require_tinytuya()
     import tinytuya
 
     try:
-        devices = tinytuya.deviceScan(max_retries=max_retries)
+        devices = tinytuya.deviceScan(maxretry=maxretry)
     except Exception as exc:
         raise TuyaPowerApiError(
             redact_tuya_message(str(exc)) or "TinyTuya device scan failed"

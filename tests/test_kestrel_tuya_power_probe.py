@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,12 +15,14 @@ from kestrel.tuya_power import (
     CHANNEL_MAPPING,
     METER_1_KEY,
     METER_2_KEY,
+    TuyaPowerApiError,
     build_appliance_index,
     build_tuya_power_snapshot,
     format_debug_dps_summary,
     format_raw_dps_lines,
     parse_dual_meter_dps,
     redact_tuya_message,
+    scan_local_devices,
 )
 from kestrel.tuya_power_error import (
     build_tuya_error_record,
@@ -148,6 +151,43 @@ class TestErrorHelpers:
         assert record["error_type"] == "local"
         assert record["last_success"] == "2026-06-27T10:00:00+00:00"
         assert "timeout" in record["message"]
+
+
+class TestScanLocalDevices:
+    def test_device_scan_uses_maxretry_kwarg(self) -> None:
+        fake_devices = {"192.168.1.54": {"gwId": "abcd1234", "version": "3.4"}}
+        mock_scan = MagicMock(return_value=fake_devices)
+        fake_tinytuya = MagicMock(deviceScan=mock_scan)
+
+        with patch.dict(sys.modules, {"tinytuya": fake_tinytuya}):
+            result = scan_local_devices(maxretry=15)
+
+        assert result == fake_devices
+        mock_scan.assert_called_once_with(maxretry=15)
+        call_kwargs = mock_scan.call_args.kwargs
+        assert "max_retries" not in call_kwargs
+
+    def test_device_scan_rejects_legacy_max_retries_kwarg(self) -> None:
+        def _reject_max_retries(**kwargs: object) -> dict:
+            if "max_retries" in kwargs:
+                raise TypeError("deviceScan() got an unexpected keyword argument 'max_retries'")
+            return {}
+
+        fake_tinytuya = MagicMock(deviceScan=MagicMock(side_effect=_reject_max_retries))
+
+        with patch.dict(sys.modules, {"tinytuya": fake_tinytuya}):
+            scan_local_devices()
+
+        fake_tinytuya.deviceScan.assert_called_once_with(maxretry=15)
+
+    def test_device_scan_wraps_failures(self) -> None:
+        fake_tinytuya = MagicMock(
+            deviceScan=MagicMock(side_effect=RuntimeError("network unreachable"))
+        )
+
+        with patch.dict(sys.modules, {"tinytuya": fake_tinytuya}):
+            with pytest.raises(TuyaPowerApiError, match="network unreachable"):
+                scan_local_devices()
 
 
 class TestHistory:
