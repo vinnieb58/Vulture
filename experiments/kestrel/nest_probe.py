@@ -29,6 +29,7 @@ from kestrel.nest import (  # noqa: E402
     poll_nest_thermostats,
     redact_nest_message,
 )
+from kestrel.nest_error import clear_nest_error, nest_error_path_for, record_nest_poll_error  # noqa: E402
 from kestrel.nest_history import append_history_from_snapshot  # noqa: E402
 
 
@@ -61,17 +62,21 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    output_path = Path(config.output_path)
+    error_path = nest_error_path_for(output_path)
+
     try:
         snapshot = poll_nest_thermostats(config)
     except NestApiError as exc:
         message = redact_nest_message(str(exc)) or "Nest SDM poll failed"
+        record_nest_poll_error(status_path=output_path, message=str(exc), error_path=error_path)
         log.error("Nest poll failed: %s", message)
         print(f"ERROR: {message}", file=sys.stderr)
         return 1
 
-    output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    clear_nest_error(error_path)
     log.info("Wrote Nest status snapshot (%s thermostat(s))", len(snapshot.get("thermostats", {})))
 
     if not append_history_from_snapshot(snapshot):

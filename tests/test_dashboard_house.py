@@ -18,6 +18,7 @@ sys.path.insert(0, str(DASHBOARD_DIR))
 import app as dashboard_app  # noqa: E402
 from house_formatting import format_house_card_display, format_summary  # noqa: E402
 from house_status import read_house_status  # noqa: E402
+from nest_error_status import read_nest_poll_error  # noqa: E402
 
 FIXED_NOW = datetime(2026, 6, 19, 12, 2, tzinfo=timezone.utc)
 
@@ -47,6 +48,17 @@ def _write_nest_snapshot(path: Path, **overrides: object) -> None:
                 "online": True,
             },
         },
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_nest_error(path: Path, **overrides: object) -> None:
+    payload = {
+        "timestamp": _recent_updated_at(1),
+        "error_type": "oauth",
+        "message": 'OAuth token request failed: {"error":"invalid_grant"}',
+        "last_success": _recent_updated_at(20),
     }
     payload.update(overrides)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -93,6 +105,43 @@ class TestReadHouseStatus:
         assert house["state"] == "stale"
         assert house["age_minutes"] == 20
         assert "stale" in house["headline"].lower()
+
+    def test_stale_snapshot_with_auth_error_shows_auth_failure(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        status_path = tmp_path / "kestrel_nest_status.json"
+        error_path = tmp_path / "kestrel_nest_error.json"
+        _write_nest_snapshot(status_path, updated_at=_recent_updated_at(20))
+        _write_nest_error(error_path)
+        monkeypatch.setattr("house_status.NEST_STATUS_PATH", status_path)
+        monkeypatch.setattr("nest_error_status.NEST_ERROR_PATH", error_path)
+
+        house = read_house_status(now=FIXED_NOW)
+        card = format_house_card_display(house, now=FIXED_NOW)
+
+        assert house["state"] == "auth_failure"
+        assert house["warning"] == "Nest auth failure"
+        assert card["status"] == "Auth failure"
+        assert card["style"] == "fail"
+
+    def test_stale_snapshot_with_api_error_shows_nest_stale(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        status_path = tmp_path / "kestrel_nest_status.json"
+        error_path = tmp_path / "kestrel_nest_error.json"
+        _write_nest_snapshot(status_path, updated_at=_recent_updated_at(20))
+        _write_nest_error(
+            error_path,
+            error_type="api",
+            message="Nest SDM devices request failed: HTTP 503",
+        )
+        monkeypatch.setattr("house_status.NEST_STATUS_PATH", status_path)
+        monkeypatch.setattr("nest_error_status.NEST_ERROR_PATH", error_path)
+
+        house = read_house_status(now=FIXED_NOW)
+
+        assert house["state"] == "stale"
+        assert house["warning"] == "Nest stale"
 
     def test_empty_thermostat_list_is_no_data(self, tmp_path: Path, monkeypatch) -> None:
         path = tmp_path / "kestrel_nest_status.json"
@@ -195,6 +244,29 @@ class TestHouseDashboardHTTP:
         text = response.text
         assert "Stale" in text
         assert "Updated 20 minutes ago" in text
+
+    def test_home_auth_failure_renders_warning(self, client, tmp_path, monkeypatch) -> None:
+        nest_path = tmp_path / "kestrel_nest_status.json"
+        error_path = tmp_path / "kestrel_nest_error.json"
+        _write_nest_snapshot(nest_path, updated_at=_recent_updated_at(20))
+        _write_nest_error(error_path)
+        monkeypatch.setattr("house_status.NEST_STATUS_PATH", nest_path)
+        monkeypatch.setattr("nest_error_status.NEST_ERROR_PATH", error_path)
+        monkeypatch.setattr("house_status.read_nest_poll_error", read_nest_poll_error)
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
+        monkeypatch.setattr(
+            dashboard_app,
+            "read_house_status",
+            lambda: read_house_status(now=FIXED_NOW),
+        )
+
+        response = self._stub_host(client).get("/")
+
+        assert response.status_code == 200
+        text = response.text
+        assert "Auth failure" in text
+        assert "Nest auth failure" in text
 
     def test_home_empty_thermostat_list_does_not_break_page(self, client, tmp_path, monkeypatch) -> None:
         nest_path = tmp_path / "kestrel_nest_status.json"

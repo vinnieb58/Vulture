@@ -131,6 +131,76 @@ class TestNestProbeFailurePreservesSnapshot:
         assert code == 1
         assert json.loads(output_path.read_text(encoding="utf-8")) == existing
 
+    def test_api_failure_writes_redacted_error_json(self, tmp_path: Path) -> None:
+        config = _nest_config(tmp_path)
+        output_path = Path(config.output_path)
+        error_path = tmp_path / "kestrel_nest_error.json"
+        existing = {
+            "updated_at": "2026-06-19T10:00:00+00:00",
+            "thermostats": {"downstairs": {"name": "Downstairs", "temperature": 73}},
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        secret = "1//0g-not-a-real-refresh-token"
+        oauth_error = (
+            'OAuth token request failed: {"error":"invalid_grant",'
+            f'"error_description":"Bad Request","refresh_token":"{secret}"}}'
+        )
+
+        with (
+            patch.object(sys, "argv", ["nest_probe", "--once"]),
+            patch.object(probe_module, "load_nest_config", return_value=config),
+            patch.object(probe_module, "setup_logging"),
+            patch.object(
+                probe_module,
+                "poll_nest_thermostats",
+                side_effect=NestApiError(oauth_error),
+            ),
+        ):
+            code = probe_module.main()
+
+        assert code == 1
+        assert error_path.is_file()
+        error = json.loads(error_path.read_text(encoding="utf-8"))
+        assert error["error_type"] == "oauth"
+        assert error["last_success"] == "2026-06-19T10:00:00+00:00"
+        assert secret not in json.dumps(error)
+        assert "invalid_grant" in error["message"]
+        assert json.loads(output_path.read_text(encoding="utf-8")) == existing
+
+    def test_successful_poll_clears_error_json(self, tmp_path: Path) -> None:
+        config = _nest_config(tmp_path)
+        output_path = Path(config.output_path)
+        error_path = tmp_path / "kestrel_nest_error.json"
+        error_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-19T11:00:00+00:00",
+                    "error_type": "oauth",
+                    "message": "OAuth token request failed",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        snapshot = {
+            "updated_at": "2026-06-19T12:00:00+00:00",
+            "thermostats": {"downstairs": {"name": "Downstairs", "temperature": 72}},
+        }
+
+        with (
+            patch.object(sys, "argv", ["nest_probe", "--once"]),
+            patch.object(probe_module, "load_nest_config", return_value=config),
+            patch.object(probe_module, "setup_logging"),
+            patch.object(probe_module, "poll_nest_thermostats", return_value=snapshot),
+            patch.object(probe_module, "append_history_from_snapshot", return_value=True),
+        ):
+            code = probe_module.main()
+
+        assert code == 0
+        assert not error_path.exists()
+        assert output_path.is_file()
+
 
 class TestNestSystemdUnits:
     def test_service_unit_has_required_fields(self) -> None:
