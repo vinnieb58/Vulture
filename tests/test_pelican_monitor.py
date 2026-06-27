@@ -14,7 +14,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from canary.alerting import decide_backup_alert, process_backup_alerts
+from canary.alerting import (
+    DISCORD_WEBHOOK_USER_AGENT,
+    build_discord_webhook_request,
+    decide_backup_alert,
+    process_backup_alerts,
+    send_discord_message,
+)
 from canary.checks import check_backup_monitor, run_all_checks
 from pelican_monitor.checkers import raven_recovery
 from pelican_monitor.definitions import BackupDefinition, enabled_backup_definitions, registered_backup_definitions
@@ -475,6 +481,32 @@ class TestRegistryAndRunner:
         assert exit_code == 0
         assert "raven_recovery" in payload["backups"]
         assert payload["enabled_backups"] == ["raven_recovery"]
+
+
+class TestDiscordWebhookDelivery:
+    def test_request_includes_json_content_type_and_user_agent(self):
+        request = build_discord_webhook_request(
+            "https://example.test/webhook",
+            "test alert",
+        )
+        assert request.get_header("Content-type") == "application/json"
+        user_agent = request.get_header("User-agent")
+        assert user_agent
+        assert user_agent == DISCORD_WEBHOOK_USER_AGENT
+        assert "Aviary-Pelican-Monitor" in user_agent
+
+    def test_send_discord_message_accepts_http_204(self):
+        class FakeResponse:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch("canary.alerting.urllib.request.urlopen", return_value=FakeResponse()):
+            assert send_discord_message("https://example.test/webhook", "ok") is True
 
 
 class TestAlerting:

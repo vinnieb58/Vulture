@@ -16,6 +16,10 @@ from typing import Any
 
 logger = logging.getLogger("canary")
 
+DISCORD_WEBHOOK_USER_AGENT = (
+    "Aviary-Pelican-Monitor/0.2 (+https://github.com/vinnieb58/vulture)"
+)
+
 
 @dataclass(frozen=True)
 class BackupAlertDecision:
@@ -188,14 +192,21 @@ def _build_recovery_message(display_name: str, result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def send_discord_message(webhook_url: str, content: str) -> bool:
+def build_discord_webhook_request(webhook_url: str, content: str) -> urllib.request.Request:
     payload = json.dumps({"content": content}).encode("utf-8")
-    request = urllib.request.Request(
+    return urllib.request.Request(
         webhook_url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": DISCORD_WEBHOOK_USER_AGENT,
+        },
         method="POST",
     )
+
+
+def send_discord_message(webhook_url: str, content: str) -> bool:
+    request = build_discord_webhook_request(webhook_url, content)
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             return 200 <= response.status < 300
