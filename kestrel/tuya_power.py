@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from kestrel.config import load_dotenv_if_available
@@ -17,11 +18,32 @@ log = logging.getLogger(__name__)
 
 DEVICE_MODEL = "V-WIFI-DL02-ES"
 DEFAULT_PROTOCOL_VERSION = 3.4
+WIZARD_DEFAULT_PROTOCOL_VERSION = 3.5
+DEFAULT_DEVICES_JSON = "devices.json"
 
 METER_1_KEY = "meter_1"
 METER_2_KEY = "meter_2"
 CHANNEL_1_KEY = "channel_1"
 CHANNEL_2_KEY = "channel_2"
+
+KNOWN_METER_DEVICE_IDS: dict[str, str] = {
+    METER_1_KEY: "eb1d19e2b571760833his3",
+    METER_2_KEY: "eb1441d488053f92efin1n",
+}
+
+_SECRET_FIELD_NAMES = frozenset(
+    {
+        "key",
+        "local_key",
+        "localkey",
+        "secret",
+        "local_key_enc",
+        "api_key",
+        "api_secret",
+        "access_token",
+        "refresh_token",
+    }
+)
 
 # CT mapping: meter slot -> channel -> appliance key / label
 CHANNEL_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
@@ -96,31 +118,113 @@ def redact_tuya_message(text: str | None) -> str | None:
     return result
 
 
-def _parse_meter_config(
+def sanitize_tuya_payload(value: Any) -> Any:
+    """Recursively redact secret fields before probe display or debug output."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in _SECRET_FIELD_NAMES:
+                sanitized[key] = "[REDACTED]"
+            else:
+                sanitized[key] = sanitize_tuya_payload(item)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_tuya_payload(item) for item in value]
+    return value
+
+
+def default_devices_json_path() -> Path:
+    return Path((os.getenv("TUYA_DEVICES_JSON") or DEFAULT_DEVICES_JSON).strip())
+
+
+def parse_tinytuya_devices_payload(data: Any) -> list[dict[str, Any]]:
+    """Normalize TinyTuya devices.json content (flat list or wrapped dict)."""
+    if isinstance(data, list):
+        return [entry for entry in data if isinstance(entry, dict)]
+    if isinstance(data, dict):
+        devices = data.get("devices")
+        if isinstance(devices, list):
+            return [entry for entry in devices if isinstance(entry, dict)]
+    return []
+
+
+def load_tinytuya_devices(path: Path | str | None = None) -> list[dict[str, Any]]:
+    """Load TinyTuya wizard ``devices.json`` when present."""
+    file_path = Path(path) if path is not None else default_devices_json_path()
+    if not file_path.is_file():
+        return []
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read TinyTuya devices file %s: %s", file_path.name, exc)
+        return []
+    return parse_tinytuya_devices_payload(payload)
+
+
+def index_tinytuya_devices_by_id(
+    devices: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Index TinyTuya device entries by ``id`` (or ``gwId``)."""
+    indexed: dict[str, dict[str, Any]] = {}
+    for entry in devices:
+        device_id = str(entry.get("id") or entry.get("gwId") or "").strip()
+        if device_id:
+            indexed[device_id] = entry
+    return indexed
+
+
+def _version_from_device_entry(entry: dict[str, Any]) -> float:
+    raw = entry.get("version")
+    if raw is None or raw == "":
+        return WIZARD_DEFAULT_PROTOCOL_VERSION
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return WIZARD_DEFAULT_PROTOCOL_VERSION
+
+
+def _device_id_suffix(device_id: str) -> str:
+    return device_id[-4:] if len(device_id) >= 4 else "????"
+
+
+def _resolve_meter_config(
     *,
     meter_key: str,
     device_id_env: str,
     address_env: str,
     local_key_env: str,
     shared_local_key: str,
-    version: float,
-) -> TuyaMeterConfig | None:
-    device_id = (os.getenv(device_id_env) or "").strip()
-    address = (os.getenv(address_env) or "").strip()
-    local_key = (os.getenv(local_key_env) or shared_local_key).strip()
-    if not device_id and not address:
-        return None
+    env_version: float | None,
+    devices_by_id: dict[str, dict[str, Any]],
+) -> TuyaMeterConfig:
+    device_id = (os.getenv(device_id_env) or "").strip() or KNOWN_METER_DEVICE_IDS[meter_key]
+    file_entry = devices_by_id.get(device_id, {})
+
+    address = (os.getenv(address_env) or "").strip() or str(file_entry.get("ip") or "").strip()
+    local_key = (
+        (os.getenv(local_key_env) or "").strip()
+        or shared_local_key
+        or str(file_entry.get("key") or "").strip()
+    )
+
+    if env_version is not None:
+        version = env_version
+    elif file_entry:
+        version = _version_from_device_entry(file_entry)
+    else:
+        version = DEFAULT_PROTOCOL_VERSION
+
     missing: list[str] = []
-    if not device_id:
-        missing.append(device_id_env)
     if not address:
-        missing.append(address_env)
+        missing.append(f"{address_env} or devices.json ip")
     if not local_key:
-        missing.append(local_key_env if os.getenv(local_key_env) else "TUYA_LOCAL_KEY")
+        missing.append(f"{local_key_env}/TUYA_LOCAL_KEY or devices.json key")
     if missing:
+        suffix = _device_id_suffix(device_id)
         raise TuyaPowerConfigError(
-            f"Meter {meter_key} is partially configured; missing: {', '.join(missing)}"
+            f"Meter {meter_key} ({suffix}) missing: {', '.join(missing)}"
         )
+
     return TuyaMeterConfig(
         meter_key=meter_key,
         device_id=device_id,
@@ -130,15 +234,19 @@ def _parse_meter_config(
     )
 
 
-def load_tuya_power_config() -> TuyaPowerConfig:
-    """Load Tuya dual-meter credentials from environment variables."""
+def load_tuya_power_config(*, devices_json_path: Path | str | None = None) -> TuyaPowerConfig:
+    """Load Tuya dual-meter credentials from ``devices.json`` with ``.env`` overrides."""
     load_dotenv_if_available()
 
-    try:
-        version = float(os.getenv("TUYA_DEVICE_VERSION", str(DEFAULT_PROTOCOL_VERSION)))
-    except ValueError as exc:
-        raise TuyaPowerConfigError("TUYA_DEVICE_VERSION must be a number") from exc
+    env_version_raw = (os.getenv("TUYA_DEVICE_VERSION") or "").strip()
+    env_version: float | None = None
+    if env_version_raw:
+        try:
+            env_version = float(env_version_raw)
+        except ValueError as exc:
+            raise TuyaPowerConfigError("TUYA_DEVICE_VERSION must be a number") from exc
 
+    devices_by_id = index_tinytuya_devices_by_id(load_tinytuya_devices(devices_json_path))
     shared_local_key = (os.getenv("TUYA_LOCAL_KEY") or "").strip()
     output_path = (os.getenv("TUYA_STATUS_PATH") or "data/kestrel_tuya_power_status.json").strip()
 
@@ -147,21 +255,16 @@ def load_tuya_power_config() -> TuyaPowerConfig:
         (METER_1_KEY, "TUYA_METER1_DEVICE_ID", "TUYA_METER1_IP", "TUYA_METER1_LOCAL_KEY"),
         (METER_2_KEY, "TUYA_METER2_DEVICE_ID", "TUYA_METER2_IP", "TUYA_METER2_LOCAL_KEY"),
     ):
-        meter = _parse_meter_config(
-            meter_key=meter_key,
-            device_id_env=device_env,
-            address_env=address_env,
-            local_key_env=key_env,
-            shared_local_key=shared_local_key,
-            version=version,
-        )
-        if meter is not None:
-            meters.append(meter)
-
-    if not meters:
-        raise TuyaPowerConfigError(
-            "No Tuya meters configured. Set TUYA_METER1_DEVICE_ID/TUYA_METER1_IP and "
-            "TUYA_METER2_DEVICE_ID/TUYA_METER2_IP (plus local keys) in .env."
+        meters.append(
+            _resolve_meter_config(
+                meter_key=meter_key,
+                device_id_env=device_env,
+                address_env=address_env,
+                local_key_env=key_env,
+                shared_local_key=shared_local_key,
+                env_version=env_version,
+                devices_by_id=devices_by_id,
+            )
         )
 
     cloud_api_key = (os.getenv("TUYA_CLOUD_API_KEY") or "").strip() or None

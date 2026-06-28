@@ -32,6 +32,7 @@ from kestrel.tuya_power import (  # noqa: E402
     poll_tuya_power_meters,
     read_meter_with_fallback,
     redact_tuya_message,
+    sanitize_tuya_payload,
     scan_local_devices,
 )
 from kestrel.tuya_power_error import (  # noqa: E402
@@ -96,7 +97,10 @@ def run_discover() -> int:
         config = load_tuya_power_config()
     except TuyaPowerConfigError as exc:
         print(f"NOTE: {exc}", file=sys.stderr)
-        print("Scan complete. Configure .env meter ids/IPs/local keys for DPS reads.")
+        print(
+            "Scan complete. Run `python -m tinytuya wizard` (writes devices.json) "
+            "or set .env overrides."
+        )
         return 0
 
     print("Configured meter raw status/DPS:")
@@ -119,12 +123,9 @@ def run_discover() -> int:
 
         raw_status = payload.get("raw_status")
         if isinstance(raw_status, dict):
-            safe_status = {
-                key: value
-                for key, value in raw_status.items()
-                if key not in {"local_key", "key", "secret"}
-            }
-            print(f"    raw_status={json.dumps(safe_status, sort_keys=True)}")
+            print(
+                f"    raw_status={json.dumps(sanitize_tuya_payload(raw_status), sort_keys=True)}"
+            )
 
     return 0
 

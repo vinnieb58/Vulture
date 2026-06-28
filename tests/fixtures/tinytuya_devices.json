@@ -1,0 +1,15 @@
+[
+  {
+    "name": "Meter 1",
+    "id": "eb1d19e2b571760833his3",
+    "key": "wizardkey12345678",
+    "ip": "192.168.1.101",
+    "version": "3.5"
+  },
+  {
+    "name": "Meter 2",
+    "id": "eb1441d488053f92efin1n",
+    "key": "wizardkey87654321",
+    "ip": "192.168.1.102"
+  }
+]

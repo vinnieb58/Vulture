@@ -32,31 +32,66 @@ Two physical meters are installed:
 
 ## Environment variables
 
-Add these to repo-root `.env` on Raven (never commit values):
+Configuration loads from repo-root **`devices.json`** (TinyTuya wizard output) by default. **`.env` values override** matching fields when present.
+
+### TinyTuya wizard (recommended first step)
+
+From the repo root on Raven:
+
+```bash
+cd /home/vinnieb58/projects/vulture
+source .venv/bin/activate
+pip install tinytuya
+python -m tinytuya wizard
+```
+
+The wizard writes local files (all git-ignored):
+
+| File | Purpose |
+|------|---------|
+| `devices.json` | Device id, local key, IP, protocol version — **primary probe config source** |
+| `tinytuya.json` | Wizard/cloud session metadata |
+| `snapshot.json` | Last wizard poll snapshot |
+| `tuya-raw.json` | Raw Tuya Cloud payload |
+
+Known household meters (matched automatically when absent from `.env`):
+
+| Meter slot | Device id |
+|------------|-----------|
+| Meter 1 | `eb1d19e2b571760833his3` |
+| Meter 2 | `eb1441d488053f92efin1n` |
+
+Field mapping from `devices.json`:
+
+| TinyTuya field | Probe field | Default |
+|----------------|-------------|---------|
+| `id` | `device_id` | — |
+| `key` | `local_key` | — |
+| `ip` | LAN address | — |
+| `version` | protocol version | `3.5` when absent |
+
+After wizard completes, `--discover` and `--once` should work **without** duplicating keys into `.env`. Use `.env` only for overrides (for example a changed IP or global `TUYA_DEVICE_VERSION`).
+
+Optional `.env` overrides (never commit values):
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `TUYA_METER1_DEVICE_ID` | for meter 1 | — | Tuya device id (20-char hex) |
-| `TUYA_METER1_IP` | for meter 1 | — | Current LAN IP for meter 1 |
-| `TUYA_METER1_LOCAL_KEY` | optional | falls back to `TUYA_LOCAL_KEY` | Local encryption key for meter 1 |
-| `TUYA_METER2_DEVICE_ID` | for meter 2 | — | Tuya device id for second unit |
-| `TUYA_METER2_IP` | for meter 2 | — | Current LAN IP for meter 2 |
-| `TUYA_METER2_LOCAL_KEY` | optional | falls back to `TUYA_LOCAL_KEY` | Local encryption key for meter 2 |
-| `TUYA_LOCAL_KEY` | recommended | — | Shared local key if both meters use the same key |
-| `TUYA_DEVICE_VERSION` | optional | `3.4` | Tuya protocol version |
+| `TUYA_DEVICES_JSON` | optional | `devices.json` | Alternate path to TinyTuya device file |
+| `TUYA_METER1_DEVICE_ID` | optional | known meter 1 id | Overrides `devices.json` id lookup |
+| `TUYA_METER1_IP` | optional | from `devices.json` | LAN IP override for meter 1 |
+| `TUYA_METER1_LOCAL_KEY` | optional | from `devices.json` | Local key override for meter 1 |
+| `TUYA_METER2_DEVICE_ID` | optional | known meter 2 id | Overrides `devices.json` id lookup |
+| `TUYA_METER2_IP` | optional | from `devices.json` | LAN IP override for meter 2 |
+| `TUYA_METER2_LOCAL_KEY` | optional | from `devices.json` | Local key override for meter 2 |
+| `TUYA_LOCAL_KEY` | optional | — | Shared local key override for both meters |
+| `TUYA_DEVICE_VERSION` | optional | per-device from file, else `3.5`/`3.4` | Global protocol version override |
 | `TUYA_STATUS_PATH` | optional | `data/kestrel_tuya_power_status.json` | Latest snapshot path |
 | `TUYA_HISTORY_PATH` | optional | `data/kestrel_tuya_power_history.jsonl` | Append-only history |
 | `TUYA_CLOUD_API_KEY` | cloud fallback only | — | Tuya IoT platform API key |
 | `TUYA_CLOUD_API_SECRET` | cloud fallback only | — | Tuya IoT platform API secret |
 | `TUYA_CLOUD_REGION` | optional | `us` | Cloud region (`us`, `eu`, `cn`, …) |
 
-Obtain device id, local key, and IP via TinyTuya scan (`python -m tinytuya scan`) or the Tuya/Smart Life app developer workflow. Store secrets only in `.env`.
-
-Install TinyTuya in the Kestrel venv when running live probes:
-
-```bash
-pip install tinytuya
-```
+Do not commit `devices.json`, `tinytuya.json`, `snapshot.json`, or `tuya-raw.json`. The probe never prints local keys or other secrets.
 
 ## Manual probe
 
@@ -187,10 +222,10 @@ No dashboard routes, templates, timers, or alerts are added in this investigatio
 
 ## Security
 
-- Never log `local_key`, `TUYA_CLOUD_API_SECRET`, device ids, or raw Tuya tokens.
-- Error helpers redact `local_key=`, `device_id=`, and token-like assignments.
-- Discover mode prints device id **suffix only** (last 4 chars) for scan results.
-- Keep `.env` and generated `data/kestrel_tuya_power_*.json*` out of version control.
+- Never log or print `local_key`, `devices.json` `key` values, cloud secrets, or raw Tuya tokens.
+- Error and log helpers redact `local_key=`, `device_id=`, and token-like assignments.
+- Discover mode prints device id **suffix only** (last 4 chars) for scan results; `sanitize_tuya_payload()` strips secrets from raw status output.
+- Do not commit `.env`, `devices.json`, `tinytuya.json`, `snapshot.json`, `tuya-raw.json`, or generated `data/kestrel_tuya_power_*.json*`.
 
 ## Tests
 

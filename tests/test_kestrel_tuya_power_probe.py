@@ -13,15 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kestrel.tuya_power import (
     CHANNEL_MAPPING,
+    KNOWN_METER_DEVICE_IDS,
     METER_1_KEY,
     METER_2_KEY,
     TuyaPowerApiError,
+    TuyaPowerConfigError,
+    WIZARD_DEFAULT_PROTOCOL_VERSION,
     build_appliance_index,
     build_tuya_power_snapshot,
     format_debug_dps_summary,
     format_raw_dps_lines,
+    index_tinytuya_devices_by_id,
+    load_tinytuya_devices,
+    load_tuya_power_config,
     parse_dual_meter_dps,
+    parse_tinytuya_devices_payload,
     redact_tuya_message,
+    sanitize_tuya_payload,
     scan_local_devices,
 )
 from kestrel.tuya_power_error import (
@@ -37,10 +45,31 @@ from kestrel.tuya_power_history import (
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "tuya_dual_meter_dps.json"
+DEVICES_FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "tinytuya_devices.json"
 
 
 def _load_fixture() -> dict:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _clear_tuya_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "TUYA_DEVICES_JSON",
+        "TUYA_METER1_DEVICE_ID",
+        "TUYA_METER1_IP",
+        "TUYA_METER1_LOCAL_KEY",
+        "TUYA_METER2_DEVICE_ID",
+        "TUYA_METER2_IP",
+        "TUYA_METER2_LOCAL_KEY",
+        "TUYA_LOCAL_KEY",
+        "TUYA_DEVICE_VERSION",
+        "TUYA_STATUS_PATH",
+        "TUYA_HISTORY_PATH",
+        "TUYA_CLOUD_API_KEY",
+        "TUYA_CLOUD_API_SECRET",
+        "TUYA_CLOUD_REGION",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 class TestParseDualMeterDps:
@@ -132,6 +161,88 @@ class TestRedactTuyaMessage:
         raw = "missing device_id=bf1234567890abcdef"
         redacted = redact_tuya_message(raw)
         assert "bf1234567890abcdef" not in redacted
+
+
+class TestTinytuyaDevicesFile:
+    def test_parse_flat_list_payload(self) -> None:
+        payload = json.loads(DEVICES_FIXTURE_PATH.read_text(encoding="utf-8"))
+        devices = parse_tinytuya_devices_payload(payload)
+        assert len(devices) == 2
+        assert devices[0]["id"] == KNOWN_METER_DEVICE_IDS[METER_1_KEY]
+
+    def test_parse_wrapped_dict_payload(self) -> None:
+        wrapped = {"devices": json.loads(DEVICES_FIXTURE_PATH.read_text(encoding="utf-8"))}
+        devices = parse_tinytuya_devices_payload(wrapped)
+        assert len(devices) == 2
+
+    def test_load_tinytuya_devices_from_fixture(self) -> None:
+        devices = load_tinytuya_devices(DEVICES_FIXTURE_PATH)
+        indexed = index_tinytuya_devices_by_id(devices)
+        assert set(indexed) == set(KNOWN_METER_DEVICE_IDS.values())
+
+
+class TestLoadTuyaPowerConfig:
+    def test_loads_meters_from_devices_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clear_tuya_env(monkeypatch)
+        config = load_tuya_power_config(devices_json_path=DEVICES_FIXTURE_PATH)
+
+        assert len(config.meters) == 2
+        meter_1 = next(item for item in config.meters if item.meter_key == METER_1_KEY)
+        meter_2 = next(item for item in config.meters if item.meter_key == METER_2_KEY)
+
+        assert meter_1.device_id == KNOWN_METER_DEVICE_IDS[METER_1_KEY]
+        assert meter_1.address == "192.168.1.101"
+        assert meter_1.local_key == "wizardkey12345678"
+        assert meter_1.version == pytest.approx(3.5)
+
+        assert meter_2.device_id == KNOWN_METER_DEVICE_IDS[METER_2_KEY]
+        assert meter_2.address == "192.168.1.102"
+        assert meter_2.local_key == "wizardkey87654321"
+        assert meter_2.version == pytest.approx(WIZARD_DEFAULT_PROTOCOL_VERSION)
+
+    def test_env_overrides_devices_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clear_tuya_env(monkeypatch)
+        monkeypatch.setenv("TUYA_METER1_IP", "10.0.0.99")
+        monkeypatch.setenv("TUYA_METER1_LOCAL_KEY", "overridekey123456")
+        monkeypatch.setenv("TUYA_DEVICE_VERSION", "3.4")
+
+        config = load_tuya_power_config(devices_json_path=DEVICES_FIXTURE_PATH)
+        meter_1 = next(item for item in config.meters if item.meter_key == METER_1_KEY)
+
+        assert meter_1.address == "10.0.0.99"
+        assert meter_1.local_key == "overridekey123456"
+        assert meter_1.version == pytest.approx(3.4)
+
+        meter_2 = next(item for item in config.meters if item.meter_key == METER_2_KEY)
+        assert meter_2.address == "192.168.1.102"
+        assert meter_2.local_key == "wizardkey87654321"
+        assert meter_2.version == pytest.approx(3.4)
+
+    def test_missing_devices_json_reports_devices_json_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_tuya_env(monkeypatch)
+
+        with pytest.raises(TuyaPowerConfigError, match="devices.json"):
+            load_tuya_power_config(devices_json_path=Path("/nonexistent/devices.json"))
+
+
+class TestSanitizeTuyaPayload:
+    def test_strips_local_keys_from_nested_status(self) -> None:
+        payload = {
+            "dps": {"101": 100},
+            "key": "wizardkey12345678",
+            "local_key": "wizardkey12345678",
+            "nested": {"secret": "cloud-secret-value"},
+        }
+        sanitized = sanitize_tuya_payload(payload)
+        rendered = json.dumps(sanitized)
+
+        assert "wizardkey12345678" not in rendered
+        assert "cloud-secret-value" not in rendered
+        assert sanitized["key"] == "[REDACTED]"
+        assert sanitized["nested"]["secret"] == "[REDACTED]"
+        assert sanitized["dps"]["101"] == 100
 
 
 class TestErrorHelpers:
