@@ -2,7 +2,7 @@
 
 Read-only Kestrel investigation for **V-WIFI-DL02-ES** dual-channel WiFi energy monitors (Tuya v3.4 / PJ1103A class). The experimental probe polls local TinyTuya status first, optionally falls back to Tuya Cloud, and writes normalized JSON for future Nest/Kestrel dashboard correlation.
 
-**Observe-only:** no device control commands, timers, dashboard UI, or alerts in this phase.
+**Observe-only:** no device control commands, dashboard UI, or alerts in this phase. Production polling uses a read-only systemd timer (60 seconds); no dashboard wiring yet.
 
 ## Device model
 
@@ -114,7 +114,65 @@ python experiments/kestrel/tuya_power_probe.py --sample --interval-seconds 30 --
 
 `--discover` prints raw status/DPS output for operator mapping before normalization is trusted. `--once` writes the snapshot only on full success.
 
-`--sample` runs the same read/write path as `--once` for each sample: updates the latest snapshot JSON, appends one JSONL history row per successful sample, and prints one compact appliance summary line per sample. On failure it preserves the last good snapshot and writes/updates the error sidecar, then exits non-zero (same as `--once`). This is for manual investigation only — no systemd timer or dashboard wiring yet.
+`--sample` runs the same read/write path as `--once` for each sample: updates the latest snapshot JSON, appends one JSONL history row per successful sample, and prints one compact appliance summary line per sample. On failure it preserves the last good snapshot and writes/updates the error sidecar, then exits non-zero (same as `--once`). This is for manual investigation only — no dashboard wiring yet.
+
+## Production systemd polling (60 seconds)
+
+| Unit | Role |
+|------|------|
+| `kestrel-tuya-power-poll.service` | Oneshot read-only poll (`tuya_power_probe.py --once`) |
+| `kestrel-tuya-power-poll.timer` | Triggers every 60 seconds after boot |
+
+Reference files: `deploy/systemd/kestrel-tuya-power-poll.service`, `deploy/systemd/kestrel-tuya-power-poll.timer`.
+
+### Install
+
+```bash
+cd /home/vinnieb58/projects/vulture
+chmod +x scripts/install_kestrel_tuya_power_timer.sh
+
+# Copy units + daemon-reload (does not enable the timer)
+./scripts/install_kestrel_tuya_power_timer.sh
+
+# Copy units, daemon-reload, enable, and start the 60-second timer
+./scripts/install_kestrel_tuya_power_timer.sh --enable
+```
+
+Manual install (same units):
+
+```bash
+sudo cp deploy/systemd/kestrel-tuya-power-poll.service /etc/systemd/system/
+sudo cp deploy/systemd/kestrel-tuya-power-poll.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now kestrel-tuya-power-poll.timer
+systemctl list-timers --all | grep kestrel-tuya-power
+```
+
+Requires repo-root `devices.json` (TinyTuya wizard) and optional `.env` overrides. The service loads `.env` via `EnvironmentFile` but never prints secrets.
+
+### Verify
+
+```bash
+sudo systemctl start kestrel-tuya-power-poll.service
+journalctl -u kestrel-tuya-power-poll.service -n 100 --no-pager
+python experiments/kestrel/tuya_power_probe.py --once
+```
+
+```bash
+systemctl status kestrel-tuya-power-poll.timer
+systemctl list-timers --all | grep kestrel-tuya-power
+ls -la data/kestrel_tuya_power_status.json data/kestrel_tuya_power_history.jsonl
+```
+
+On poll failure the timer keeps running; the probe **does not overwrite** the last good snapshot and writes `data/kestrel_tuya_power_error.json` instead.
+
+### Disable / rollback
+
+```bash
+sudo systemctl disable --now kestrel-tuya-power-poll.timer
+sudo rm -f /etc/systemd/system/kestrel-tuya-power-poll.service /etc/systemd/system/kestrel-tuya-power-poll.timer
+sudo systemctl daemon-reload
+```
 
 ## Output shape (status JSON)
 
@@ -269,7 +327,7 @@ Error sidecar path: `data/kestrel_tuya_power_error.json`
 }
 ```
 
-Dashboard readers should treat snapshots older than ~2× the intended poll interval (5 minutes once scheduled) as **stale** and surface the error sidecar when present. Never log or display local keys, cloud secrets, or full device ids.
+Dashboard readers should treat snapshots older than ~2× the intended poll interval (120 seconds with the 60-second timer) as **stale** and surface the error sidecar when present. Never log or display local keys, cloud secrets, or full device ids.
 
 ## Dashboard / Nest display plan (future, not implemented)
 
@@ -283,7 +341,7 @@ Planned read-only presentation on the Kestrel/Nest dashboard:
 | Health badge | `kestrel_tuya_power_error.json`, snapshot age | “Stale” / “Limited” / last success timestamp |
 | History sparkline | JSONL `power_w` series | 24h appliance load shapes (read from history file) |
 
-No dashboard routes, templates, timers, or alerts are added in this investigation phase.
+No dashboard routes, templates, or alerts are added in this investigation phase.
 
 ## Security
 
@@ -295,8 +353,8 @@ No dashboard routes, templates, timers, or alerts are added in this investigatio
 ## Tests
 
 ```bash
-python -m compileall -q kestrel experiments/kestrel tests/test_kestrel_tuya_power_probe.py
-pytest tests/test_kestrel_tuya_power_probe.py -q
+python -m compileall -q kestrel experiments/kestrel tests/test_kestrel_tuya_power_probe.py tests/test_kestrel_tuya_power_systemd.py
+pytest tests/test_kestrel_tuya_power_probe.py tests/test_kestrel_tuya_power_systemd.py -q
 ```
 
 Fixtures live at `tests/fixtures/tuya_vwifi_meter1_observed.json` and `tests/fixtures/tuya_vwifi_meter2_observed.json` (exact Raven DPS payloads). PJ1103A regression fixture: `tests/fixtures/tuya_dual_meter_dps.json`.
@@ -308,7 +366,10 @@ Fixtures live at `tests/fixtures/tuya_vwifi_meter1_observed.json` and `tests/fix
 | `kestrel/tuya_power.py` | Config, local/cloud read, DPS parse, snapshot builder |
 | `kestrel/tuya_power_error.py` | Poll error sidecar (preserve last good snapshot) |
 | `kestrel/tuya_power_history.py` | Append-only JSONL history |
-| `experiments/kestrel/tuya_power_probe.py` | CLI (`--discover`, `--once`, `--debug-dps`) |
+| `experiments/kestrel/tuya_power_probe.py` | CLI (`--discover`, `--once`, `--debug-dps`, `--sample`) |
+| `deploy/systemd/kestrel-tuya-power-poll.service` | systemd oneshot poll unit |
+| `deploy/systemd/kestrel-tuya-power-poll.timer` | 60-second poll timer |
+| `scripts/install_kestrel_tuya_power_timer.sh` | Copy units and optional enable |
 | `data/kestrel_tuya_power_status.json` | Latest poll output (generated) |
 | `data/kestrel_tuya_power_history.jsonl` | Poll history (generated) |
 | `data/kestrel_tuya_power_error.json` | Last poll error (generated) |
