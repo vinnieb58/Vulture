@@ -129,6 +129,33 @@ class TestVerticalProfiles:
         )
         assert sites == ["craigslist", "offerup"]
 
+    def test_bestbuy_not_in_default_computer_parts_profile(self):
+        sites = resolve_source_sites("computer_parts")
+        assert "bestbuy" not in sites
+
+    def test_bestbuy_not_in_default_laptops_profile(self):
+        sites = resolve_source_sites("laptops_computers")
+        assert "bestbuy" not in sites
+
+    def test_explicit_bestbuy_source_works(self):
+        sites = resolve_source_sites(
+            "computer_parts",
+            explicit_sources=["bestbuy"],
+        )
+        assert sites == ["bestbuy"]
+
+    def test_explicit_bestbuy_allowed_for_gaming_vertical_metadata(self):
+        from adapters.registry import get_capabilities
+
+        caps = get_capabilities("bestbuy")
+        assert caps is not None
+        assert "gaming" in caps.get("verticals", [])
+        sites = resolve_source_sites(
+            "computer_parts",
+            explicit_sources=["bestbuy", "craigslist"],
+        )
+        assert sites == ["bestbuy", "craigslist"]
+
 
 class TestCandidateMappings:
     def test_candidates_match_runtime_profiles(self):
