@@ -305,3 +305,168 @@ The service has **no** `network-online` dependency and **no** hard mount require
 - `scripts/install_pelican_timer.sh` — install/enable helper
 
 Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_systemd_timer.py`
+
+---
+
+## Pelican backup monitoring
+
+Pelican backup **health monitoring** runs separately from Canary's 5-minute infrastructure checks.
+
+| Component | Cadence | Role |
+|-----------|---------|------|
+| **Canary** | Every 5 minutes | Storage mount, services, network, Docker — reads last backup monitor snapshot only |
+| **pelican-monitor.timer** | Every 6 hours | Runs backup checksum/staleness/timer checks and sends Discord alerts |
+
+Pelican currently monitors one backup definition: **Raven recovery bundles** (`raven_recovery`). Future backup types (Time Machine, Windows backups, full-image freshness) register as additional Pelican backup definitions in `pelican_monitor/definitions.py` — not separate timers.
+
+### Install and enable the monitor timer
+
+```bash
+cd /home/vinnieb58/projects/vulture
+./scripts/install_pelican_monitor_timer.sh --enable
+```
+
+Install only (no enable):
+
+```bash
+./scripts/install_pelican_monitor_timer.sh
+sudo systemctl enable --now pelican-monitor.timer
+```
+
+Full/quick Raven deploy copies the units but does **not** enable the monitor timer unless you run the install script with `--enable`.
+
+### Timer schedule
+
+- **Unit:** `pelican-monitor.timer` → `pelican-monitor.service`
+- **Schedule:** `OnCalendar=*-*-* 00,06,12,18:00:00` (every six hours)
+- **RandomizedDelaySec:** `15m`
+- **Persistent:** `true` (missed runs execute after Raven returns online)
+- **Service:** oneshot, normally inactive between runs; do **not** enable `pelican-monitor.service` directly
+
+### Inspect timer and service state
+
+```bash
+systemctl is-enabled pelican-monitor.timer
+systemctl is-active pelican-monitor.timer
+systemctl list-timers pelican-monitor.timer
+systemctl status pelican-monitor.service --no-pager -l
+journalctl -u pelican-monitor.service -n 100 --no-pager
+```
+
+### Aggregate backup status
+
+```bash
+cat data/backup_monitor_status.json | python3 -m json.tool
+python3 -m json.tool data/backup_monitor_status.json | jq '.backups.raven_recovery'
+```
+
+Alert dedup state (shared Canary helper, keyed by backup ID):
+
+```bash
+cat data/canary_alert_state.json | python3 -m json.tool
+```
+
+Canary surfaces the snapshot (without re-running checks) at `checks.backup_monitor` in `data/canary_status.json`.
+
+### Manually trigger one monitor run
+
+```bash
+sudo systemctl start pelican-monitor.service
+# or from repo root:
+bash scripts/pelican_monitor.sh --json
+python3 -m pelican_monitor --json
+```
+
+Set Discord webhook for alerts (repo `.env` or export):
+
+```bash
+export PELICAN_MONITOR_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."  # fallback
+```
+
+### Configuration variables
+
+**Generic monitor:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PELICAN_MONITOR_STATUS_PATH` | `data/backup_monitor_status.json` | Aggregate JSON output |
+| `PELICAN_MONITOR_ALERT_STATE_PATH` | `data/canary_alert_state.json` | Alert dedup state |
+| `PELICAN_MONITOR_DISCORD_WEBHOOK_URL` | (empty) | Discord alerts; falls back to `DISCORD_WEBHOOK_URL` |
+| `PELICAN_MONITOR_ENABLED_BACKUPS` | (all registered) | Comma-separated backup IDs to check |
+
+**Raven recovery bundle (first definition):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PELICAN_RAVEN_RECOVERY_TARGET` | `/mnt/storage/pelican_backup` | Completed bundle directory |
+| `PELICAN_RAVEN_RECOVERY_TIMER_UNIT` | `pelican-backup.timer` | Backup scheduler timer |
+| `PELICAN_RAVEN_RECOVERY_SERVICE_UNIT` | `pelican-backup.service` | Backup oneshot service |
+| `PELICAN_RAVEN_RECOVERY_WARN_HOURS` | `30` | Warning when approaching stale |
+| `PELICAN_RAVEN_RECOVERY_CRITICAL_HOURS` | `36` | Critical staleness threshold |
+
+### Safe failure simulation (no backup deletion)
+
+**Simulate stale backup:**
+
+```bash
+PELICAN_RAVEN_RECOVERY_CRITICAL_HOURS=0.001 bash scripts/pelican_monitor.sh --json
+```
+
+**Simulate checksum failure** — rename sidecar temporarily:
+
+```bash
+sudo mv /mnt/storage/pelican_backup/raven-recovery-NEWEST.tar.zst.sha256 /tmp/pelican-test.sha256.bak
+sudo systemctl start pelican-monitor.service
+sudo mv /tmp/pelican-test.sha256.bak /mnt/storage/pelican_backup/raven-recovery-NEWEST.tar.zst.sha256
+```
+
+### Alert behavior
+
+State-change Discord alerts only (no repeat every six hours):
+
+- healthy → warning/critical
+- warning → critical
+- material reason change (issue code fingerprint)
+- warning/critical → healthy recovery
+
+**Critical example:**
+
+```text
+**Raven / Pelican backup CRITICAL**
+Latest recovery bundle is 40 hours old (threshold 36h)
+timer pelican-backup.timer: enabled=enabled, active=active, next=...
+service pelican-backup.service: active=inactive, result=success, exit=0
+latest backup: raven-recovery-20260618T030015Z.tar.zst, age=40.0h
+host: raven
+```
+
+**Recovery example:**
+
+```text
+**Raven / Pelican backup RECOVERED**
+Pelican backup monitoring returned to healthy.
+...
+host: raven
+```
+
+Messages never include `.env` contents, manifest bodies, or secret values.
+
+### Disable monitor safely
+
+```bash
+sudo systemctl disable --now pelican-monitor.timer
+sudo rm -f /etc/systemd/system/pelican-monitor.service /etc/systemd/system/pelican-monitor.timer
+sudo systemctl daemon-reload
+```
+
+### Implementation files (monitoring)
+
+- `pelican_monitor/` — registry, runner, Raven recovery checker
+- `canary/alerting.py` — shared Discord delivery + dedup
+- `scripts/pelican_monitor.sh` — systemd entry wrapper
+- `scripts/install_pelican_monitor_timer.sh` — install/enable helper
+- `deploy/systemd/pelican-monitor.service` — oneshot monitor unit
+- `deploy/systemd/pelican-monitor.timer` — six-hour timer
+- `tests/test_pelican_monitor.py`, `tests/test_pelican_monitor_systemd.py`
+

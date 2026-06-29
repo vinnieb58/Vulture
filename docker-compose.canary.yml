@@ -1,4 +1,4 @@
-# Canary v0.1 — read-only Raven monitoring (no Discord alerts, no restarts).
+# Canary v0.2 — read-only Raven monitoring (infrastructure checks every 5 minutes).
 # On Raven, host mounts + network_mode: host let Canary inspect systemd, storage, and Tailscale.
 
 services:

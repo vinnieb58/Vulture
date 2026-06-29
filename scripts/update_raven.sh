@@ -93,6 +93,8 @@ SYSTEMD_UNITS=(
     finch-telegram.service
     pelican-backup.service
     pelican-backup.timer
+    pelican-monitor.service
+    pelican-monitor.timer
 )
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,8 @@ install_systemd_units() {
     echo "  Note: $VULTURE_SCHEDULER_SERVICE is oneshot; the timer triggers it."
     echo "  Note: pelican-backup.timer is installed but not enabled by deploy; use:"
     echo "        ./scripts/install_pelican_timer.sh --enable"
+    echo "  Note: pelican-monitor.timer is installed but not enabled by deploy; use:"
+    echo "        ./scripts/install_pelican_monitor_timer.sh --enable"
 }
 
 restart_systemd_services() {

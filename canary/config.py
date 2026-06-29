@@ -47,6 +47,15 @@ DASHBOARD_CONTAINER = (
     os.getenv("CANARY_DASHBOARD_CONTAINER", "vulture-dashboard").strip() or "vulture-dashboard"
 )
 
+BACKUP_MONITOR_STATUS_PATH = Path(
+    os.getenv("CANARY_BACKUP_MONITOR_STATUS_PATH", str(DATA_DIR / "backup_monitor_status.json"))
+)
+BACKUP_MONITOR_SNAPSHOT_STALE_HOURS = float(os.getenv("CANARY_BACKUP_MONITOR_SNAPSHOT_STALE_HOURS", "8"))
+
+ALERT_STATE_PATH = Path(
+    os.getenv("CANARY_ALERT_STATE_PATH", str(DATA_DIR / "canary_alert_state.json"))
+)
+
 # Raven external/storage mount paths (UUIDs resolved from fstab or CANARY_STORAGE_VOLUMES)
 RAVEN_STORAGE_PATHS: list[tuple[str, str]] = [
     ("toshiba_ext", "/mnt/storage/toshiba_ext"),
