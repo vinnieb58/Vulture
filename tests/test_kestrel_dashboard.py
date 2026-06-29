@@ -268,3 +268,233 @@ class TestKestrelDashboardHTTP:
         assert "Nest auth failure" in text
         assert "Auth failure" in text
         assert "invalid_grant" not in text
+
+
+def _build_tuya_status_snapshot(**overrides: object) -> dict:
+    from kestrel.tuya_power import (
+        METER_1_KEY,
+        METER_2_KEY,
+        build_tuya_power_snapshot,
+        parse_dual_meter_dps,
+    )
+
+    fixture_dir = Path(__file__).resolve().parent / "fixtures"
+    meter_1 = parse_dual_meter_dps(
+        json.loads((fixture_dir / "tuya_vwifi_meter1_observed.json").read_text(encoding="utf-8")),
+        meter_key=METER_1_KEY,
+        source="local",
+    )
+    meter_2 = parse_dual_meter_dps(
+        json.loads((fixture_dir / "tuya_vwifi_meter2_observed.json").read_text(encoding="utf-8")),
+        meter_key=METER_2_KEY,
+        source="local",
+    )
+    snapshot = build_tuya_power_snapshot(
+        {METER_1_KEY: meter_1, METER_2_KEY: meter_2},
+        updated_at="2026-06-27T12:00:00+00:00",
+        source="local",
+        limited=False,
+    )
+    snapshot.update(overrides)
+    return snapshot
+
+
+def _write_tuya_status(path: Path, **overrides: object) -> None:
+    path.write_text(json.dumps(_build_tuya_status_snapshot(**overrides), indent=2) + "\n", encoding="utf-8")
+
+
+def _write_tuya_history(path: Path, snapshot: dict, *, count: int = 3) -> None:
+    from kestrel.tuya_power_history import build_history_record
+
+    lines = []
+    for index in range(count):
+        record = dict(snapshot)
+        record["updated_at"] = f"2026-06-27T11:{index:02d}:00+00:00"
+        lines.append(json.dumps(build_history_record(record)))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class TestTuyaPowerDashboardParsing:
+    def test_read_tuya_power_status_parses_appliances(self, tmp_path: Path, monkeypatch) -> None:
+        status_path = tmp_path / "kestrel_tuya_power_status.json"
+        _write_tuya_status(status_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", status_path)
+
+        from tuya_power_status import read_tuya_power_status
+
+        fixed_now = datetime(2026, 6, 27, 12, 1, tzinfo=ZoneInfo("UTC"))
+        status = read_tuya_power_status(now=fixed_now)
+
+        assert status["state"] == "online"
+        assert len(status["appliances"]) == 4
+        ac = next(item for item in status["appliances"] if item["key"] == "ac_compressor")
+        assert ac["label"] == "AC compressor"
+        assert ac["power_w"] == pytest.approx(2649.4)
+        assert ac["voltage_v"] == pytest.approx(122.7)
+        assert ac["energy_forward_kwh_inferred"] == pytest.approx(154.27)
+        assert "raw_dps" not in ac
+
+    def test_read_tuya_power_status_strips_raw_dps_from_snapshot(self, tmp_path: Path, monkeypatch) -> None:
+        status_path = tmp_path / "kestrel_tuya_power_status.json"
+        _write_tuya_status(status_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", status_path)
+
+        raw_text = status_path.read_text(encoding="utf-8")
+        assert "raw_dps" in raw_text
+
+        from tuya_power_status import read_tuya_power_status
+
+        status = read_tuya_power_status(
+            now=datetime(2026, 6, 27, 12, 1, tzinfo=ZoneInfo("UTC"))
+        )
+        for appliance in status["appliances"]:
+            assert "raw_dps" not in appliance
+            assert "raw_unknown" not in appliance
+
+    def test_read_tuya_power_status_marks_stale_snapshot(self, tmp_path: Path, monkeypatch) -> None:
+        status_path = tmp_path / "kestrel_tuya_power_status.json"
+        _write_tuya_status(status_path, updated_at="2026-06-27T11:50:00+00:00")
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", status_path)
+
+        from tuya_power_status import read_tuya_power_status
+
+        status = read_tuya_power_status(
+            now=datetime(2026, 6, 27, 12, 0, tzinfo=ZoneInfo("UTC"))
+        )
+        assert status["state"] == "stale"
+        assert "stale" in status["headline"].lower()
+
+    def test_read_tuya_power_history_builds_series(self, tmp_path: Path, monkeypatch) -> None:
+        history_path = tmp_path / "kestrel_tuya_power_history.jsonl"
+        snapshot = _build_tuya_status_snapshot()
+        _write_tuya_history(history_path, snapshot, count=4)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", history_path)
+
+        from tuya_power_history import build_appliance_power_series, read_tuya_power_history
+
+        records = read_tuya_power_history(history_path)
+        assert len(records) == 4
+
+        series = build_appliance_power_series(
+            records,
+            hours=24,
+            now=datetime(2026, 6, 27, 12, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        assert series
+        ac_series = next(item for item in series if item["key"] == "ac_compressor")
+        assert len(ac_series["points"]) == 4
+        assert ac_series["points"][0]["watts"] == pytest.approx(2649.4)
+
+
+class TestTuyaPowerDashboardHTTP:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "missing.db"
+        log_path = tmp_path / "missing.log"
+        monkeypatch.setattr(dashboard_app, "DB_PATH", db_path)
+        monkeypatch.setattr(dashboard_app, "LOG_PATH", log_path)
+        monkeypatch.setattr("db_readers.DB_PATH", db_path)
+        monkeypatch.setattr("log_readers.LOG_PATH", log_path)
+        monkeypatch.setattr("vulture_runtime.LOG_PATH", log_path)
+        return TestClient(dashboard_app.app)
+
+    def _stub_host(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                return client
+
+    def test_kestrel_page_includes_tuya_section_with_no_data(
+        self, client, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+
+        response = self._stub_host(client).get("/kestrel")
+        text = response.text
+
+        assert response.status_code == 200
+        assert "Tuya Appliance Power" in text
+        assert "tuya_power_charts.js" in text
+        assert "AC compressor" in text
+
+    def test_kestrel_page_renders_appliance_watts(self, client, tmp_path, monkeypatch):
+        status_path = tmp_path / "kestrel_tuya_power_status.json"
+        history_path = tmp_path / "kestrel_tuya_power_history.jsonl"
+        _write_tuya_status(status_path)
+        _write_tuya_history(history_path, _build_tuya_status_snapshot(), count=2)
+
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", tmp_path / "kestrel_status.json")
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", status_path)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", history_path)
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+
+        fixed_now = datetime(2026, 6, 27, 12, 1, tzinfo=ZoneInfo("UTC"))
+        from tuya_power_formatting import format_tuya_power_section as _format_tuya_power_section
+
+        monkeypatch.setattr(
+            dashboard_app,
+            "format_tuya_power_section",
+            lambda: _format_tuya_power_section(now=fixed_now),
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+        text = response.text
+
+        assert response.status_code == 200
+        assert "Tuya Appliance Power" in text
+        assert "AC compressor" in text
+        assert "Furnace / air handler" in text
+        assert "Dryer" in text
+        assert "Dishwasher" in text
+        assert "2650 W" in text or "2649 W" in text
+        assert "chart-data-tuya-power-1h" in text
+        assert "chart-data-tuya-power-24h" in text
+        assert "raw_dps" not in text
+        assert "raw_unknown" not in text
+
+    def test_kestrel_page_shows_tuya_stale_warning_with_error_sidecar(
+        self, client, tmp_path, monkeypatch
+    ):
+        status_path = tmp_path / "kestrel_tuya_power_status.json"
+        error_path = tmp_path / "kestrel_tuya_power_error.json"
+        _write_tuya_status(status_path, updated_at="2026-06-27T11:50:00+00:00")
+        error_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-06-27T12:05:00+00:00",
+                    "error_type": "local",
+                    "message": "Local read failed for meter_2: connection timeout",
+                    "last_success": "2026-06-27T11:50:00+00:00",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", tmp_path / "kestrel_status.json")
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", status_path)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", error_path)
+
+        fixed_now = datetime(2026, 6, 27, 12, 5, tzinfo=ZoneInfo("UTC"))
+        from tuya_power_formatting import format_tuya_power_section as _format_tuya_power_section
+
+        monkeypatch.setattr(
+            dashboard_app,
+            "format_tuya_power_section",
+            lambda: _format_tuya_power_section(now=fixed_now),
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+        text = response.text
+
+        assert response.status_code == 200
+        assert "Tuya power stale" in text
+        assert "Stale" in text
+        assert "connection timeout" not in text
+        assert "meter_2" not in text
