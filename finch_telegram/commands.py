@@ -428,6 +428,35 @@ def format_needs_choice_response(payload: dict[str, Any]) -> str:
 def format_choose_response(payload: dict[str, Any]) -> str:
     if payload.get("duplicate"):
         return str(payload.get("message") or "Already added this trip.")
+    if payload.get("needs_choice"):
+        parts: list[str] = []
+        attempt = payload.get("attempt") or {}
+        name = attempt.get("normalized_name") or attempt.get("requested_item") or "item"
+        alias = attempt.get("alias_name")
+        if payload.get("preferred"):
+            line = f"Saved preference and added: {name}"
+        else:
+            line = f"Added: {name}"
+        if alias:
+            line += f" ({alias})"
+        parts.append(line)
+        continued_added = [
+            o.get("attempt")
+            for o in (payload.get("partial_outcomes") or [])[1:]
+            if o.get("ok") and o.get("attempt")
+        ]
+        if continued_added:
+            lines = []
+            for item in continued_added:
+                item_name = item.get("normalized_name") or item.get("requested_item") or "item"
+                item_alias = item.get("alias_name")
+                if item_alias:
+                    lines.append(f"• {item_name} ({item_alias})")
+                else:
+                    lines.append(f"• {item_name}")
+            parts.append("Added:\n" + "\n".join(lines))
+        parts.append(format_needs_choice_response(payload))
+        return "\n\n".join(parts)
     attempt = payload.get("attempt") or {}
     name = attempt.get("normalized_name") or attempt.get("requested_item") or "item"
     alias = attempt.get("alias_name")
@@ -437,7 +466,22 @@ def format_choose_response(payload: dict[str, Any]) -> str:
         line = f"Added: {name}"
     if alias:
         line += f" ({alias})"
-    return line
+    parts = [line]
+    continued = payload.get("continued_outcomes") or []
+    continued_added = [
+        o.get("attempt") for o in continued if o.get("ok") and o.get("attempt")
+    ]
+    if continued_added:
+        lines = []
+        for item in continued_added:
+            item_name = item.get("normalized_name") or item.get("requested_item") or "item"
+            item_alias = item.get("alias_name")
+            if item_alias:
+                lines.append(f"• {item_name} ({item_alias})")
+            else:
+                lines.append(f"• {item_name}")
+        parts.append("Added:\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def format_cancel_pending_response(payload: dict[str, Any]) -> str:

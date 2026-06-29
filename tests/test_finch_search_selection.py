@@ -389,6 +389,198 @@ class TestSearchSelectionApi:
         assert payload["normalized_name"] == "bagel"
         assert len(payload.get("partial_outcomes") or []) == 1
         assert mock_client.add_to_cart.call_count == 1
+        pending = get_pending_selection(CHAT_KEY)
+        assert pending is not None
+        assert not pending.remaining_intents_json
+
+    def test_add_list_pauses_with_remaining_intents(self, api_client):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search():
+                        response = api_client.post(
+                            "/finch/cart/add-list",
+                            json={
+                                "text": "eggs, bagels, milk",
+                                "chat_key": CHAT_KEY,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["needs_choice"] is True
+        assert payload["normalized_name"] == "bagel"
+        assert len(payload.get("partial_outcomes") or []) == 1
+        assert mock_client.add_to_cart.call_count == 1
+        pending = get_pending_selection(CHAT_KEY)
+        assert pending is not None
+        assert pending.remaining_intents_json is not None
+        from finch.parser import intents_from_json
+
+        remaining = intents_from_json(pending.remaining_intents_json)
+        assert len(remaining) == 1
+        assert remaining[0].normalized_name == "milk"
+
+    def test_choose_resumes_remaining_add_list_items(self, api_client):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search():
+                        api_client.post(
+                            "/finch/cart/add-list",
+                            json={
+                                "text": "eggs, bagels, milk",
+                                "chat_key": CHAT_KEY,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+                        choose = api_client.post(
+                            "/finch/cart/choose",
+                            json={
+                                "chat_key": CHAT_KEY,
+                                "selection": 1,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+        assert choose.status_code == 200
+        payload = choose.json()
+        assert payload["ok"] is True
+        assert payload.get("list_continued") is True
+        assert payload["attempt"]["normalized_name"] == "bagel"
+        succeeded = payload.get("succeeded") or []
+        assert len(succeeded) == 2
+        assert {item["normalized_name"] for item in succeeded} == {"bagel", "milk"}
+        assert mock_client.add_to_cart.call_count == 3
+        assert get_pending_selection(CHAT_KEY) is None
+
+    def test_choose_completes_when_paused_item_is_last_in_list(self, api_client):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search():
+                        api_client.post(
+                            "/finch/cart/add-list",
+                            json={
+                                "text": "eggs, bagels",
+                                "chat_key": CHAT_KEY,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+                        choose = api_client.post(
+                            "/finch/cart/choose",
+                            json={
+                                "chat_key": CHAT_KEY,
+                                "selection": 1,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+        assert choose.status_code == 200
+        payload = choose.json()
+        assert payload["ok"] is True
+        assert payload.get("needs_choice") is not True
+        assert payload.get("list_continued") is not True
+        assert payload["attempt"]["normalized_name"] == "bagel"
+        assert mock_client.add_to_cart.call_count == 2
+        assert get_pending_selection(CHAT_KEY) is None
+
+    def test_choose_continues_to_final_item_needing_selection(self, api_client):
+        yogurt_results = [
+            PendingSearchResult(
+                product_id="yogurt-1",
+                upc="0001111000099",
+                description="Greek Yogurt 32 oz",
+                size="32 oz",
+                price="$5.99",
+            ),
+        ]
+
+        def search_side_effect(query: str, *, client=None, limit: int = 10, start: int = 0):
+            from finch.kroger_client import KrogerProduct, ProductSearchResult
+
+            if "yogurt" in query.lower():
+                page = yogurt_results[start : start + limit]
+            else:
+                page = BAGEL_RESULTS[start : start + limit]
+            products = [
+                KrogerProduct(
+                    product_id=item.product_id,
+                    upc=item.upc,
+                    description=item.description,
+                    size=item.size,
+                    price=item.price.replace("$", "") if item.price else None,
+                )
+                for item in page
+            ]
+            return ProductSearchResult(products=products, total_count=len(page))
+
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            mock_client = _mock_kroger_client()
+            with patch("finch.api.load_kroger_client_from_env", return_value=mock_client):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with patch("finch.cart_choice.run_search", side_effect=search_side_effect):
+                        api_client.post(
+                            "/finch/cart/add-list",
+                            json={
+                                "text": "eggs, bagels, yogurt",
+                                "chat_key": CHAT_KEY,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+                        choose = api_client.post(
+                            "/finch/cart/choose",
+                            json={
+                                "chat_key": CHAT_KEY,
+                                "selection": 1,
+                                "source": "telegram",
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+        assert choose.status_code == 200
+        payload = choose.json()
+        assert payload["ok"] is True
+        assert payload.get("needs_choice") is True
+        assert payload.get("list_continued") is True
+        assert payload["attempt"]["normalized_name"] == "bagel"
+        assert payload["normalized_name"] == "yogurt"
+        assert mock_client.add_to_cart.call_count == 2
+        pending = get_pending_selection(CHAT_KEY)
+        assert pending is not None
+        assert pending.normalized_name == "yogurt"
+        assert not pending.remaining_intents_json
+
+    def test_cancel_clears_remaining_add_list_queue(self, api_client):
+        with patch("finch.cart_ops.resolve_user_access_token", return_value="user-tok"):
+            with patch("finch.api.load_kroger_client_from_env", return_value=_mock_kroger_client()):
+                with patch("finch.api.ensure_fresh_user_token"):
+                    with _patch_search():
+                        api_client.post(
+                            "/finch/cart/add-list",
+                            json={
+                                "text": "eggs, bagels, milk",
+                                "chat_key": CHAT_KEY,
+                            },
+                            headers=AUTH_HEADERS,
+                        )
+        pending = get_pending_selection(CHAT_KEY)
+        assert pending is not None
+        assert pending.remaining_intents_json is not None
+        cancel = api_client.post(
+            "/finch/cart/pending/cancel",
+            json={"chat_key": CHAT_KEY},
+            headers=AUTH_HEADERS,
+        )
+        assert cancel.status_code == 200
+        assert cancel.json()["cleared"] is True
+        assert get_pending_selection(CHAT_KEY) is None
 
 
 class TestSearchPaginationApi:
@@ -683,6 +875,31 @@ class TestFormatNeedsChoiceResponse:
 
 
 class TestTelegramSearchSelection:
+    def test_format_choose_response_includes_continued_items(self):
+        from finch_telegram.commands import format_choose_response
+
+        body = format_choose_response(
+            {
+                "ok": True,
+                "list_continued": True,
+                "attempt": {
+                    "normalized_name": "bagel",
+                    "alias_name": "Plain Bagels 6 ct",
+                },
+                "continued_outcomes": [
+                    {
+                        "ok": True,
+                        "attempt": {
+                            "normalized_name": "milk",
+                            "alias_name": "Kroger Vitamin D Whole Milk 1 gal",
+                        },
+                    }
+                ],
+            }
+        )
+        assert "Added: bagel (Plain Bagels 6 ct)" in body
+        assert "• milk (Kroger Vitamin D Whole Milk 1 gal)" in body
+
     @patch("finch_telegram.handler.telegram_client.send_text_message")
     @patch("finch_telegram.handler.finch_client.cart_add")
     def test_add_unresolved_formats_needs_choice(self, mock_add, mock_send, monkeypatch):
