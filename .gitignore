@@ -11,6 +11,12 @@ __pycache__/
 # Secrets
 .env
 
+# TinyTuya wizard output (local keys; never commit)
+tinytuya.json
+devices.json
+snapshot.json
+tuya-raw.json
+
 # Finch local operator config (store location, non-secret)
 data/finch_config.json
 data/finch_tokens.json
