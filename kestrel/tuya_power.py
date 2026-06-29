@@ -57,15 +57,23 @@ CHANNEL_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     },
 }
 
-# WiFiDualMeterDevice DPS ids (TinyTuya Contrib / Tuya v3.4 dual meter)
-DPS_POWER_A = "101"
-DPS_POWER_B = "105"
-DPS_ENERGY_FORWARD_A = "106"
-DPS_ENERGY_FORWARD_B = "108"
-DPS_VOLTAGE = "112"
-DPS_CURRENT_A = "113"
-DPS_CURRENT_B = "114"
-DPS_TOTAL_POWER = "115"
+# DPS profiles: PJ1103A (TinyTuya WiFiDualMeter docs) vs observed V-WIFI-DL02-ES layout.
+DPS_PROFILE_PJ1103A = "pj1103a"
+DPS_PROFILE_V_WIFI_DL02_ES = "v_wifi_dl02_es"
+
+# PJ1103A / TinyTuya Contrib WiFiDualMeter (when DPS 101/112 are present)
+PJ1103A_POWER_A = "101"
+PJ1103A_POWER_B = "105"
+PJ1103A_ENERGY_FORWARD_A = "106"
+PJ1103A_ENERGY_FORWARD_B = "108"
+PJ1103A_VOLTAGE = "112"
+PJ1103A_CURRENT_A = "113"
+PJ1103A_CURRENT_B = "114"
+PJ1103A_TOTAL_POWER = "115"
+
+# V-WIFI-DL02-ES observed on Raven: two 5-DPS channel blocks (suffix pattern x05..x09 / x15..x19).
+VWIFI_CHANNEL_A_DPS = ("105", "106", "107", "108", "109")
+VWIFI_CHANNEL_B_DPS = ("115", "116", "117", "118", "119")
 
 _POWER_SCALE = 10
 _ENERGY_SCALE = 100
@@ -289,11 +297,73 @@ def _scaled_value(raw: Any, scale: int) -> float | None:
         return None
 
 
-def _extract_dps(status_payload: dict[str, Any]) -> dict[str, Any]:
-    dps = status_payload.get("dps")
-    if isinstance(dps, dict):
-        return {str(key): value for key, value in dps.items()}
-    return {}
+def _raw_dps_subset(raw_dps: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    subset: dict[str, Any] = {}
+    for key in keys:
+        if key in raw_dps:
+            subset[key] = raw_dps[key]
+    return subset
+
+
+def detect_dps_profile(raw_dps: dict[str, Any]) -> str:
+    """Select DPS parser based on keys present in a live meter payload."""
+    keys = {str(key) for key in raw_dps}
+    if "107" in keys or "117" in keys:
+        return DPS_PROFILE_V_WIFI_DL02_ES
+    if "101" in keys or "112" in keys:
+        return DPS_PROFILE_PJ1103A
+    if keys & set(VWIFI_CHANNEL_A_DPS) or keys & set(VWIFI_CHANNEL_B_DPS):
+        return DPS_PROFILE_V_WIFI_DL02_ES
+    return DPS_PROFILE_PJ1103A
+
+
+def _parse_pj1103a_channel_values(raw_dps: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        CHANNEL_1_KEY: {
+            "power_w": _scaled_value(raw_dps.get(PJ1103A_POWER_A), _POWER_SCALE),
+            "current_a": _scaled_value(raw_dps.get(PJ1103A_CURRENT_A), _CURRENT_SCALE),
+            "energy_forward_kwh": _scaled_value(
+                raw_dps.get(PJ1103A_ENERGY_FORWARD_A), _ENERGY_SCALE
+            ),
+        },
+        CHANNEL_2_KEY: {
+            "power_w": _scaled_value(raw_dps.get(PJ1103A_POWER_B), _POWER_SCALE),
+            "current_a": _scaled_value(raw_dps.get(PJ1103A_CURRENT_B), _CURRENT_SCALE),
+            "energy_forward_kwh": _scaled_value(
+                raw_dps.get(PJ1103A_ENERGY_FORWARD_B), _ENERGY_SCALE
+            ),
+        },
+    }
+
+
+def _parse_vwifi_dl02_channel(
+    raw_dps: dict[str, Any],
+    dps_keys: tuple[str, str, str, str, str],
+) -> dict[str, Any]:
+    """Conservative V-WIFI-DL02-ES channel parse; uncertain DPS stay in raw_unknown."""
+    k05, k06, k07, k08, k09 = dps_keys
+    channel_raw = _raw_dps_subset(raw_dps, dps_keys)
+
+    parsed: dict[str, Any] = {"raw_dps": channel_raw}
+
+    voltage = _scaled_value(raw_dps.get(k07), _VOLTAGE_SCALE)
+    if voltage is not None:
+        parsed["voltage_v"] = voltage
+
+    power = _scaled_value(raw_dps.get(k08), _POWER_SCALE)
+    if power is not None:
+        parsed["power_w"] = power
+
+    # DPS x09 behaves like cumulative forward energy (÷100 → kWh) on Raven; treat as inferred.
+    energy = _scaled_value(raw_dps.get(k09), _ENERGY_SCALE)
+    if energy is not None:
+        parsed["energy_forward_kwh_inferred"] = energy
+
+    unknown = _raw_dps_subset(raw_dps, (k05, k06))
+    if unknown:
+        parsed["raw_unknown"] = unknown
+
+    return parsed
 
 
 def parse_dual_meter_dps(
@@ -303,29 +373,35 @@ def parse_dual_meter_dps(
     source: str,
     online: bool = True,
 ) -> dict[str, Any]:
-    """Normalize WiFiDualMeter DPS into meter + appliance channel entries."""
-    power_a = _scaled_value(raw_dps.get(DPS_POWER_A), _POWER_SCALE)
-    power_b = _scaled_value(raw_dps.get(DPS_POWER_B), _POWER_SCALE)
-    current_a = _scaled_value(raw_dps.get(DPS_CURRENT_A), _CURRENT_SCALE)
-    current_b = _scaled_value(raw_dps.get(DPS_CURRENT_B), _CURRENT_SCALE)
-    energy_a = _scaled_value(raw_dps.get(DPS_ENERGY_FORWARD_A), _ENERGY_SCALE)
-    energy_b = _scaled_value(raw_dps.get(DPS_ENERGY_FORWARD_B), _ENERGY_SCALE)
-    voltage = _scaled_value(raw_dps.get(DPS_VOLTAGE), _VOLTAGE_SCALE)
-    total_power = _scaled_value(raw_dps.get(DPS_TOTAL_POWER), _POWER_SCALE)
+    """Normalize dual-channel meter DPS into meter + appliance channel entries."""
+    profile = detect_dps_profile(raw_dps)
+    normalized_dps = {str(key): value for key, value in raw_dps.items()}
 
-    channel_values = {
-        CHANNEL_1_KEY: {
-            "power_w": power_a,
-            "current_a": current_a,
-            "energy_forward_kwh": energy_a,
-        },
-        CHANNEL_2_KEY: {
-            "power_w": power_b,
-            "current_a": current_b,
-            "energy_forward_kwh": energy_b,
-        },
-    }
+    if profile == DPS_PROFILE_V_WIFI_DL02_ES:
+        channel_payloads = {
+            CHANNEL_1_KEY: _parse_vwifi_dl02_channel(normalized_dps, VWIFI_CHANNEL_A_DPS),
+            CHANNEL_2_KEY: _parse_vwifi_dl02_channel(normalized_dps, VWIFI_CHANNEL_B_DPS),
+        }
+        meter_entry: dict[str, Any] = {
+            "meter_key": meter_key,
+            "online": online,
+            "source": source,
+            "dps_profile": profile,
+            "raw_dps": normalized_dps,
+            "channels": {},
+        }
+        for channel_key, payload in channel_payloads.items():
+            appliance_key, label = CHANNEL_MAPPING[meter_key][channel_key]
+            meter_entry["channels"][channel_key] = {
+                "label": label,
+                "key": appliance_key,
+                "online": online,
+                "source": source,
+                **payload,
+            }
+        return meter_entry
 
+    channel_values = _parse_pj1103a_channel_values(normalized_dps)
     channels: dict[str, Any] = {}
     for channel_key, values in channel_values.items():
         appliance_key, label = CHANNEL_MAPPING[meter_key][channel_key]
@@ -341,11 +417,19 @@ def parse_dual_meter_dps(
         "meter_key": meter_key,
         "online": online,
         "source": source,
-        "voltage_v": voltage,
-        "total_power_w": total_power,
-        "raw_dps_keys": sorted(raw_dps.keys()),
+        "dps_profile": profile,
+        "raw_dps": normalized_dps,
+        "voltage_v": _scaled_value(normalized_dps.get(PJ1103A_VOLTAGE), _VOLTAGE_SCALE),
+        "total_power_w": _scaled_value(normalized_dps.get(PJ1103A_TOTAL_POWER), _POWER_SCALE),
         "channels": channels,
     }
+
+
+def _extract_dps(status_payload: dict[str, Any]) -> dict[str, Any]:
+    dps = status_payload.get("dps")
+    if isinstance(dps, dict):
+        return {str(key): value for key, value in dps.items()}
+    return {}
 
 
 def build_appliance_index(meters: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -364,15 +448,23 @@ def build_appliance_index(meters: dict[str, dict[str, Any]]) -> dict[str, dict[s
             appliance_key = channel_entry.get("key")
             if not isinstance(appliance_key, str) or not appliance_key:
                 continue
-            appliances[appliance_key] = {
+            entry: dict[str, Any] = {
                 "label": channel_entry.get("label"),
                 "meter": meter_key,
                 "online": channel_entry.get("online"),
                 "source": channel_entry.get("source"),
-                "power_w": channel_entry.get("power_w"),
-                "current_a": channel_entry.get("current_a"),
-                "energy_forward_kwh": channel_entry.get("energy_forward_kwh"),
+                "dps_profile": meter_entry.get("dps_profile"),
             }
+            for field in (
+                "voltage_v",
+                "power_w",
+                "current_a",
+                "energy_forward_kwh",
+                "energy_forward_kwh_inferred",
+            ):
+                if field in channel_entry:
+                    entry[field] = channel_entry[field]
+            appliances[appliance_key] = entry
     return appliances
 
 
@@ -591,8 +683,10 @@ def format_debug_dps_summary(snapshot: dict[str, Any]) -> list[str]:
         if not isinstance(entry, dict):
             continue
         power = entry.get("power_w")
+        voltage = entry.get("voltage_v")
         current = entry.get("current_a")
         energy = entry.get("energy_forward_kwh")
+        energy_inferred = entry.get("energy_forward_kwh_inferred")
         lines.append(
             " | ".join(
                 [
@@ -600,9 +694,11 @@ def format_debug_dps_summary(snapshot: dict[str, Any]) -> list[str]:
                     f"label={entry.get('label') or '—'}",
                     f"meter={entry.get('meter') or '—'}",
                     f"source={entry.get('source') or '—'}",
+                    f"voltage_v={voltage if voltage is not None else '—'}",
                     f"power_w={power if power is not None else '—'}",
                     f"current_a={current if current is not None else '—'}",
                     f"energy_kwh={energy if energy is not None else '—'}",
+                    f"energy_inferred_kwh={energy_inferred if energy_inferred is not None else '—'}",
                     f"online={entry.get('online')}",
                 ]
             )

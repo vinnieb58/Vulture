@@ -9,9 +9,9 @@ Read-only Kestrel investigation for **V-WIFI-DL02-ES** dual-channel WiFi energy 
 | Field | Value |
 |-------|-------|
 | Model | `V-WIFI-DL02-ES` |
-| Protocol | Tuya local LAN v3.4 (WiFiDualMeter / dual CT) |
+| Protocol | Tuya local LAN v3.5 (V-WIFI-DL02-ES observed layout; differs from PJ1103A docs) |
 | Channels per unit | 2 (A + B) |
-| Expected DPS | Power `101`/`105`, current `113`/`114`, forward energy `106`/`108`, voltage `112`, total `115` |
+| Expected DPS (observed) | Channel A block `105`–`109`; channel B block `115`–`119` |
 
 Two physical meters are installed:
 
@@ -24,7 +24,7 @@ Two physical meters are installed:
 
 ## Recommended integration path
 
-1. **Discovery (LAN scan + raw DPS)** — run the probe in discover mode on Raven while both meters are powered and on the same subnet. Confirm DPS ids/scales match the v3.4 dual-meter map before any normalization assumptions are trusted.
+1. **Discovery (LAN scan + raw DPS)** — run the probe in discover mode on Raven while both meters are powered and on the same subnet. Confirm DPS ids/scales match the **V-WIFI-DL02-ES** layout below (not the generic PJ1103A TinyTuya table).
 2. **Local TinyTuya reads (preferred)** — configure device id, LAN IP, and local key per meter. Poll with `--once` every manual test cycle. No cloud dependency; lowest latency; aligns with existing Kestrel read-only probes.
 3. **Tuya Cloud fallback (optional)** — only if local LAN reads are blocked (VLAN isolation, key rotation without local re-pairing, etc.). Set cloud API credentials; the probe tries local first per meter, then cloud for failed meters.
 4. **Snapshot + JSONL history** — on successful poll, write latest status JSON and append compact appliance history (Nest probe pattern). Failures preserve the last good snapshot and write a sidecar error JSON.
@@ -125,27 +125,60 @@ Latest snapshot at `data/kestrel_tuya_power_status.json`:
       "meter_key": "meter_1",
       "online": true,
       "source": "local",
-      "voltage_v": 240.5,
-      "total_power_w": 257.0,
-      "device_id_suffix": "abcd",
+      "dps_profile": "v_wifi_dl02_es",
+      "raw_dps": {
+        "105": 18820,
+        "106": 15759,
+        "107": 1227,
+        "108": 26494,
+        "109": 15427,
+        "115": 10273,
+        "116": 10636,
+        "117": 1228,
+        "118": 15764,
+        "119": 9516
+      },
+      "device_id_suffix": "his3",
       "channels": {
         "channel_1": {
           "label": "AC compressor",
           "key": "ac_compressor",
           "online": true,
           "source": "local",
-          "power_w": 245.0,
-          "current_a": 10.2,
-          "energy_forward_kwh": 154.32
+          "voltage_v": 122.7,
+          "power_w": 2649.4,
+          "energy_forward_kwh_inferred": 154.27,
+          "raw_dps": {
+            "105": 18820,
+            "106": 15759,
+            "107": 1227,
+            "108": 26494,
+            "109": 15427
+          },
+          "raw_unknown": {
+            "105": 18820,
+            "106": 15759
+          }
         },
         "channel_2": {
           "label": "Furnace / air handler",
           "key": "furnace_air_handler",
           "online": true,
           "source": "local",
-          "power_w": 12.0,
-          "current_a": 0.5,
-          "energy_forward_kwh": 8.76
+          "voltage_v": 122.8,
+          "power_w": 1576.4,
+          "energy_forward_kwh_inferred": 95.16,
+          "raw_dps": {
+            "115": 10273,
+            "116": 10636,
+            "117": 1228,
+            "118": 15764,
+            "119": 9516
+          },
+          "raw_unknown": {
+            "115": 10273,
+            "116": 10636
+          }
         }
       }
     },
@@ -157,29 +190,54 @@ Latest snapshot at `data/kestrel_tuya_power_status.json`:
       "meter": "meter_1",
       "online": true,
       "source": "local",
-      "power_w": 245.0,
-      "current_a": 10.2,
-      "energy_forward_kwh": 154.32
+      "dps_profile": "v_wifi_dl02_es",
+      "voltage_v": 122.7,
+      "power_w": 2649.4,
+      "energy_forward_kwh_inferred": 154.27
     }
   }
 }
 ```
 
+### DPS mapping (V-WIFI-DL02-ES, observed on Raven)
+
+Each channel exposes a 5-DPS block. Suffix pattern repeats per channel:
+
+| Channel | DPS block | Role (confidence) | Scale | Example |
+|---------|-----------|-------------------|-------|---------|
+| A (CT1) | `105`–`109` | see rows below | — | meter_1 live poll |
+| B (CT2) | `115`–`119` | see rows below | — | meter_1 live poll |
+
+Per-channel suffix (`x` = `0` for channel A, `1` for channel B):
+
+| Suffix | DPS (ch A / ch B) | Normalized field | Scale | Confidence |
+|--------|-------------------|------------------|-------|------------|
+| x05 | `105` / `115` | `raw_unknown` only | — | **Unresolved** (not voltage/current) |
+| x06 | `106` / `116` | `raw_unknown` only | — | **Unresolved** |
+| x07 | `107` / `117` | `voltage_v` | ÷10 → volts | **High** (~122.7 V) |
+| x08 | `108` / `118` | `power_w` | ÷10 → watts | **Medium** (tracks load; validate vs known draws) |
+| x09 | `109` / `119` | `energy_forward_kwh_inferred` | ÷100 → kWh | **Low** (treat as cumulative energy hypothesis) |
+
+The probe **preserves full `raw_dps`** at the meter level and per channel. Uncertain DPS are **not** mapped to `current_a` or meter-level voltage.
+
+Legacy **PJ1103A** devices (DPS `101`/`112` present) still use the TinyTuya WiFiDualMeter map via `dps_profile: "pj1103a"`.
+
 ### Parsing rules
 
-1. **DPS scaling (v3.4 dual meter).** Power DPS `101`/`105` divide by 10 → watts. Current `113`/`114` divide by 1000 → amps. Forward energy `106`/`108` divide by 100 → kWh. Voltage `112` divide by 10 → volts.
-2. **Channel mapping is fixed** to the CT install table above; snapshot keys are stable for dashboard use.
-3. **`source`** is `local`, `cloud`, or `mixed` when meters use different transports.
-4. **`limited`** is `true` when fewer than two meters are configured or returned.
-5. **`stale`** is reserved for dashboard-side age checks (snapshot timestamp older than poll interval); the probe sets it to `false` on fresh successful polls.
-6. **Read-only.** No Tuya `set_*` / control commands are invoked.
+1. **Profile detection.** If DPS `107`/`117` appear, use `v_wifi_dl02_es` layout; if `101`/`112` appear, use `pj1103a`.
+2. **Conservative normalization.** Only emit scaled fields listed above with sufficient confidence; never invent `current_a` from ambiguous DPS.
+3. **Channel mapping is fixed** to the CT install table above; snapshot keys are stable for dashboard use.
+4. **`source`** is `local`, `cloud`, or `mixed` when meters use different transports.
+5. **`limited`** is `true` when fewer than two meters are configured or returned.
+6. **`stale`** is reserved for dashboard-side age checks (snapshot timestamp older than poll interval); the probe sets it to `false` on fresh successful polls.
+7. **Read-only.** No Tuya `set_*` / control commands are invoked.
 
 ## History JSONL
 
 Append-only file at `data/kestrel_tuya_power_history.jsonl` (14-day retention, same window as Nest history):
 
 ```json
-{"timestamp":"2026-06-27T12:00:00+00:00","source":"local","limited":false,"appliances":{"ac_compressor":{"power_w":245.0,"current_a":10.2,"energy_forward_kwh":154.32,"online":true,"source":"local"},"furnace_air_handler":{"power_w":12.0,"current_a":0.5,"energy_forward_kwh":8.76,"online":true,"source":"local"}}}
+{"timestamp":"2026-06-27T12:00:00+00:00","source":"local","limited":false,"appliances":{"ac_compressor":{"voltage_v":122.7,"power_w":2649.4,"energy_forward_kwh_inferred":154.27,"online":true,"source":"local"},"furnace_air_handler":{"voltage_v":122.8,"power_w":1576.4,"energy_forward_kwh_inferred":95.16,"online":true,"source":"local"}}}
 ```
 
 Each line is one successful poll. Fields are compact (no labels) to keep files small.
@@ -234,7 +292,7 @@ python -m compileall -q kestrel experiments/kestrel tests/test_kestrel_tuya_powe
 pytest tests/test_kestrel_tuya_power_probe.py -q
 ```
 
-Fixtures: `tests/fixtures/tuya_dual_meter_dps.json` (representative v3.4 DPS integers).
+Fixtures live at `tests/fixtures/tuya_vwifi_meter1_observed.json` and `tests/fixtures/tuya_vwifi_meter2_observed.json` (exact Raven DPS payloads). PJ1103A regression fixture: `tests/fixtures/tuya_dual_meter_dps.json`.
 
 ## Related files
 

@@ -21,9 +21,11 @@ RETENTION_DAYS = 14
 DEFAULT_HISTORY_PATH = "data/kestrel_tuya_power_history.jsonl"
 
 _HISTORY_APPLIANCE_FIELDS = (
+    "voltage_v",
     "power_w",
     "current_a",
     "energy_forward_kwh",
+    "energy_forward_kwh_inferred",
     "online",
     "source",
 )

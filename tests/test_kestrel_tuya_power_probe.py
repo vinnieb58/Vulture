@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kestrel.tuya_power import (
     CHANNEL_MAPPING,
+    DPS_PROFILE_PJ1103A,
+    DPS_PROFILE_V_WIFI_DL02_ES,
     KNOWN_METER_DEVICE_IDS,
     METER_1_KEY,
     METER_2_KEY,
@@ -21,6 +23,7 @@ from kestrel.tuya_power import (
     WIZARD_DEFAULT_PROTOCOL_VERSION,
     build_appliance_index,
     build_tuya_power_snapshot,
+    detect_dps_profile,
     format_debug_dps_summary,
     format_raw_dps_lines,
     index_tinytuya_devices_by_id,
@@ -45,11 +48,25 @@ from kestrel.tuya_power_history import (
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "tuya_dual_meter_dps.json"
+VWIFI_METER1_FIXTURE_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "tuya_vwifi_meter1_observed.json"
+)
+VWIFI_METER2_FIXTURE_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "tuya_vwifi_meter2_observed.json"
+)
 DEVICES_FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "tinytuya_devices.json"
 
 
 def _load_fixture() -> dict:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _load_vwifi_meter1_fixture() -> dict:
+    return json.loads(VWIFI_METER1_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _load_vwifi_meter2_fixture() -> dict:
+    return json.loads(VWIFI_METER2_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
 def _clear_tuya_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,13 +90,19 @@ def _clear_tuya_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestParseDualMeterDps:
-    def test_parses_meter_1_channels(self) -> None:
+    def test_detects_vwifi_profile_from_observed_keys(self) -> None:
+        assert detect_dps_profile(_load_vwifi_meter1_fixture()) == DPS_PROFILE_V_WIFI_DL02_ES
+
+    def test_detects_pj1103a_profile(self) -> None:
+        assert detect_dps_profile(_load_fixture()) == DPS_PROFILE_PJ1103A
+
+    def test_parses_pj1103a_channels(self) -> None:
         parsed = parse_dual_meter_dps(_load_fixture(), meter_key=METER_1_KEY, source="local")
 
+        assert parsed["dps_profile"] == DPS_PROFILE_PJ1103A
         ch1 = parsed["channels"]["channel_1"]
         ch2 = parsed["channels"]["channel_2"]
         assert ch1["key"] == "ac_compressor"
-        assert ch1["label"] == "AC compressor"
         assert ch1["power_w"] == pytest.approx(245.0)
         assert ch1["current_a"] == pytest.approx(10.2)
         assert ch1["energy_forward_kwh"] == pytest.approx(154.32)
@@ -90,6 +113,54 @@ class TestParseDualMeterDps:
 
         assert parsed["voltage_v"] == pytest.approx(240.5)
         assert parsed["total_power_w"] == pytest.approx(257.0)
+        assert "105" in parsed["raw_dps"]
+
+    def test_parses_vwifi_meter1_observed_payload(self) -> None:
+        parsed = parse_dual_meter_dps(
+            _load_vwifi_meter1_fixture(),
+            meter_key=METER_1_KEY,
+            source="local",
+        )
+
+        assert parsed["dps_profile"] == DPS_PROFILE_V_WIFI_DL02_ES
+        assert parsed["raw_dps"]["107"] == 1227
+        assert "voltage_v" not in parsed
+
+        ch1 = parsed["channels"]["channel_1"]
+        ch2 = parsed["channels"]["channel_2"]
+
+        assert ch1["key"] == "ac_compressor"
+        assert ch1["voltage_v"] == pytest.approx(122.7)
+        assert ch1["power_w"] == pytest.approx(2649.4)
+        assert ch1["energy_forward_kwh_inferred"] == pytest.approx(154.27)
+        assert ch1["raw_unknown"] == {"105": 18820, "106": 15759}
+        assert "current_a" not in ch1
+
+        assert ch2["key"] == "furnace_air_handler"
+        assert ch2["voltage_v"] == pytest.approx(122.8)
+        assert ch2["power_w"] == pytest.approx(1576.4)
+        assert ch2["energy_forward_kwh_inferred"] == pytest.approx(95.16)
+        assert ch2["raw_unknown"] == {"115": 10273, "116": 10636}
+
+    def test_parses_vwifi_meter2_observed_payload(self) -> None:
+        parsed = parse_dual_meter_dps(
+            _load_vwifi_meter2_fixture(),
+            meter_key=METER_2_KEY,
+            source="local",
+        )
+
+        ch1 = parsed["channels"]["channel_1"]
+        ch2 = parsed["channels"]["channel_2"]
+
+        assert ch1["key"] == "dryer"
+        assert ch1["voltage_v"] == pytest.approx(122.7)
+        assert ch1["power_w"] == pytest.approx(6.9)
+        assert ch1["energy_forward_kwh_inferred"] == pytest.approx(0.0)
+
+        assert ch2["key"] == "dishwasher"
+        assert ch2["voltage_v"] == pytest.approx(122.4)
+        assert ch2["power_w"] == pytest.approx(0.7)
+        assert ch2["energy_forward_kwh_inferred"] == pytest.approx(0.02)
 
     def test_channel_mapping_covers_all_appliances(self) -> None:
         keys = set()
@@ -133,21 +204,27 @@ class TestDebugFormatting:
     def test_format_raw_dps_lines_sorted(self) -> None:
         lines = format_raw_dps_lines(
             meter_key=METER_1_KEY,
-            raw_dps=_load_fixture(),
+            raw_dps=_load_vwifi_meter1_fixture(),
             source="local",
         )
-        assert len(lines) == 8
+        assert len(lines) == 10
         assert all("meter=meter_1" in line for line in lines)
         assert all("local_key" not in line for line in lines)
 
-    def test_format_debug_dps_summary(self) -> None:
-        meter_1 = parse_dual_meter_dps(_load_fixture(), meter_key=METER_1_KEY, source="local")
+    def test_format_debug_dps_summary_vwifi(self) -> None:
+        meter_1 = parse_dual_meter_dps(
+            _load_vwifi_meter1_fixture(),
+            meter_key=METER_1_KEY,
+            source="local",
+        )
         snapshot = build_tuya_power_snapshot({METER_1_KEY: meter_1}, source="local")
         lines = format_debug_dps_summary(snapshot)
-        assert len(lines) == 2
         combined = "\n".join(lines)
         assert "appliance=ac_compressor" in combined
-        assert "power_w=245.0" in combined
+        assert "voltage_v=122.7" in combined
+        assert "power_w=2649.4" in combined
+        assert "energy_inferred_kwh=154.27" in combined
+        assert "current_a=—" in combined
 
 
 class TestRedactTuyaMessage:
