@@ -476,7 +476,7 @@ def _build_warnings(
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health() -> JSONResponse:
     """Lightweight process health probe used by Docker HEALTHCHECK and curl.
 
@@ -531,7 +531,7 @@ async def scheduler_health() -> JSONResponse:
     )
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def nest_overview(request: Request) -> HTMLResponse:
     """Nest Overview — tablet-friendly summary with plain-English status."""
     refreshed_at, logs, db, raven, metrics_peaks, services, storage, docker, vulture = _collect_data()
