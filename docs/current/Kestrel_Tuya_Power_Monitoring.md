@@ -105,9 +105,16 @@ python experiments/kestrel/tuya_power_probe.py --discover
 # One-shot poll: normalized snapshot + history append
 python experiments/kestrel/tuya_power_probe.py --once
 python experiments/kestrel/tuya_power_probe.py --once --debug-dps
+
+# Manual sampler (not scheduled): repeated polls with compact stdout lines
+python experiments/kestrel/tuya_power_probe.py --sample
+python experiments/kestrel/tuya_power_probe.py --sample --interval-seconds 60 --count 10
+python experiments/kestrel/tuya_power_probe.py --sample --interval-seconds 30 --count 5 --debug-dps
 ```
 
 `--discover` prints raw status/DPS output for operator mapping before normalization is trusted. `--once` writes the snapshot only on full success.
+
+`--sample` runs the same read/write path as `--once` for each sample: updates the latest snapshot JSON, appends one JSONL history row per successful sample, and prints one compact appliance summary line per sample. On failure it preserves the last good snapshot and writes/updates the error sidecar, then exits non-zero (same as `--once`). This is for manual investigation only — no systemd timer or dashboard wiring yet.
 
 ## Output shape (status JSON)
 

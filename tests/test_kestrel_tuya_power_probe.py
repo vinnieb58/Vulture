@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -9,7 +10,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+PROBE_FILE = ROOT / "experiments" / "kestrel" / "tuya_power_probe.py"
+_probe_spec = importlib.util.spec_from_file_location("tuya_power_probe", PROBE_FILE)
+probe_module = importlib.util.module_from_spec(_probe_spec)
+assert _probe_spec.loader is not None
+_probe_spec.loader.exec_module(probe_module)
 
 from kestrel.tuya_power import (
     CHANNEL_MAPPING,
@@ -24,6 +32,7 @@ from kestrel.tuya_power import (
     build_appliance_index,
     build_tuya_power_snapshot,
     detect_dps_profile,
+    format_compact_appliance_summary,
     format_debug_dps_summary,
     format_raw_dps_lines,
     index_tinytuya_devices_by_id,
@@ -400,3 +409,102 @@ class TestHistory:
         assert len(records) == 1
         assert isinstance(records[0], TuyaPowerHistoryRecord)
         assert records[0].appliances["ac_compressor"]["power_w"] == pytest.approx(245.0)
+
+
+class TestCompactApplianceSummary:
+    def test_format_compact_appliance_summary(self) -> None:
+        meter_1 = parse_dual_meter_dps(
+            _load_vwifi_meter1_fixture(),
+            meter_key=METER_1_KEY,
+            source="local",
+        )
+        snapshot = build_tuya_power_snapshot(
+            {METER_1_KEY: meter_1},
+            updated_at="2026-06-27T12:00:00+00:00",
+            source="local",
+        )
+        line = format_compact_appliance_summary(snapshot, sample_index=2, sample_count=10)
+        assert line.startswith("sample 2/10 @ 2026-06-27T12:00:00+00:00 |")
+        assert "ac_compressor=2649.4W" in line
+        assert "furnace_air_handler=1576.4W" in line
+
+
+class TestTuyaPowerProbeCLI:
+    def test_parse_args_sample_defaults(self) -> None:
+        args = probe_module.parse_args(["--sample"])
+        assert args.sample is True
+        assert args.interval_seconds == 60
+        assert args.count == 10
+
+    def test_parse_args_sample_overrides(self) -> None:
+        args = probe_module.parse_args(
+            ["--sample", "--interval-seconds", "30", "--count", "5", "--debug-dps"]
+        )
+        assert args.sample is True
+        assert args.interval_seconds == 30
+        assert args.count == 5
+        assert args.debug_dps is True
+
+    def test_main_requires_mode(self, capsys) -> None:
+        code = probe_module.main([])
+        assert code == 1
+        assert "Specify --discover, --once, or --sample" in capsys.readouterr().err
+
+    def test_run_sample_rejects_invalid_interval(self, capsys) -> None:
+        with patch.object(probe_module, "load_tuya_power_config"):
+            code = probe_module.run_sample(interval_seconds=0, count=3, debug_dps=False)
+        assert code == 1
+        assert "--interval-seconds must be at least 1" in capsys.readouterr().err
+
+    def test_run_sample_polls_count_times(self, capsys) -> None:
+        meter_1 = parse_dual_meter_dps(
+            _load_vwifi_meter1_fixture(),
+            meter_key=METER_1_KEY,
+            source="local",
+        )
+        snapshot = build_tuya_power_snapshot({METER_1_KEY: meter_1}, source="local")
+        fake_config = MagicMock(output_path="data/kestrel_tuya_power_status.json")
+
+        with (
+            patch.object(probe_module, "load_tuya_power_config", return_value=fake_config),
+            patch.object(
+                probe_module,
+                "execute_poll_once",
+                side_effect=[(0, snapshot), (0, snapshot), (0, snapshot)],
+            ) as poll_mock,
+            patch.object(probe_module.time, "sleep") as sleep_mock,
+        ):
+            code = probe_module.run_sample(interval_seconds=15, count=3, debug_dps=False)
+
+        assert code == 0
+        assert poll_mock.call_count == 3
+        assert sleep_mock.call_count == 2
+        assert sleep_mock.call_args_list[0].args == (15,)
+        output = capsys.readouterr().out
+        assert "sample 1/3" in output
+        assert "sample 3/3" in output
+        assert "Sampler complete: 3 sample(s)" in output
+
+    def test_run_sample_stops_on_poll_failure(self, capsys) -> None:
+        fake_config = MagicMock(output_path="data/kestrel_tuya_power_status.json")
+        meter_1 = parse_dual_meter_dps(
+            _load_vwifi_meter1_fixture(),
+            meter_key=METER_1_KEY,
+            source="local",
+        )
+        snapshot = build_tuya_power_snapshot({METER_1_KEY: meter_1}, source="local")
+
+        with (
+            patch.object(probe_module, "load_tuya_power_config", return_value=fake_config),
+            patch.object(
+                probe_module,
+                "execute_poll_once",
+                side_effect=[(0, snapshot), (1, None)],
+            ) as poll_mock,
+            patch.object(probe_module.time, "sleep") as sleep_mock,
+        ):
+            code = probe_module.run_sample(interval_seconds=60, count=4, debug_dps=False)
+
+        assert code == 1
+        assert poll_mock.call_count == 2
+        sleep_mock.assert_called_once()

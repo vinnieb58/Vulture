@@ -704,3 +704,36 @@ def format_debug_dps_summary(snapshot: dict[str, Any]) -> list[str]:
             )
         )
     return lines
+
+
+def format_compact_appliance_summary(
+    snapshot: dict[str, Any],
+    *,
+    sample_index: int | None = None,
+    sample_count: int | None = None,
+) -> str:
+    """Return one compact appliance power line for sampler/operator output."""
+    appliances = snapshot.get("appliances")
+    if not isinstance(appliances, dict):
+        appliances = {}
+
+    prefix_parts: list[str] = []
+    if sample_index is not None and sample_count is not None:
+        prefix_parts.append(f"sample {sample_index}/{sample_count}")
+    prefix_parts.append(f"@ {snapshot.get('updated_at') or '—'}")
+    prefix = " ".join(prefix_parts)
+
+    metric_parts: list[str] = []
+    for appliance_key in sorted(appliances):
+        entry = appliances[appliance_key]
+        if not isinstance(entry, dict):
+            continue
+        power = entry.get("power_w")
+        if power is None:
+            metric_parts.append(f"{appliance_key}=—")
+        else:
+            metric_parts.append(f"{appliance_key}={power}W")
+
+    if not metric_parts:
+        return f"{prefix} | no appliances"
+    return f"{prefix} | " + " ".join(metric_parts)
