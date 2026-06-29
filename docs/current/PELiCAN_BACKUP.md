@@ -160,7 +160,11 @@ git -C vulture-from-bundle log -1 --oneline
 |----------------|---------|
 | `git/` | Branch, commit, status, remotes, recent log, `vulture.bundle` |
 | `repository/` | Tracked source/config plus filtered untracked operational files |
-| `database/vulture.db` | Online SQLite backup with integrity result |
+| `database/vulture.db` | Primary Vulture SQLite backup with integrity result |
+| `database/<path>.db` | Additional long-term SQLite (Kestrel SMT, Finch, etc.) with per-DB integrity sidecars under `database/integrity/` |
+| `telemetry/history/` | JSONL telemetry history (Nest, Tuya, Raven metrics) |
+| `telemetry/snapshots/` | Latest probe/dashboard JSON snapshots |
+| `telemetry/config/` | Integration restore files (`devices.json`, Finch tokens/config) |
 | `secrets/.env` | Restricted copy (`0600`) — treat as secret |
 | `config/systemd-repo/` | Repo unit definitions (`deploy/systemd/`) |
 | `config/systemd-installed/` | Installed Aviary units from `/etc/systemd/system/` when present |
@@ -168,7 +172,36 @@ git -C vulture-from-bundle log -1 --oneline
 | `config/host/etc/fstab` | Host fstab when present |
 | `config/samba/` | Samba configs when present |
 | `docs/` | Recovery/manager/operations documentation discovered in repo |
-| `MANIFEST.txt` | Human-readable inventory captured at archive time |
+| `MANIFEST.txt` | Human-readable inventory including `telemetry_coverage` section |
+
+Long-term telemetry is **not** captured via the generic repository tree alone. Pelican copies it explicitly under `database/` and `telemetry/` with verification:
+
+- **SQLite:** online backup + `PRAGMA integrity_check` for every database (Vulture, `data/kestrel/kestrel.db`, Finch DBs, any other `data/**/*.db` except ephemeral `finch_pending_selection.db`).
+- **JSONL:** copied when present; non-empty sources must produce non-empty backups.
+- **Excluded:** probe debug HTML (`data/kestrel/debug/`), screenshots, `tuya-raw.json`, error sidecars, Canary/Pelican monitor status JSON, ephemeral pending-selection DB.
+
+---
+
+## Dry-run telemetry validation
+
+Inspect what Pelican will back up without writing a bundle:
+
+```bash
+cd /home/vinnieb58/projects/vulture
+python3 scripts/pelican_backup_verify.py
+```
+
+---
+
+## Telemetry coverage in monitor status
+
+`pelican-monitor` reads the latest archive companion `.manifest` and reports `details.telemetry_coverage` in `data/backup_monitor_status.json`:
+
+```bash
+python3 -m json.tool data/backup_monitor_status.json | jq '.backups.raven_recovery.details.telemetry_coverage'
+```
+
+A healthy bundle reports `covered: true` with counts for SQLite, JSONL, snapshots, and config files.
 
 ---
 
@@ -299,12 +332,13 @@ The service has **no** `network-online` dependency and **no** hard mount require
 
 - `scripts/pelican_backup.sh` — operator entry point
 - `scripts/pelican_backup.py` — orchestrator
-- `scripts/pelican/` — testable helpers (naming, retention, mount validation, SQLite backup, manifest)
+- `scripts/pelican_backup_verify.py` — dry-run telemetry source validation
+- `scripts/pelican/telemetry_data.py` — long-term data discovery, copy, and verification
 - `deploy/systemd/pelican-backup.service` — oneshot backup unit
 - `deploy/systemd/pelican-backup.timer` — daily timer
 - `scripts/install_pelican_timer.sh` — install/enable helper
 
-Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_systemd_timer.py`
+Tests: `tests/test_pelican_backup.py`, `tests/test_pelican_telemetry_data.py`, `tests/test_pelican_telemetry_coverage.py`, `tests/test_pelican_backup_verify.py`, `tests/test_pelican_systemd_timer.py`
 
 ---
 

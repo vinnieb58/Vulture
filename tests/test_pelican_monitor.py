@@ -123,7 +123,7 @@ class TestTimerNextRunParsing:
 
     def test_evaluate_timer_healthy_with_raven_realtime_and_monotonic_zero(self):
         """NextElapseUSecMonotonic=0 must not affect health when realtime is valid."""
-        raven_realtime = "Tue 2026-06-23 03:02:08 CDT"
+        raven_realtime = "Tue 2027-06-23 03:02:08 CDT"
 
         def runner(args, timeout):  # noqa: ARG001
             if args[0] == "systemctl" and "pelican-backup.timer" in args:
@@ -142,7 +142,7 @@ class TestTimerNextRunParsing:
 
         assert result["status"] == "ok"
         assert result["has_future_run"] is True
-        assert result["next_run"] == "2026-06-23T03:02:08-05:00"
+        assert result["next_run"] == "2027-06-23T03:02:08-05:00"
         assert not any(code == "TIMER_NO_FUTURE_RUN" for _, code, _ in result["issues"])
 
 

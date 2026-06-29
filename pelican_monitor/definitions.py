@@ -44,7 +44,7 @@ def registered_backup_definitions() -> list[BackupDefinition]:
     return [
         BackupDefinition(
             backup_id="raven_recovery",
-            display_name="Pelican backup",
+            display_name="Pelican backup (repo, DBs, telemetry/history)",
             enabled=True,
             checker=check_raven_recovery,
             target_path=config.RAVEN_RECOVERY_TARGET,
