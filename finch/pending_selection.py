@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS pending_selections (
     cached_results_json TEXT,
     page_offset INTEGER NOT NULL DEFAULT 0,
     page_size INTEGER NOT NULL DEFAULT 10,
-    total_count INTEGER
+    total_count INTEGER,
+    remaining_intents_json TEXT
 );
 """
 
@@ -107,6 +108,7 @@ class PendingSelection:
     total_count: int | None
     created_at: str
     expires_at: str
+    remaining_intents_json: str | None = None
 
     @property
     def results(self) -> list[PendingSearchResult]:
@@ -156,6 +158,9 @@ class PendingSelection:
             "has_more": self.has_more,
             "has_back": self.has_back,
             "total_count": self.total_count,
+            "remaining_intents": json.loads(self.remaining_intents_json)
+            if self.remaining_intents_json
+            else [],
             "created_at": self.created_at,
             "expires_at": self.expires_at,
         }
@@ -188,6 +193,8 @@ def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
         )
     if "total_count" not in columns:
         conn.execute("ALTER TABLE pending_selections ADD COLUMN total_count INTEGER")
+    if "remaining_intents_json" not in columns:
+        conn.execute("ALTER TABLE pending_selections ADD COLUMN remaining_intents_json TEXT")
 
 
 def init_pending_selection_db(db_path: Path | None = None) -> None:
@@ -238,6 +245,9 @@ def _row_to_pending(row: sqlite3.Row) -> PendingSelection:
         total_count=total_count,
         created_at=row["created_at"],
         expires_at=row["expires_at"],
+        remaining_intents_json=row["remaining_intents_json"]
+        if "remaining_intents_json" in row.keys()
+        else None,
     )
 
 
@@ -252,6 +262,7 @@ def save_pending_selection(
     page_offset: int = 0,
     page_size: int | None = None,
     total_count: int | None = None,
+    remaining_intents_json: str | None = None,
     db_path: Path | None = None,
     ttl_minutes: int | None = None,
 ) -> PendingSelection:
@@ -272,8 +283,9 @@ def save_pending_selection(
             INSERT INTO pending_selections (
                 chat_key, requested_item, normalized_name, search_query,
                 quantity, results_json, created_at, expires_at,
-                cached_results_json, page_offset, page_size, total_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cached_results_json, page_offset, page_size, total_count,
+                remaining_intents_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_key) DO UPDATE SET
                 requested_item=excluded.requested_item,
                 normalized_name=excluded.normalized_name,
@@ -285,7 +297,8 @@ def save_pending_selection(
                 cached_results_json=excluded.cached_results_json,
                 page_offset=excluded.page_offset,
                 page_size=excluded.page_size,
-                total_count=excluded.total_count
+                total_count=excluded.total_count,
+                remaining_intents_json=excluded.remaining_intents_json
             """,
             (
                 chat_key,
@@ -300,6 +313,7 @@ def save_pending_selection(
                 max(0, int(page_offset)),
                 resolved_page_size,
                 total_count,
+                remaining_intents_json,
             ),
         )
     return PendingSelection(
@@ -314,6 +328,7 @@ def save_pending_selection(
         total_count=total_count,
         created_at=created.isoformat(),
         expires_at=expires.isoformat(),
+        remaining_intents_json=remaining_intents_json,
     )
 
 
@@ -336,6 +351,7 @@ def update_pending_selection_page(
         page_offset=page_offset,
         page_size=pending.page_size,
         total_count=total_count if total_count is not None else pending.total_count,
+        remaining_intents_json=pending.remaining_intents_json,
         db_path=db_path,
         ttl_minutes=ttl_minutes,
     )

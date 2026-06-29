@@ -358,6 +358,12 @@ def create_app() -> FastAPI:
             force=body.force,
             source=body.source,
             client=client,
+            execute_add_fn=lambda attempt: _execute_single_cart_add(
+                attempt,
+                client,
+                action="cart_add_list",
+                source=body.source,
+            ),
         )
         if outcome.get("duplicate"):
             return outcome
