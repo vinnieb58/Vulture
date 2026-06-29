@@ -27,7 +27,7 @@ from host_commands import (
     systemctl_is_enabled,
     systemctl_unit_exists,
 )
-from storage_probe import StorageStatus, get_storage_status, status_display_class
+from storage_probe import StorageStatus, get_storage_status, status_display_class, status_display_label
 from subprocess_util import run_command
 
 HOST_ROOT = Path(os.environ.get("DASHBOARD_HOST_ROOT", "/host/root"))
@@ -65,6 +65,7 @@ __all__ = [
     "get_service_statuses",
     "get_storage_status",
     "status_display_class",
+    "status_display_label",
 ]
 
 

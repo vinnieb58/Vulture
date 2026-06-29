@@ -828,13 +828,43 @@ class TestNestCardComputation:
     def test_storage_card_warn_when_high_disk_usage(self):
         from app import _compute_storage_card
         from storage_probe import StorageStatus
+
         mounts = [
-            StorageStatus(name="Toshiba EXT", path="/mnt/storage/toshiba_ext", required=True,
-                          status="OK", percent_used=87.0, used="870G", size="1T", available="130G"),
+            StorageStatus(
+                name="Toshiba EXT",
+                path="/mnt/storage/toshiba_ext",
+                required=True,
+                status="OK",
+                percent_used=87.0,
+                used="870G",
+                size="1T",
+                available="130G",
+            ),
         ]
         card = _compute_storage_card(mounts)
         assert card["status"] == "WARN"
         assert "87%" in card["headline"] or "Toshiba" in card["headline"]
+
+    def test_storage_card_warn_when_toshiba_at_90_percent(self):
+        from app import _compute_storage_card
+        from storage_probe import StorageStatus
+
+        mounts = [
+            StorageStatus(
+                name="Toshiba EXT",
+                path="/mnt/storage/toshiba_ext",
+                required=True,
+                status="OK",
+                percent_used=90.0,
+                used="1.3T",
+                size="1.4T",
+                available="140G",
+            ),
+        ]
+        card = _compute_storage_card(mounts)
+        assert card["status"] == "WARN"
+        assert card["drives"][0]["status"] == "WARN"
+        assert card["drives"][0]["display_label"] == "High usage"
 
     def test_storage_card_shows_toshiba_pct_below_warn_threshold(self):
         """Toshiba usage must appear in the drive list even below the 80% WARN threshold."""

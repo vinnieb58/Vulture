@@ -43,11 +43,13 @@ def combine_status(*levels: str) -> OverallStatus:
     return "ok"
 
 
-def storage_volume_to_overall(status: StorageVolumeStatus) -> OverallStatus:
+def storage_volume_to_overall(status: StorageVolumeStatus, *, required: bool = True) -> OverallStatus:
     if status == "OK":
         return "ok"
     if status in ("STALE_MOUNT", "DF_TIMEOUT", "ERROR"):
         return "critical"
+    if not required and status in ("MISSING_DEVICE", "NOT_MOUNTED", "AUTOMOUNT_INACTIVE"):
+        return "warning"
     return "warning"
 
 

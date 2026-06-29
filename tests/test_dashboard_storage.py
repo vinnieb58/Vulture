@@ -13,7 +13,9 @@ from unittest.mock import patch
 import pytest
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+REPO_ROOT = DASHBOARD_DIR.parent
 sys.path.insert(0, str(DASHBOARD_DIR))
+sys.path.insert(0, str(REPO_ROOT))
 
 from storage_config import ExpectedDrive  # noqa: E402
 from storage_probe import (  # noqa: E402
@@ -21,7 +23,9 @@ from storage_probe import (  # noqa: E402
     get_storage_status,
     probe_expected_drive,
     status_display_class,
+    status_display_label,
 )
+from storage_config import DEFAULT_EXPECTED_DRIVES  # noqa: E402
 
 MOUNTINFO_ROOT = """\
 24 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
@@ -224,7 +228,7 @@ class TestStorageProbeScenarios:
             path="/mnt/storage/pelican_backup",
             expected_uuid="b6c0bc2c-5564-4615-bab6-2ff0ded11bbc",
             expected_fstype="ext4",
-            required=False,
+            required=True,
         )
         with _mountinfo_patch(MOUNTINFO_AUTOFS_PELICAN):
             with patch("storage_probe.run_command", side_effect=_mock_df):
@@ -387,7 +391,7 @@ class TestStorageProbeScenarios:
                         with patch.object(Path, "exists", return_value=False):
                             result = probe_expected_drive(drive, root_source="/dev/sda2")
         assert result.status == "PATH_MISSING"
-        assert status_display_class(result.status, required=False) == "bad"
+        assert status_display_class(result.status, required=False) == "warn"
 
     def test_ordinary_directory_not_mounted(self):
         drive = ExpectedDrive(
@@ -453,8 +457,11 @@ class TestStorageDisplayClass:
     def test_yellow_for_stale_automount_optional(self):
         assert status_display_class("STALE_AUTOMOUNT", required=False) == "warn"
 
-    def test_red_for_parent_root(self):
-        assert status_display_class("NOT_MOUNTED_PARENT_ROOT", required=False) == "bad"
+    def test_red_for_parent_root_optional(self):
+        assert status_display_class("NOT_MOUNTED_PARENT_ROOT", required=False) == "warn"
+
+    def test_red_for_parent_root_required(self):
+        assert status_display_class("NOT_MOUNTED_PARENT_ROOT", required=True) == "warn"
 
 
 MOUNTINFO_DOCKER_OVERLAY_ROOT = """\
@@ -547,3 +554,137 @@ class TestDashboardWarningFixes:
         assert result.warning is not None
         assert "90" in result.warning
         assert result.path == "/mnt/storage/toshiba_ext"
+
+
+class TestSharedStorageInventory:
+    def test_default_expected_drives_match_raven_inventory(self):
+        paths = {drive.path for drive in DEFAULT_EXPECTED_DRIVES}
+        assert "/mnt/storage/microsd" in paths
+        assert "/mnt/storage/toshiba_ext" in paths
+        assert "/mnt/storage/pelican_backup" in paths
+        assert "/mnt/storage/raven_nvme" in paths
+        assert "/mnt/storage/roost_spinning_0" in paths
+        assert "/mnt/storage/portable_beast" not in paths
+
+    def test_display_labels(self):
+        assert status_display_label("OK", required=True) == "Mounted"
+        assert status_display_label("OK", required=True, percent_used=90.0) == "High usage"
+        assert status_display_label("AUTOMOUNT_WAITING", required=False) == "Automount pending"
+        assert status_display_label("NOT_MOUNTED", required=False) == "Optional missing"
+        assert status_display_label("NOT_MOUNTED", required=True) == "Error"
+
+
+MOUNTINFO_RAVEN_LIVE = """\
+24 1 8:68 / / rw,relatime shared:1 - ext4 /dev/sde2 rw
+36 24 179:1 / /mnt/storage/microsd rw,relatime shared:2 - ext4 /dev/mmcblk0p1 rw
+37 24 8:17 / /mnt/storage/toshiba_ext rw,relatime shared:3 - ntfs3 /dev/sdb1 rw
+38 24 8:33 / /mnt/storage/pelican_backup rw,relatime shared:4 - ext4 /dev/sdc1 rw
+"""
+
+
+class TestRavenLiveStorageState:
+    """Validation scenarios using Raven mount output (Jun 2025)."""
+
+    def _raven_df_map(self) -> dict[str, str]:
+        return {
+            "/host/root": (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/sde2        29G   12G   15G  45% /host/root\n"
+            ),
+            "/mnt/storage/microsd": (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/mmcblk0p1  234G   80G  142G  36% /mnt/storage/microsd\n"
+            ),
+            "/mnt/storage/toshiba_ext": (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/sdb1       1.4T  1.3T  140G  90% /mnt/storage/toshiba_ext\n"
+            ),
+            "/mnt/storage/pelican_backup": (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/sdc1       2.0T  400G  1.5T  22% /mnt/storage/pelican_backup\n"
+            ),
+        }
+
+    def _raven_findmnt(self, args, **_kwargs):
+        if len(args) < 4 or args[0] != "findmnt":
+            return False, "unexpected command"
+        host_path = args[2]
+        mapping = {
+            "/": ("/dev/sde2", "ext4", None),
+            "/mnt/storage/microsd": (
+                "/dev/mmcblk0p1",
+                "ext4",
+                "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+            ),
+            "/mnt/storage/toshiba_ext": (
+                "/dev/sdb1",
+                "ntfs3",
+                "0846863B46862A10",
+            ),
+            "/mnt/storage/pelican_backup": (
+                "/dev/sdc1",
+                "ext4",
+                "b6c0bc2c-5564-4615-bab6-2ff0ded11bbc",
+            ),
+        }
+        if host_path not in mapping:
+            return False, ""
+        source, fstype, uuid = mapping[host_path]
+        if uuid:
+            return True, f"{source} {fstype} {uuid}"
+        return True, f"{source} {fstype}"
+
+    def test_raven_expected_drives_healthy_with_toshiba_high_usage(self):
+        from app import _compute_storage_card
+
+        def raven_df(args, **_kwargs):
+            path = _command_path(args)
+            outputs = self._raven_df_map()
+            output = outputs.get(path or "")
+            if output is None:
+                return False, "no such file or directory"
+            return True, output
+
+        with _mountinfo_patch(MOUNTINFO_RAVEN_LIVE):
+            with patch("storage_probe.run_command", side_effect=raven_df):
+                with patch("storage_probe.run_host_command", side_effect=self._raven_findmnt):
+                    with patch("storage_probe.systemctl_is_active", side_effect=_mock_systemctl):
+                        with patch("storage_probe._path_access_check", side_effect=_path_access_ok):
+                            with patch("storage_probe._lookup_uuid") as lookup_uuid:
+                                lookup_uuid.side_effect = lambda src: {
+                                    "/dev/mmcblk0p1": (
+                                        "ff481ad2-e9bd-4868-8c8c-6729a461e4b4",
+                                        None,
+                                    ),
+                                    "/dev/sdb1": ("0846863B46862A10", None),
+                                    "/dev/sdc1": (
+                                        "b6c0bc2c-5564-4615-bab6-2ff0ded11bbc",
+                                        None,
+                                    ),
+                                }.get(src, (None, None))
+                                with patch("storage_probe._lookup_label", return_value=None):
+                                    with patch.object(Path, "exists", return_value=True):
+                                        results = get_storage_status()
+        by_path = {row.path: row for row in results}
+        assert by_path["/mnt/storage/microsd"].status in ("OK", "OK_AUTOMOUNTED")
+        assert by_path["/mnt/storage/toshiba_ext"].status in ("OK", "OK_AUTOMOUNTED")
+        assert by_path["/mnt/storage/toshiba_ext"].percent_used == 90.0
+        assert by_path["/mnt/storage/toshiba_ext"].display_label == "High usage"
+        assert by_path["/mnt/storage/pelican_backup"].status in ("OK", "OK_AUTOMOUNTED")
+        optional = [r for r in results if r.path in ("/mnt/storage/raven_nvme", "/mnt/storage/roost_spinning_0")]
+        assert optional
+        for row in optional:
+            assert row.display_label in ("Optional missing", "Automount pending")
+            assert row.status in (
+                "NOT_MOUNTED",
+                "PATH_MISSING",
+                "AUTOMOUNT_WAITING",
+                "NOT_MOUNTED_PARENT_ROOT",
+            )
+
+        card = _compute_storage_card(results)
+        assert card["status"] == "WARN"
+        toshiba_lines = [d for d in card["drives"] if d["label"] == "Toshiba EXT"]
+        assert toshiba_lines
+        assert toshiba_lines[0]["status"] == "WARN"
+        assert toshiba_lines[0]["display_label"] == "High usage"

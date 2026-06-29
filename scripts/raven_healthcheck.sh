@@ -202,32 +202,55 @@ section_disk_storage() {
     fi
 }
 
-# Expected Roost / external storage paths. Missing optional drives are warnings only.
+# Expected Roost / external storage paths. Optional absent drives are warnings only.
 EXPECTED_STORAGE_PATHS=(
     "/mnt/storage/microsd"
     "/mnt/storage/toshiba_ext"
-    "/mnt/storage/portable_beast"
     "/mnt/storage/pelican_backup"
+    "/mnt/storage/raven_nvme"
+    "/mnt/storage/roost_spinning_0"
+)
+
+OPTIONAL_STORAGE_PATHS=(
     "/mnt/storage/raven_nvme"
     "/mnt/storage/roost_spinning_0"
 )
 
 section_expected_storage_mounts() {
     section "Expected storage mountpoints (optional drives may be unplugged)"
-    local path mounted
+    local path mounted is_optional
     for path in "${EXPECTED_STORAGE_PATHS[@]}"; do
+        is_optional=0
+        for optional in "${OPTIONAL_STORAGE_PATHS[@]}"; do
+            if [[ "$path" == "$optional" ]]; then
+                is_optional=1
+                break
+            fi
+        done
         if [[ ! -e "$path" ]]; then
-            echo "  $path — MISSING (path does not exist)"
-            record_warn "$path missing"
+            if [[ "$is_optional" -eq 1 ]]; then
+                echo "  $path — OPTIONAL_MISSING (path does not exist)"
+                record_warn "$path optional missing"
+            else
+                echo "  $path — MISSING (path does not exist)"
+                record_warn "$path missing"
+            fi
             continue
         fi
+        # Trigger automount before checking mount state.
+        ls -1 "$path" >/dev/null 2>&1 || true
         if mountpoint -q "$path" 2>/dev/null; then
-            mounted="$(findmnt -n -o SOURCE,FSTYPE "$path" 2>/dev/null || echo mounted)"
+            mounted="$(findmnt --mountpoint "$path" -n -o SOURCE,FSTYPE 2>/dev/null || echo mounted)"
             echo "  $path — OK ($mounted)"
             record_ok "$path mounted"
         else
-            echo "  $path — NOT_MOUNTED (path exists, drive may be unplugged)"
-            record_warn "$path not mounted"
+            if [[ "$is_optional" -eq 1 ]]; then
+                echo "  $path — OPTIONAL_MISSING (path exists, drive unplugged or automount idle)"
+                record_warn "$path optional not mounted"
+            else
+                echo "  $path — NOT_MOUNTED (path exists, drive may be unplugged)"
+                record_warn "$path not mounted"
+            fi
         fi
     done
 }
