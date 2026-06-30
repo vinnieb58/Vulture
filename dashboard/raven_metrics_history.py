@@ -2,7 +2,8 @@
 
 A background sampler in the dashboard container appends samples every 60 seconds.
 Page requests read the same JSONL file and compute live summaries without
-writing new samples. Retention defaults to 48 hours.
+writing new samples. The dashboard rolling file defaults to 48 hours; samples
+are also copied to an indefinite long-term archive under data/telemetry/.
 """
 
 from __future__ import annotations
@@ -15,6 +16,23 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from kestrel.telemetry_retention import (
+        append_jsonl_archive,
+        bootstrap_archive_from_dashboard,
+        raven_metrics_archive_path,
+        raven_metrics_archive_policy,
+        raven_metrics_dashboard_retention_hours,
+    )
+except ImportError:
+    from telemetry_retention import (  # type: ignore[no-redef]
+        append_jsonl_archive,
+        bootstrap_archive_from_dashboard,
+        raven_metrics_archive_path,
+        raven_metrics_archive_policy,
+        raven_metrics_dashboard_retention_hours,
+    )
 
 from glances_client import (
     GLANCES_UNAVAILABLE_LABEL,
@@ -45,7 +63,9 @@ HISTORY_PATH = Path(
         "/app/data/raven_metrics_history.jsonl",
     )
 )
-RETENTION_HOURS = int(os.environ.get("DASHBOARD_METRICS_RETENTION_HOURS", "48"))
+RETENTION_HOURS = raven_metrics_dashboard_retention_hours()
+DASHBOARD_RETENTION_HOURS = RETENTION_HOURS
+METRICS_ARCHIVE_PATH = raven_metrics_archive_path()
 MIN_SAMPLE_INTERVAL_SECONDS = int(
     os.environ.get("DASHBOARD_METRICS_SAMPLE_INTERVAL_SECONDS", "60")
 )
@@ -401,20 +421,35 @@ def append_sample(
     sample: MetricsSample,
     *,
     path: Path | None = None,
+    archive_path: Path | None = None,
     now: datetime | None = None,
 ) -> list[MetricsSample]:
-    """Append a sample when due, prune to retention window, persist atomically."""
+    """Append a sample when due, archive indefinitely, prune dashboard rolling file."""
     history_path = path or HISTORY_PATH
+    archive_file = archive_path or METRICS_ARCHIVE_PATH
+    policy = raven_metrics_archive_policy()
+
     with _history_io_lock:
-        current = prune_samples(read_history(history_path), now=now)
         ts_now = now or sample.timestamp
-        if _should_append_sample(current, ts_now):
+        current = prune_samples(read_history(history_path), now=ts_now)
+        should_append = _should_append_sample(current, ts_now)
+
+        if should_append:
+            bootstrap_archive_from_dashboard(archive_file, history_path, policy=policy)
+            if not append_jsonl_archive(
+                archive_file,
+                sample.to_json_line(),
+                record_timestamp=sample.timestamp.isoformat(),
+                policy=policy,
+            ):
+                logger.warning("Raven metrics long-term archive append failed")
             current.append(sample)
-            current.sort(key=lambda sample: sample.timestamp)
+            current.sort(key=lambda item: item.timestamp)
+
         try:
             history_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = history_path.with_suffix(history_path.suffix + ".tmp")
-            body = "\n".join(sample.to_json_line() for sample in current)
+            body = "\n".join(item.to_json_line() for item in current)
             if body:
                 body += "\n"
             tmp.write_text(body, encoding="utf-8")
