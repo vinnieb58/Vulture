@@ -669,15 +669,21 @@
       <div class="donut-unavailable">
         <p>{{ donut.unavailable_reason }}</p>
         <div class="donut-diag">
+          {% if donut.validation_failures %}
+          {% for failure in donut.validation_failures %}
+          <span>{{ failure }}</span>
+          {% endfor %}
+          {% else %}
           {% if donut.latest_smt_day %}
           <span>Latest SMT day with data: {{ donut.latest_smt_day }} ({{ donut.latest_smt_coverage_pct }}% coverage — need ≥ {{ 90 }}%)</span>
           {% else %}
           <span>No SMT day found with ≥ 90% coverage in the last 14 days.</span>
           {% endif %}
           {% if donut.latest_tuya_day %}
-          <span>Latest Tuya day with data: {{ donut.latest_tuya_day }} ({{ donut.latest_tuya_channel_coverage_pct }}% min-channel coverage — need ≥ {{ 80 }}%)</span>
+          <span>Latest Tuya day with data: {{ donut.latest_tuya_day }} ({{ donut.latest_tuya_channel_coverage_pct }}% min-channel coverage — need ≥ {{ 95 }}%)</span>
           {% else %}
-          <span>No Tuya day found with ≥ 80% per-channel coverage in the last 14 days.</span>
+          <span>No Tuya day found with ≥ 95% per-channel coverage in the last 14 days.</span>
+          {% endif %}
           {% endif %}
           {% if kestrel.last_refresh_success_at %}
           <span>Last SMT refresh: {{ kestrel.last_refresh_success_at }}</span>

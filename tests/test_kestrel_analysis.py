@@ -241,6 +241,32 @@ class TestIntegrateTuyaEnergy:
         # First record's gap to t2 is 600s > 300s → skipped → no contribution from t1
         assert kwh < 0.5  # significantly less than bridged would be
 
+    def test_none_power_w_not_treated_as_zero_energy(self):
+        t1 = NOW
+        t2 = NOW + timedelta(seconds=60)
+        t3 = NOW + timedelta(seconds=120)
+        records_without_middle = [_tuya_record(t1, ac_w=3600), _tuya_record(t3, ac_w=3600)]
+        records_with_none_middle = [
+            _tuya_record(t1, ac_w=3600),
+            FakeTuyaRecord(
+                timestamp=t2,
+                appliances={"ac_compressor": {"power_w": None}},
+            ),
+            _tuya_record(t3, ac_w=3600),
+        ]
+        window_end = t3 + timedelta(seconds=1)
+        kwh_without = integrate_tuya_energy(
+            records_without_middle, ("ac_compressor",),
+            window_start=t1, window_end=window_end,
+        )
+        kwh_with_none = integrate_tuya_energy(
+            records_with_none_middle, ("ac_compressor",),
+            window_start=t1, window_end=window_end,
+        )
+        # None record must be ignored entirely — same energy as if it were absent
+        assert kwh_with_none == kwh_without
+        assert kwh_without > 0.1
+
 
 # ---------------------------------------------------------------------------
 # 3. Common-window selection
@@ -1115,16 +1141,24 @@ def _make_complete_day_fixtures(
     now_ref: datetime,
     *,
     smt_intervals: int = 96,
-    tuya_per_minute: int = 1200,
+    tuya_per_minute: int = 1440,
     channel_power_w: dict | None = None,
+    tuya_start_offset_minutes: float = 0.0,
+    tuya_end_offset_minutes: float = 0.0,
+    tuya_gap_at_minute: int | None = None,
+    tuya_gap_minutes: int = 10,
 ):
     """
     Build SMT rows and Tuya records for the calendar day BEFORE now_ref
     (i.e. yesterday in America/Chicago).
 
     smt_intervals: number of 15-min intervals (96 = full day, ≥87 for 90% coverage)
-    tuya_per_minute: Tuya records evenly distributed in the day (1200 ≈ 83%)
+    tuya_per_minute: Tuya records evenly distributed in the day (1440 = 1/min = 100%)
     channel_power_w: per-channel watts; defaults to test values
+    tuya_start_offset_minutes: delay first Tuya sample after window start
+    tuya_end_offset_minutes: end Tuya sampling this many minutes before window end
+    tuya_gap_at_minute: if set, skip samples for this many minutes starting here
+    tuya_gap_minutes: length of the internal gap when tuya_gap_at_minute is set
     """
     from zoneinfo import ZoneInfo as _ZI
     tz = _ZI("America/Chicago")
@@ -1141,20 +1175,35 @@ def _make_complete_day_fixtures(
             "dishwasher":            80.0,
         }
 
-    # SMT rows: evenly distributed across the day
+    # SMT rows: evenly distributed across the day.
+    # 2.0 kWh × 96 intervals = 192 kWh synthetic day total — intentionally high
+    # so monitored-circuit energy stays below SMT for deterministic testing.
     smt = []
     day_seconds = (yesterday_end - yesterday_start).total_seconds()
     step = day_seconds / smt_intervals
     for i in range(smt_intervals):
         start = yesterday_start + timedelta(seconds=i * step)
         end   = start + timedelta(minutes=15)
-        smt.append(_smt_row(start.isoformat(), 0.75))
+        smt.append(_smt_row(start.isoformat(), 2.0))
 
-    # Tuya records: evenly distributed
+    # Tuya records: evenly distributed within optional edge offsets.
     tuya = []
-    step_t = day_seconds / tuya_per_minute
+    effective_start = yesterday_start + timedelta(minutes=tuya_start_offset_minutes)
+    effective_end = yesterday_end - timedelta(minutes=tuya_end_offset_minutes)
+    effective_seconds = max(1.0, (effective_end - effective_start).total_seconds())
+    step_t = effective_seconds / max(tuya_per_minute, 1)
+    gap_start = (
+        effective_start + timedelta(minutes=tuya_gap_at_minute)
+        if tuya_gap_at_minute is not None else None
+    )
+    gap_end = (
+        gap_start + timedelta(minutes=tuya_gap_minutes)
+        if gap_start is not None else None
+    )
     for i in range(tuya_per_minute):
-        ts = yesterday_start + timedelta(seconds=i * step_t)
+        ts = effective_start + timedelta(seconds=i * step_t)
+        if gap_start is not None and gap_start <= ts < gap_end:
+            continue
         tuya.append(FakeTuyaRecord(
             timestamp=ts,
             appliances={k: {"power_w": v} for k, v in channel_power_w.items()},
@@ -1172,12 +1221,13 @@ class TestComputeEnergyDonut:
     # A reference "now" at noon on a test day (yesterday will be fully elapsed).
     FROZEN_NOW = datetime(2026, 6, 17, 17, 0, tzinfo=timezone.utc)
 
-    def _valid_donut(self, channel_power_w=None, smt_intervals=96, tuya_per_minute=1200):
+    def _valid_donut(self, channel_power_w=None, smt_intervals=96, tuya_per_minute=1440, **kwargs):
         smt, tuya, _, _ = _make_complete_day_fixtures(
             self.FROZEN_NOW,
             smt_intervals=smt_intervals,
             tuya_per_minute=tuya_per_minute,
             channel_power_w=channel_power_w,
+            **kwargs,
         )
         return compute_energy_donut(smt, tuya, now=self.FROZEN_NOW)
 
@@ -1216,9 +1266,40 @@ class TestComputeEnergyDonut:
 
     # --- Test 5: partial Tuya coverage → no donut ---
     def test_partial_tuya_coverage_returns_unavailable(self):
-        # Only 600 Tuya records (600/1440 ≈ 42% < 80% threshold)
-        result = self._valid_donut(tuya_per_minute=600)
-        assert not result["available"], "Should be unavailable with low Tuya coverage"
+        # 1353 samples / 1440 expected ≈ 94.0% < 95% threshold
+        result = self._valid_donut(tuya_per_minute=1353)
+        assert not result["available"], "Should be unavailable with 94% Tuya coverage"
+        assert any("94.0%" in f for f in result.get("validation_failures", []))
+
+    def test_94_percent_tuya_coverage_rejected(self):
+        result = self._valid_donut(tuya_per_minute=1353)
+        assert not result["available"]
+        failures = result.get("validation_failures", [])
+        assert any("94.0%" in f and "95%" in f for f in failures)
+
+    def test_late_first_sample_rejected(self):
+        result = self._valid_donut(tuya_start_offset_minutes=20)
+        assert not result["available"]
+        failures = result.get("validation_failures", [])
+        assert any("first sample" in f.lower() for f in failures)
+
+    def test_early_last_sample_rejected(self):
+        result = self._valid_donut(tuya_end_offset_minutes=20)
+        assert not result["available"]
+        failures = result.get("validation_failures", [])
+        assert any("last sample" in f.lower() for f in failures)
+
+    def test_internal_gap_over_five_minutes_rejected(self):
+        result = self._valid_donut(tuya_gap_at_minute=720, tuya_gap_minutes=10)
+        assert not result["available"]
+        failures = result.get("validation_failures", [])
+        assert any("internal gap" in f.lower() for f in failures)
+
+    def test_valid_full_day_overlap_accepted(self):
+        result = self._valid_donut()
+        assert result["available"], f"Expected available full-day overlap, got: {result}"
+        assert result["smt_kwh"] == pytest.approx(192.0, abs=1.0)
+        assert "unmonitored" in {s["key"] for s in result["slices"]}
 
     # --- Test 6: None power_w not treated as coverage ---
     def test_none_power_not_counted_as_coverage(self):
@@ -1240,7 +1321,7 @@ class TestComputeEnergyDonut:
             for i in range(1200)
         ]
         result = compute_energy_donut(smt, null_tuya, now=self.FROZEN_NOW)
-        # ac_compressor has 0% channel coverage → below 80% threshold → unavailable
+        # ac_compressor has 0% channel coverage → below 95% threshold → unavailable
         assert not result["available"], (
             "None power_w must not count as coverage — should be unavailable"
         )
@@ -1281,7 +1362,8 @@ class TestComputeEnergyDonut:
         result = compute_energy_donut([], [], now=self.FROZEN_NOW)
         assert not result["available"]
         assert "unavailable_reason" in result
-        assert result["unavailable_reason"]
+        assert "insufficient complete overlap" in result["unavailable_reason"]
+        assert "validation_failures" in result
         assert "latest_smt_day" in result
         assert "latest_tuya_day" in result
 

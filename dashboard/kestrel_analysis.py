@@ -73,7 +73,9 @@ COVERAGE_MINIMUM_PCT: float = 50.0  # below this → "insufficient data"
 # Donut chart validity thresholds — both sources must meet these for a
 # meaningful percentage breakdown to be shown.
 DONUT_SMT_COVERAGE_THRESHOLD: float = 90.0   # % of calendar day covered by SMT
-DONUT_TUYA_CHANNEL_THRESHOLD: float = 80.0   # % each Tuya channel must cover
+DONUT_TUYA_CHANNEL_THRESHOLD: float = 95.0   # % each Tuya channel must cover
+DONUT_TUYA_EDGE_TOLERANCE_SECONDS: int = 15 * 60  # first/last sample within 15 min of window edge
+DONUT_TUYA_MAX_GAP_SECONDS: int = 5 * 60          # no internal gap > 5 min per channel
 
 # Donut slice colors — kept in sync with kestrel_energy_timeline.js
 DONUT_CHANNEL_COLORS: dict[str, str] = {
@@ -183,8 +185,15 @@ def integrate_tuya_energy(
     """
     MAX_GAP_SECONDS = 300  # 5 minutes — don't bridge longer gaps
 
+    def _has_valid_reading(record: Any) -> bool:
+        return any(
+            isinstance((entry := record.appliances.get(key)), dict)
+            and entry.get("power_w") is not None
+            for key in appliance_keys
+        )
+
     in_window = sorted(
-        (r for r in records if window_start <= r.timestamp < window_end),
+        (r for r in records if window_start <= r.timestamp < window_end and _has_valid_reading(r)),
         key=lambda r: r.timestamp,
     )
     if not in_window:
@@ -202,9 +211,10 @@ def integrate_tuya_energy(
             continue
 
         power_w = sum(
-            float(record.appliances.get(key, {}).get("power_w") or 0)
+            float(entry["power_w"])
             for key in appliance_keys
-            if isinstance(record.appliances.get(key), dict)
+            if isinstance((entry := record.appliances.get(key)), dict)
+            and entry.get("power_w") is not None
         )
         total_kwh += power_w * gap_seconds / 3_600_000  # W·s → kWh
 
@@ -259,6 +269,70 @@ def tuya_channel_coverage_pct(
         and r.appliances[appliance_key].get("power_w") is not None
     )
     return round(min(100.0, 100.0 * actual / expected), 1)
+
+
+def validate_tuya_donut_channels(
+    records: list[Any],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    channel_keys: tuple[str, ...] = TUYA_ALL_KEYS,
+    coverage_threshold: float = DONUT_TUYA_CHANNEL_THRESHOLD,
+    edge_tolerance_seconds: int = DONUT_TUYA_EDGE_TOLERANCE_SECONDS,
+    max_gap_seconds: int = DONUT_TUYA_MAX_GAP_SECONDS,
+) -> list[str]:
+    """
+    Return a list of validation failure messages for donut eligibility.
+
+    Empty list means all per-channel coverage, edge-alignment, and gap checks
+    passed for the shared local-day window.
+    """
+    failures: list[str] = []
+
+    for key in channel_keys:
+        label = TUYA_CHANNEL_LABELS[key]
+        cov = tuya_channel_coverage_pct(
+            records, key, window_start=window_start, window_end=window_end
+        )
+        if cov < coverage_threshold:
+            failures.append(
+                f"{label}: {cov:.1f}% coverage (need ≥ {coverage_threshold:.0f}%)"
+            )
+
+        channel_samples = sorted(
+            r.timestamp
+            for r in records
+            if window_start <= r.timestamp < window_end
+            and isinstance(r.appliances.get(key), dict)
+            and r.appliances[key].get("power_w") is not None
+        )
+        if not channel_samples:
+            failures.append(f"{label}: no samples in window")
+            continue
+
+        first_offset = (channel_samples[0] - window_start).total_seconds()
+        if first_offset > edge_tolerance_seconds:
+            failures.append(
+                f"{label}: first sample {first_offset / 60:.0f} min after window start "
+                f"(need ≤ {edge_tolerance_seconds // 60} min)"
+            )
+
+        last_offset = (window_end - channel_samples[-1]).total_seconds()
+        if last_offset > edge_tolerance_seconds:
+            failures.append(
+                f"{label}: last sample {last_offset / 60:.0f} min before window end "
+                f"(need ≤ {edge_tolerance_seconds // 60} min)"
+            )
+
+        for i in range(len(channel_samples) - 1):
+            gap = (channel_samples[i + 1] - channel_samples[i]).total_seconds()
+            if gap > max_gap_seconds:
+                failures.append(
+                    f"{label}: internal gap of {gap / 60:.0f} min (max {max_gap_seconds // 60} min)"
+                )
+                break
+
+    return failures
 
 
 def build_tuya_kw_series(
@@ -1428,9 +1502,13 @@ def compute_energy_donut(
 
     Validity requirements (all must pass):
     - Day must be fully elapsed in local time (yesterday or earlier).
+    - SMT and Tuya share the exact same local-day window.
     - SMT coverage ≥ smt_threshold % of the calendar day.
     - Every configured Tuya channel must have ≥ tuya_channel_threshold %
       coverage based on non-None power_w readings (not just record presence).
+    - First Tuya sample for each channel within 15 min of window start.
+    - Last Tuya sample for each channel within 15 min of window end.
+    - No internal Tuya gap > 5 min for any required channel.
     - The monitored-circuit total must not exceed the SMT total (which would
       indicate a calibration issue and produce a negative remainder).
 
@@ -1446,6 +1524,7 @@ def compute_energy_donut(
     best_smt_cov: float = 0.0
     best_tuya_day: str | None = None
     best_tuya_min_cov: float = 0.0  # worst-channel coverage across best tuya day
+    latest_validation_failures: list[str] = []
 
     for days_ago in range(1, 15):  # 1 = yesterday; today never complete during use
         local_day = today_local - timedelta(days=days_ago)
@@ -1484,10 +1563,25 @@ def compute_energy_donut(
             best_tuya_min_cov = min_channel_cov
             best_tuya_day = local_day.isoformat()
 
-        # --- Validity gates ---
+        # --- Collect all validity failures for this day ---
+        failures: list[str] = []
         if smt_cov < smt_threshold:
-            continue
-        if min_channel_cov < tuya_channel_threshold:
+            failures.append(
+                f"SMT: {smt_cov:.1f}% coverage (need ≥ {smt_threshold:.0f}%)"
+            )
+        failures.extend(
+            validate_tuya_donut_channels(
+                day_tuya,
+                window_start=day_start_utc,
+                window_end=day_end_utc,
+                coverage_threshold=tuya_channel_threshold,
+            )
+        )
+
+        if days_ago == 1:
+            latest_validation_failures = failures
+
+        if failures:
             continue
 
         smt_kwh_val = smt_total_kwh(
@@ -1496,7 +1590,7 @@ def compute_energy_donut(
         if smt_kwh_val <= 0:
             continue
 
-        # --- Per-channel energy integration ---
+        # --- Per-channel energy integration (only after all validity checks pass) ---
         channel_kwh: dict[str, float] = {}
         for key in TUYA_ALL_KEYS:
             kwh = integrate_tuya_energy(
@@ -1551,9 +1645,9 @@ def compute_energy_donut(
     return {
         "available": False,
         "unavailable_reason": (
-            "Breakdown unavailable — SMT and Tuya do not yet cover "
-            "the same complete period."
+            "Breakdown unavailable — insufficient complete overlap between SMT and Tuya"
         ),
+        "validation_failures": latest_validation_failures,
         "latest_smt_day": best_smt_day,
         "latest_smt_coverage_pct": round(best_smt_cov, 1),
         "latest_tuya_day": best_tuya_day,

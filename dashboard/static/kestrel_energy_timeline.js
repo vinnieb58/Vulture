@@ -684,18 +684,24 @@
       var diag = document.createElement("div");
       diag.className = "donut-diag";
       var items = [];
-      if (data.latest_smt_day) {
-        items.push(
-          "Latest SMT day: " + data.latest_smt_day +
-          " (" + (data.latest_smt_coverage_pct || 0).toFixed(0) + "% coverage, need \u226590%)"
-        );
-      }
-      if (data.latest_tuya_day) {
-        items.push(
-          "Latest Tuya day: " + data.latest_tuya_day +
-          " (" + (data.latest_tuya_channel_coverage_pct || 0).toFixed(0) +
-          "% min-channel coverage, need \u226580%)"
-        );
+      if (data.validation_failures && data.validation_failures.length) {
+        data.validation_failures.forEach(function (txt) {
+          items.push(txt);
+        });
+      } else {
+        if (data.latest_smt_day) {
+          items.push(
+            "Latest SMT day: " + data.latest_smt_day +
+            " (" + (data.latest_smt_coverage_pct || 0).toFixed(0) + "% coverage, need \u226590%)"
+          );
+        }
+        if (data.latest_tuya_day) {
+          items.push(
+            "Latest Tuya day: " + data.latest_tuya_day +
+            " (" + (data.latest_tuya_channel_coverage_pct || 0).toFixed(0) +
+            "% min-channel coverage, need \u226595%)"
+          );
+        }
       }
       items.forEach(function (txt) {
         var p = document.createElement("p");
