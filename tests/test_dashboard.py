@@ -479,30 +479,48 @@ class TestDashboardDockerfile:
     DOCKERFILE_PATH = DASHBOARD_DIR / "Dockerfile"
     APP_PATH = DASHBOARD_DIR / "app.py"
 
-    def test_dockerfile_copies_all_app_local_imports(self):
-        app_source = self.APP_PATH.read_text(encoding="utf-8")
+    @staticmethod
+    def _local_imports(source: str) -> set[str]:
+        imported = set(re.findall(r"^from (\w+) import", source, re.MULTILINE))
+        imported |= set(re.findall(r"^import (\w+)", source, re.MULTILINE))
+        return imported
+
+    @classmethod
+    def _dashboard_module_names(cls) -> set[str]:
+        return {path.stem for path in DASHBOARD_DIR.glob("*.py")}
+
+    @classmethod
+    def _transitive_dashboard_imports(cls, entry: str = "app") -> set[str]:
+        local_modules = cls._dashboard_module_names()
+        seen: set[str] = set()
+        queue = [entry]
+        while queue:
+            module = queue.pop()
+            if module in seen:
+                continue
+            seen.add(module)
+            module_path = DASHBOARD_DIR / f"{module}.py"
+            if not module_path.is_file():
+                continue
+            for dep in cls._local_imports(module_path.read_text(encoding="utf-8")):
+                if dep in local_modules and dep not in seen:
+                    queue.append(dep)
+        seen.discard(entry)
+        return seen
+
+    def test_dockerfile_copies_all_dashboard_modules(self):
         dockerfile = self.DOCKERFILE_PATH.read_text(encoding="utf-8")
+        assert "COPY dashboard/*.py ./" in dockerfile, (
+            "dashboard/Dockerfile must COPY dashboard/*.py so new modules are not omitted"
+        )
+        assert "COPY kestrel/nest_history.py ./nest_history.py" in dockerfile
 
-        local_modules = {
-            path.stem
-            for path in DASHBOARD_DIR.glob("*.py")
-            if path.name != "app.py"
-        }
-        imported = set(re.findall(r"^from (\w+) import", app_source, re.MULTILINE))
-        imported |= set(re.findall(r"^import (\w+)", app_source, re.MULTILINE))
-        required = sorted(local_modules & imported)
-
-        copied = set(re.findall(r"COPY ([^\n]+) \./", dockerfile))
-        copied_modules = {
-            name.removesuffix(".py").split("/")[-1]
-            for block in copied
-            for name in block.split()
-            if name.endswith(".py")
-        }
-
-        missing = [name for name in required if name not in copied_modules]
+    def test_dockerfile_covers_transitive_local_imports(self):
+        required = sorted(self._transitive_dashboard_imports())
+        packaged = self._dashboard_module_names() | {"nest_history"}
+        missing = [name for name in required if name not in packaged]
         assert not missing, (
-            "dashboard/Dockerfile must COPY every local module imported by app.py; "
+            "dashboard container packaging must include every local module reachable from app.py; "
             f"missing: {missing}"
         )
 class TestHostCommands:

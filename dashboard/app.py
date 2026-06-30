@@ -44,6 +44,7 @@ from kestrel_formatting import format_kestrel_card_display, format_kestrel_detai
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
 from nest_hvac_formatting import format_hvac_section
+from tuya_power_formatting import format_tuya_power_section
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_health_details import RAVEN_HEALTH_REFRESH_SECONDS, build_raven_health_details
 from raven_metrics_history import (
@@ -427,11 +428,25 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
             },
             "correlation": {"available": False, "rows": []},
         }
+    try:
+        tuya_power = format_tuya_power_section()
+    except Exception:
+        tuya_power = {
+            "state": "error",
+            "status": "Error",
+            "style": "fail",
+            "headline": "Could not load Tuya appliance power data",
+            "warning": "Could not load Tuya appliance power data",
+            "appliances": [],
+            "charts": {"power_1h": [], "power_24h": []},
+            "has_history": False,
+        }
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
         "hvac": hvac,
+        "tuya_power": tuya_power,
         **display,
     }
 

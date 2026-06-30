@@ -200,6 +200,20 @@ def format_hvac_section(
                 ),
             }
         )
+    overlap_start = diagnostics.get("overlap_start")
+    overlap_end = diagnostics.get("overlap_end")
+    if overlap_start and overlap_end and (
+        overlap_start != window_start or overlap_end != window_end
+    ):
+        correlation_diagnostics.append(
+            {
+                "label": "Overlap bounds",
+                "value": (
+                    f"{format_timestamp_friendly(str(overlap_start), tz_name=tz_name, now=ts_now)}"
+                    f" – {format_timestamp_friendly(str(overlap_end), tz_name=tz_name, now=ts_now)}"
+                ),
+            }
+        )
     smt_latest = diagnostics.get("smt_latest")
     if smt_latest:
         correlation_diagnostics.append(
@@ -228,8 +242,32 @@ def format_hvac_section(
     if interval_count is not None:
         correlation_diagnostics.append(
             {
-                "label": "SMT interval rows",
+                "label": "SMT interval rows (total)",
                 "value": f"{int(interval_count):,}",
+            }
+        )
+    smt_rows_in_window = diagnostics.get("smt_rows_in_window")
+    if smt_rows_in_window is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "SMT rows in window",
+                "value": f"{int(smt_rows_in_window):,}",
+            }
+        )
+    nest_samples_in_window = diagnostics.get("nest_samples_in_window")
+    if nest_samples_in_window is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "Nest samples in window",
+                "value": f"{int(nest_samples_in_window):,}",
+            }
+        )
+    matched_correlation_rows = diagnostics.get("matched_correlation_rows")
+    if matched_correlation_rows is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "Matched correlation rows",
+                "value": f"{int(matched_correlation_rows):,}",
             }
         )
 

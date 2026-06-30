@@ -25,20 +25,29 @@ PREFERRED_ZONES = ("downstairs", "upstairs")
 
 STATUS_AVAILABLE = "available"
 STATUS_NO_SMT_DB = "no_smt_db"
-STATUS_EMPTY_SMT = "empty_smt"
-STATUS_NO_NEST_HISTORY = "no_nest_history"
+STATUS_NO_SMT_DATA = "no_smt_data"
+STATUS_EMPTY_SMT = "no_smt_data"
+STATUS_NO_NEST_HISTORY = "no_nest_data"
+STATUS_NO_NEST_DATA = "no_nest_data"
 STATUS_NO_OVERLAP = "no_overlap"
 STATUS_NO_ROWS_IN_WINDOW = "no_rows_in_window"
+STATUS_NO_MATCHED_ROWS = "no_matched_rows"
 
 WARNING_NO_SMT_DB = "Smart Meter Texas database not found"
-WARNING_EMPTY_SMT = "No Smart Meter Texas interval data"
-WARNING_NO_NEST_HISTORY = "No Nest HVAC history for correlation"
+WARNING_NO_SMT_DATA = "No Smart Meter Texas interval data"
+WARNING_EMPTY_SMT = WARNING_NO_SMT_DATA
+WARNING_NO_NEST_DATA = "No Nest HVAC history for correlation"
+WARNING_NO_NEST_HISTORY = WARNING_NO_NEST_DATA
 WARNING_NO_OVERLAP = (
     "Smart Meter Texas data exists, but there is no overlap with Nest HVAC history yet."
 )
 WARNING_NO_ROWS_IN_WINDOW = (
     "Smart Meter Texas and Nest HVAC history overlap, but no interval rows fall in the "
     "selected correlation window."
+)
+WARNING_NO_MATCHED_ROWS = (
+    "Smart Meter Texas intervals were found in the selected correlation window, but none "
+    "could be matched to Nest HVAC samples."
 )
 
 
@@ -74,18 +83,40 @@ def _ranges_overlap(
     return left_start < right_end and right_start < left_end
 
 
-def _effective_energy_window(
+def _compute_correlation_window(
+    *,
+    smt_start: datetime,
+    smt_end: datetime,
+    nest_start: datetime,
+    nest_end: datetime,
+    hours: int,
+) -> tuple[datetime, datetime, datetime, datetime] | None:
+    """Return global overlap bounds and the selected correlation window."""
+    if not _ranges_overlap(smt_start, smt_end, nest_start, nest_end):
+        return None
+
+    global_overlap_start = max(smt_start, nest_start)
+    global_overlap_end = min(smt_end, nest_end)
+    window_end = global_overlap_end
+    window_start = max(
+        window_end - timedelta(hours=hours),
+        smt_start,
+        nest_start,
+    )
+    return global_overlap_start, global_overlap_end, window_start, window_end
+
+
+def _count_nest_samples_in_window(
+    records: list[NestHistoryRecord],
     *,
     window_start: datetime,
     window_end: datetime,
-    smt_start: datetime,
-    smt_end: datetime,
-) -> tuple[datetime, datetime] | None:
-    start = max(window_start, smt_start)
-    end = min(window_end, smt_end)
-    if start >= end:
-        return None
-    return start, end
+) -> int:
+    return sum(
+        1
+        for record in records
+        if window_start <= record.timestamp < window_end
+    )
 
 
 def _build_diagnostics(
@@ -97,15 +128,25 @@ def _build_diagnostics(
     nest_start: datetime | None = None,
     nest_end: datetime | None = None,
     interval_count: int | None = None,
+    overlap_start: datetime | None = None,
+    overlap_end: datetime | None = None,
+    smt_rows_in_window: int | None = None,
+    nest_samples_in_window: int | None = None,
+    matched_correlation_rows: int | None = None,
 ) -> dict[str, Any]:
     return {
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
+        "overlap_start": overlap_start.isoformat() if overlap_start else None,
+        "overlap_end": overlap_end.isoformat() if overlap_end else None,
         "smt_earliest": smt_start,
         "smt_latest": smt_end,
         "nest_earliest": nest_start.isoformat() if nest_start else None,
         "nest_latest": nest_end.isoformat() if nest_end else None,
         "interval_count": interval_count,
+        "smt_rows_in_window": smt_rows_in_window,
+        "nest_samples_in_window": nest_samples_in_window,
+        "matched_correlation_rows": matched_correlation_rows,
     }
 
 
@@ -212,23 +253,55 @@ def get_energy_hvac_correlation(
     tz_name: str = KESTREL_TIMEZONE,
 ) -> dict[str, Any]:
     """Build Energy + HVAC correlation rows for the dashboard."""
-    ts_now = now or datetime.now(timezone.utc)
-    window_start = ts_now - timedelta(hours=hours)
-    window_end = ts_now
-
     smt_start_raw, smt_end_raw = get_range_bounds()
     interval_count = get_interval_count()
     nest_records = read_history(history_path or NEST_HISTORY_PATH)
     nest_start, nest_end = _nest_history_bounds(nest_records)
 
+    smt_start = _parse_iso(smt_start_raw) if smt_start_raw else None
+    smt_end = _parse_iso(smt_end_raw) if smt_end_raw else None
+
+    window_bounds: tuple[datetime, datetime] | None = None
+    overlap_start: datetime | None = None
+    overlap_end: datetime | None = None
+    if (
+        smt_start is not None
+        and smt_end is not None
+        and nest_start is not None
+        and nest_end is not None
+    ):
+        computed = _compute_correlation_window(
+            smt_start=smt_start,
+            smt_end=smt_end,
+            nest_start=nest_start,
+            nest_end=nest_end,
+            hours=hours,
+        )
+        if computed is not None:
+            overlap_start, overlap_end, window_start, window_end = computed
+            if window_start < window_end:
+                window_bounds = window_start, window_end
+            elif overlap_start < overlap_end:
+                window_bounds = None
+            else:
+                overlap_start = overlap_end
+
+    if window_bounds is None:
+        placeholder_start = overlap_start or (now or datetime.now(timezone.utc))
+        placeholder_end = overlap_end or placeholder_start
+    else:
+        placeholder_start, placeholder_end = window_bounds
+
     diagnostics = _build_diagnostics(
-        window_start=window_start,
-        window_end=window_end,
+        window_start=placeholder_start,
+        window_end=placeholder_end,
         smt_start=smt_start_raw,
         smt_end=smt_end_raw,
         nest_start=nest_start,
         nest_end=nest_end,
         interval_count=interval_count,
+        overlap_start=overlap_start,
+        overlap_end=overlap_end,
     )
 
     if not energy_db_exists():
@@ -241,19 +314,18 @@ def get_energy_hvac_correlation(
 
     if not smt_start_raw or not smt_end_raw or not interval_count:
         return _unavailable_result(
-            status=STATUS_EMPTY_SMT,
-            warning=WARNING_EMPTY_SMT,
+            status=STATUS_NO_SMT_DATA,
+            warning=WARNING_NO_SMT_DATA,
             hours=hours,
             diagnostics=diagnostics,
         )
 
-    smt_start = _parse_iso(smt_start_raw)
-    smt_end = _parse_iso(smt_end_raw)
+    assert smt_start is not None and smt_end is not None
 
     if not nest_records or nest_start is None or nest_end is None:
         return _unavailable_result(
-            status=STATUS_NO_NEST_HISTORY,
-            warning=WARNING_NO_NEST_HISTORY,
+            status=STATUS_NO_NEST_DATA,
+            warning=WARNING_NO_NEST_DATA,
             hours=hours,
             diagnostics=diagnostics,
         )
@@ -266,13 +338,18 @@ def get_energy_hvac_correlation(
             diagnostics=diagnostics,
         )
 
-    effective_bounds = _effective_energy_window(
-        window_start=window_start,
-        window_end=window_end,
-        smt_start=smt_start,
-        smt_end=smt_end,
-    )
-    if effective_bounds is None:
+    if window_bounds is None:
+        diagnostics = _build_diagnostics(
+            window_start=placeholder_start,
+            window_end=placeholder_end,
+            smt_start=smt_start_raw,
+            smt_end=smt_end_raw,
+            nest_start=nest_start,
+            nest_end=nest_end,
+            interval_count=interval_count,
+            overlap_start=overlap_start,
+            overlap_end=overlap_end,
+        )
         return _unavailable_result(
             status=STATUS_NO_ROWS_IN_WINDOW,
             warning=WARNING_NO_ROWS_IN_WINDOW,
@@ -280,11 +357,30 @@ def get_energy_hvac_correlation(
             diagnostics=diagnostics,
         )
 
-    effective_start, effective_end = effective_bounds
+    window_start, window_end = window_bounds
     energy_rows = fetch_interval_rows(
-        start_ts=effective_start.isoformat(),
-        end_ts=effective_end.isoformat(),
+        start_ts=window_start.isoformat(),
+        end_ts=window_end.isoformat(),
     )
+    nest_samples_in_window = _count_nest_samples_in_window(
+        nest_records,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    diagnostics = _build_diagnostics(
+        window_start=window_start,
+        window_end=window_end,
+        smt_start=smt_start_raw,
+        smt_end=smt_end_raw,
+        nest_start=nest_start,
+        nest_end=nest_end,
+        interval_count=interval_count,
+        overlap_start=overlap_start,
+        overlap_end=overlap_end,
+        smt_rows_in_window=len(energy_rows),
+        nest_samples_in_window=nest_samples_in_window,
+    )
+
     if not energy_rows:
         return _unavailable_result(
             status=STATUS_NO_ROWS_IN_WINDOW,
@@ -294,6 +390,28 @@ def get_energy_hvac_correlation(
         )
 
     rows = correlate_energy_intervals(energy_rows, nest_records, tz_name=tz_name)
+    matched_rows = sum(1 for row in rows if row.get("nest_sample_at"))
+    diagnostics = _build_diagnostics(
+        window_start=window_start,
+        window_end=window_end,
+        smt_start=smt_start_raw,
+        smt_end=smt_end_raw,
+        nest_start=nest_start,
+        nest_end=nest_end,
+        interval_count=interval_count,
+        overlap_start=overlap_start,
+        overlap_end=overlap_end,
+        smt_rows_in_window=len(energy_rows),
+        nest_samples_in_window=nest_samples_in_window,
+        matched_correlation_rows=matched_rows,
+    )
+    if matched_rows == 0:
+        return _unavailable_result(
+            status=STATUS_NO_MATCHED_ROWS,
+            warning=WARNING_NO_MATCHED_ROWS,
+            hours=hours,
+            diagnostics=diagnostics,
+        )
     return {
         "available": True,
         "status": STATUS_AVAILABLE,
@@ -304,6 +422,89 @@ def get_energy_hvac_correlation(
         "diagnostics": diagnostics,
         "estimate_note": (
             "HVAC actions reflect the latest Nest poll within each 15-minute "
-            f"interval ({hours}h window)."
+            f"interval (latest overlapping {hours}h window)."
         ),
     }
+
+
+def diagnose_energy_hvac_correlation(
+    *,
+    history_path: Path | None = None,
+    hours: int = DEFAULT_CORRELATION_HOURS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a diagnostic snapshot for local troubleshooting."""
+    result = get_energy_hvac_correlation(
+        history_path=history_path,
+        hours=hours,
+        now=now,
+    )
+    diagnostics = result.get("diagnostics") or {}
+    return {
+        "status": result.get("status"),
+        "available": result.get("available"),
+        "warning": result.get("warning"),
+        "nest_earliest": diagnostics.get("nest_earliest"),
+        "nest_latest": diagnostics.get("nest_latest"),
+        "smt_earliest": diagnostics.get("smt_earliest"),
+        "smt_latest": diagnostics.get("smt_latest"),
+        "overlap_start": diagnostics.get("overlap_start"),
+        "overlap_end": diagnostics.get("overlap_end"),
+        "window_start": diagnostics.get("window_start"),
+        "window_end": diagnostics.get("window_end"),
+        "smt_rows_in_window": diagnostics.get("smt_rows_in_window"),
+        "nest_samples_in_window": diagnostics.get("nest_samples_in_window"),
+        "matched_correlation_rows": diagnostics.get("matched_correlation_rows"),
+        "correlation_rows": len(result.get("rows") or []),
+    }
+
+
+def _print_correlation_diagnostics(payload: dict[str, Any]) -> None:
+    fields = (
+        ("status", "Status"),
+        ("available", "Available"),
+        ("warning", "Warning"),
+        ("nest_earliest", "Nest history earliest"),
+        ("nest_latest", "Nest history latest"),
+        ("smt_earliest", "SMT earliest"),
+        ("smt_latest", "SMT latest"),
+        ("overlap_start", "Overlap start"),
+        ("overlap_end", "Overlap end"),
+        ("window_start", "Correlation window start"),
+        ("window_end", "Correlation window end"),
+        ("smt_rows_in_window", "SMT rows in window"),
+        ("nest_samples_in_window", "Nest samples in window"),
+        ("matched_correlation_rows", "Matched correlation rows"),
+        ("correlation_rows", "Correlation rows returned"),
+    )
+    for key, label in fields:
+        value = payload.get(key)
+        if value is not None:
+            print(f"{label}: {value}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Print Nest/SMT energy correlation diagnostics.",
+    )
+    parser.add_argument(
+        "--history-path",
+        type=Path,
+        default=None,
+        help="Path to Nest history JSONL (defaults to NEST_HISTORY_PATH).",
+    )
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=DEFAULT_CORRELATION_HOURS,
+        help="Correlation window length in hours.",
+    )
+    args = parser.parse_args()
+    _print_correlation_diagnostics(
+        diagnose_energy_hvac_correlation(
+            history_path=args.history_path,
+            hours=args.hours,
+        )
+    )
