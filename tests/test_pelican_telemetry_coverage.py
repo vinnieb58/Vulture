@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pelican_monitor.telemetry_coverage  # noqa: E402 — regression: must import from repo root
 from pelican_monitor.telemetry_coverage import (  # noqa: E402
     evaluate_latest_archive_telemetry,
     evaluate_manifest_telemetry_coverage,
@@ -38,6 +39,21 @@ telemetry_snapshots:
 telemetry_config:
   - /repo/devices.json
 """
+
+
+class TestTelemetryCoverageImport:
+    """Regression: pelican_monitor.telemetry_coverage must import cleanly from repo root."""
+
+    def test_module_importable(self) -> None:
+        # The import at the top of this file already exercises this path.  This
+        # test makes the regression explicit so pytest names it in the report.
+        assert pelican_monitor.telemetry_coverage is not None
+
+    def test_function_callable(self) -> None:
+        # Verify the imported function from scripts.pelican.telemetry_data is
+        # accessible via the module's public surface.
+        result = pelican_monitor.telemetry_coverage.evaluate_manifest_telemetry_coverage("")
+        assert result is not None
 
 
 class TestTelemetryCoverageParsing:

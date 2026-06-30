@@ -105,6 +105,82 @@ class TestParsers:
         assert count == 2
         assert "nginx.service" in names
 
+    # --- regression: bullet-prefixed lines from newer systemctl --failed output ---
+
+    def test_parse_systemctl_failed_bullet_prefix(self):
+        text = (
+            "  UNIT                      LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "● pelican-monitor.service   loaded failed failed Pelican backup monitor\n"
+            "\n"
+            "1 loaded units listed.\n"
+        )
+        count, names = parse_systemctl_failed(text)
+        assert "pelican-monitor.service" in names
+        assert count >= 1
+
+    def test_parse_systemctl_failed_no_bullet(self):
+        text = (
+            "  UNIT                      LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "  pelican-monitor.service   loaded failed failed Pelican backup monitor\n"
+            "\n"
+            "1 loaded units listed.\n"
+        )
+        count, names = parse_systemctl_failed(text)
+        assert "pelican-monitor.service" in names
+        assert count >= 1
+
+    def test_parse_systemctl_failed_multiple_units_mixed(self):
+        text = (
+            "  UNIT                  LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "● nginx.service         loaded failed failed A high performance web server\n"
+            "  sshd.service          loaded failed failed OpenSSH server daemon\n"
+            "\n"
+            "2 loaded units listed.\n"
+        )
+        count, names = parse_systemctl_failed(text)
+        assert "nginx.service" in names
+        assert "sshd.service" in names
+        assert count == 2
+
+    def test_parse_systemctl_failed_headers_summaries_ignored(self):
+        text = (
+            "  UNIT  LOAD  ACTIVE  SUB  DESCRIPTION\n"
+            "\n"
+            "0 loaded units listed.\n"
+        )
+        count, names = parse_systemctl_failed(text)
+        assert count == 0
+        assert names == []
+
+    def test_parse_systemctl_failed_empty(self):
+        assert parse_systemctl_failed("") == (0, [])
+        assert parse_systemctl_failed("   \n\n  ") == (0, [])
+
+    def test_parse_systemctl_failed_malformed_line_ignored(self):
+        text = (
+            "  UNIT  LOAD  ACTIVE  SUB  DESCRIPTION\n"
+            "  not-a-unit   loaded failed failed something\n"
+            "● also-not-a-unit  loaded failed failed other\n"
+            "\n"
+            "0 loaded units listed.\n"
+        )
+        count, names = parse_systemctl_failed(text)
+        assert names == []
+
+    def test_parse_systemctl_failed_return_structure(self):
+        text = (
+            "  UNIT                    LOAD   ACTIVE SUB    DESCRIPTION\n"
+            "● pelican-monitor.service loaded failed failed Pelican backup monitor\n"
+            "\n"
+            "1 loaded units listed.\n"
+        )
+        result = parse_systemctl_failed(text)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        count, names = result
+        assert isinstance(count, int)
+        assert isinstance(names, list)
+
     def test_parse_docker_ps_lines(self):
         containers = parse_docker_ps_lines(SAMPLE_DOCKER_PS)
         assert containers[1]["name"] == "vulture-dashboard"
