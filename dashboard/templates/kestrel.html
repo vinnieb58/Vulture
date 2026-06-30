@@ -23,6 +23,8 @@
       --fail-border:  #6b1515;
       --unknown:      #8b949e;
       --unknown-border: #2d3a4f;
+      --orange:       #f0883e;
+      --red:          #da3633;
 
       --nav-h:        64px;
       --card-radius:  14px;
@@ -65,60 +67,143 @@
       margin: 0 auto;
     }
 
-    .summary-banner {
+    /* ---- Story / summary ---- */
+    .story-card {
       background: var(--surface);
-      border: 1px solid var(--border);
+      border: 1px solid var(--ok-border);
       border-radius: var(--card-radius);
       padding: 1rem 1.1rem;
       margin-bottom: 0.9rem;
     }
 
-    .summary-banner.ok { border-color: var(--ok-border); }
-    .summary-banner.unknown { border-color: var(--unknown-border); }
-    .summary-banner.fail { border-color: var(--fail-border); }
-
-    .summary-header {
+    .story-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 0.5rem;
       margin-bottom: 0.55rem;
+      flex-wrap: wrap;
     }
 
-    .summary-title {
-      font-size: 1.05rem;
+    .story-title { font-size: 1.05rem; font-weight: 700; }
+    .story-window { font-size: 0.8rem; color: var(--muted); }
+
+    .story-findings {
+      list-style: none;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .story-findings li {
+      font-size: 0.92rem;
+      color: var(--text);
+      padding-left: 1.1em;
+      position: relative;
+    }
+
+    .story-findings li::before {
+      content: "·";
+      position: absolute;
+      left: 0;
+      color: var(--accent);
       font-weight: 700;
     }
 
-    .status-badge {
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      padding: 0.2rem 0.55rem;
-      border-radius: 999px;
-      border: 1px solid var(--border);
+    .story-empty {
+      font-size: 0.88rem;
       color: var(--muted);
     }
 
-    .status-badge.ok { color: var(--ok); border-color: var(--ok-border); }
-    .status-badge.warn { color: var(--warn); border-color: var(--warn-border); }
-    .status-badge.unknown { color: var(--unknown); border-color: var(--unknown-border); }
-    .status-badge.fail { color: var(--fail); border-color: var(--fail-border); }
+    /* ---- Status row ---- */
+    .status-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.9rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem 1.4rem;
+      align-items: center;
+    }
 
-    .summary-headline {
+    .status-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
+      min-width: 90px;
+    }
+
+    .status-item-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .status-item-value {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    /* ---- Cards grid ---- */
+    .cards {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.9rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1rem 1.05rem 0.95rem;
+    }
+
+    .card.full-width { grid-column: 1 / -1; }
+
+    @media (min-width: 600px) {
+      .cards { grid-template-columns: 1fr 1fr; }
+    }
+
+    .card-title {
       font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 0.55rem;
+    }
+
+    .card-subtitle {
+      font-size: 0.8rem;
       color: var(--muted);
       margin-bottom: 0.65rem;
     }
 
+    /* ---- Agreement card ---- */
+    .agreement-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1rem 1.05rem;
+      margin-bottom: 0.9rem;
+    }
+
+    .agreement-note {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin: 0.55rem 0 0;
+      font-style: italic;
+    }
+
+    /* ---- Summary grid ---- */
     .summary-grid {
       display: grid;
       grid-template-columns: 1fr;
       gap: 0.35rem;
     }
 
-    @media (min-width: 600px) {
+    @media (min-width: 500px) {
       .summary-grid { grid-template-columns: 1fr 1fr; }
     }
 
@@ -136,36 +221,11 @@
       text-align: right;
     }
 
-    .cards {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 0.9rem;
-    }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--card-radius);
-      padding: 1rem 1.05rem 0.95rem;
-    }
-
-    .card.full-width { grid-column: 1 / -1; }
-
-    .card-title {
-      font-size: 0.95rem;
-      font-weight: 700;
-      margin-bottom: 0.55rem;
-    }
-
-    .card-subtitle {
-      font-size: 0.8rem;
-      color: var(--muted);
-      margin-bottom: 0.65rem;
-    }
-
+    /* ---- Charts ---- */
     .chart-host {
       width: 100%;
       overflow-x: auto;
+      position: relative;
     }
 
     .chart-host svg {
@@ -197,16 +257,49 @@
       text-align: center;
     }
 
+    /* ---- Peaks table ---- */
     .peak-list {
-      margin: 0;
-      padding-left: 1.15rem;
       display: flex;
       flex-direction: column;
-      gap: 0.35rem;
-      color: var(--text);
-      font-size: 0.88rem;
+      gap: 0;
     }
 
+    .peak-item {
+      border-bottom: 1px solid var(--border);
+      padding: 0.5rem 0;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.4rem 0.75rem;
+      align-items: start;
+    }
+
+    .peak-item:last-child { border-bottom: none; }
+
+    .peak-rank {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--accent);
+      min-width: 1.2em;
+    }
+
+    .peak-details { display: flex; flex-direction: column; gap: 0.15rem; }
+
+    .peak-time {
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+
+    .peak-numbers {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .peak-explanation {
+      font-size: 0.78rem;
+      color: var(--accent);
+    }
+
+    /* ---- Data table ---- */
     .data-table {
       width: 100%;
       border-collapse: collapse;
@@ -241,6 +334,63 @@
       padding-top: 0;
     }
 
+    /* ---- Breakdowns ---- */
+    .breakdown-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+      margin-top: 0.25rem;
+    }
+
+    .breakdown-row {
+      display: grid;
+      grid-template-columns: 110px 1fr auto;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+    }
+
+    .breakdown-label { color: var(--muted); }
+
+    .breakdown-bar-track {
+      background: var(--surface-2);
+      border-radius: 4px;
+      height: 8px;
+      overflow: hidden;
+    }
+
+    .breakdown-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      min-width: 2px;
+    }
+
+    .breakdown-value {
+      color: var(--text);
+      font-weight: 500;
+      white-space: nowrap;
+      min-width: 5em;
+      text-align: right;
+    }
+
+    /* ---- Status badges ---- */
+    .status-badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .status-badge.ok { color: var(--ok); border-color: var(--ok-border); }
+    .status-badge.warn { color: var(--warn); border-color: var(--warn-border); }
+    .status-badge.unknown { color: var(--unknown); border-color: var(--unknown-border); }
+    .status-badge.fail { color: var(--fail); border-color: var(--fail-border); }
+
+    /* ---- Misc ---- */
     .section-warning {
       color: var(--warn);
       font-size: 0.84rem;
@@ -253,12 +403,46 @@
       margin-top: 0.55rem;
     }
 
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .estimate-tag {
+      font-size: 0.7rem;
+      color: var(--muted);
+      font-style: italic;
+    }
+
     .back-link {
       display: inline-block;
       margin-bottom: 0.75rem;
       color: var(--accent);
       text-decoration: none;
       font-size: 0.85rem;
+    }
+
+    details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 0.4rem 0;
+      list-style: none;
+      user-select: none;
+    }
+
+    details summary::before {
+      content: "▶ ";
+      font-size: 0.7rem;
+    }
+
+    details[open] summary::before { content: "▼ "; }
+
+    details > *:not(summary) {
+      margin-top: 0.6rem;
     }
 
     .bottom-nav {
@@ -320,359 +504,643 @@
   <main class="content">
     <a href="/" class="back-link">← Back to Home</a>
 
-    <div class="summary-banner {{ kestrel.style }}">
-      <div class="summary-header">
-        <span class="summary-title">Kestrel Energy</span>
-        <span class="status-badge {{ kestrel.style }}">{{ kestrel.status }}</span>
+    {# ------------------------------------------------------------------ #}
+    {# 1. Today's Energy Story                                             #}
+    {# ------------------------------------------------------------------ #}
+    {% set energy = kestrel.energy %}
+    {% set window = energy.window %}
+    <div class="story-card">
+      <div class="story-header">
+        <span class="story-title">Today's Energy Story</span>
+        <span class="story-window">{{ window.label }}</span>
       </div>
-      <div class="summary-headline">{{ kestrel.headline }}</div>
-      <div class="summary-grid">
-        {% if kestrel.range %}
-        <div class="summary-item">
-          <span>Range</span>
-          <strong>{{ kestrel.range }}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.total_kwh %}
-        <div class="summary-item">
-          <span>Total kWh</span>
-          <strong>{{ kestrel.total_kwh }}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.avg_daily_7 and kestrel.avg_daily_7.value %}
-        <div class="summary-item">
-          <span>{{ kestrel.avg_daily_7.label }}</span>
-          <strong>{{ kestrel.avg_daily_7.value }} kWh</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.avg_daily_30 and kestrel.avg_daily_30.value %}
-        <div class="summary-item">
-          <span>{{ kestrel.avg_daily_30.label }}</span>
-          <strong>{{ kestrel.avg_daily_30.value }} kWh</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.peak_interval_7 %}
-        <div class="summary-item">
-          <span>Peak interval (7 days)</span>
-          <strong>{{ kestrel.peak_interval_7 }}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.missing_interval_count is not none %}
-        <div class="summary-item">
-          <span>Missing intervals</span>
-          <strong>{{ kestrel.missing_interval_count }}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.generated_at %}
-        <div class="summary-item">
-          <span>Last updated</span>
-          <strong>{{ kestrel.generated_at }}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.last_refresh_success_at %}
-        <div class="summary-item">
-          <span>Last live refresh</span>
-          <strong>{{ kestrel.last_refresh_success_at }}{% if kestrel.last_refresh_source %} ({{ kestrel.last_refresh_source }}){% endif %}</strong>
-        </div>
-        {% endif %}
-        {% if kestrel.last_refresh_status and kestrel.last_refresh_status not in ('ok',) %}
-        <div class="summary-item">
-          <span>Refresh status</span>
-          <strong>{{ kestrel.last_refresh_status }}</strong>
-        </div>
-        {% endif %}
-      </div>
-      {% if kestrel.warning %}
-      <div class="summary-headline" style="margin-top:0.75rem;color:var(--warn);">{{ kestrel.warning }}</div>
+      {% if energy.story %}
+      <ul class="story-findings">
+        {% for finding in energy.story %}
+        <li>{{ finding }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="story-empty">Not enough overlapping data yet to generate findings. Check data quality below.</p>
       {% endif %}
     </div>
 
+    {# ------------------------------------------------------------------ #}
+    {# 2. Current Status                                                   #}
+    {# ------------------------------------------------------------------ #}
+    {% set tuya = kestrel.tuya_power %}
+    {% set hvac = kestrel.hvac %}
+
+    <div class="status-row">
+      {# Tuya whole-home proxy (sum of 4 CTs) — latest snapshot #}
+      {% set compressor_entry = tuya.appliances | selectattr("key", "equalto", "ac_compressor") | first | default(none) %}
+      {% set furnace_entry    = tuya.appliances | selectattr("key", "equalto", "furnace_air_handler") | first | default(none) %}
+
+      {# Tuya total measured current power #}
+      {% set total_w = 0 %}
+      {% for a in tuya.appliances %}{% if a.power_w is not none %}{% set total_w = total_w + a.power_w %}{% endif %}{% endfor %}
+      <div class="status-item">
+        <span class="status-item-label">Tuya measured</span>
+        <span class="status-item-value" style="color:var(--orange)">
+          {% if total_w > 0 %}{{ "%.1f"|format(total_w / 1000) }} kW{% else %}—{% endif %}
+        </span>
+      </div>
+
+      {# Compressor power #}
+      <div class="status-item">
+        <span class="status-item-label">Compressor</span>
+        <span class="status-item-value" style="color:var(--red)">
+          {% if compressor_entry and compressor_entry.power_w is not none %}
+            {{ "%.0f"|format(compressor_entry.power_w) }} W
+          {% else %}—{% endif %}
+        </span>
+      </div>
+
+      {# Derived non-HVAC load #}
+      {% set hvac_w = 0 %}
+      {% if compressor_entry and compressor_entry.power_w is not none %}{% set hvac_w = hvac_w + compressor_entry.power_w %}{% endif %}
+      {% if furnace_entry and furnace_entry.power_w is not none %}{% set hvac_w = hvac_w + furnace_entry.power_w %}{% endif %}
+      {% set non_hvac_w = total_w - hvac_w %}
+      <div class="status-item">
+        <span class="status-item-label">Non-HVAC</span>
+        <span class="status-item-value">
+          {% if total_w > 0 %}{{ "%.0f"|format([non_hvac_w, 0] | max) }} W{% else %}—{% endif %}
+        </span>
+      </div>
+
+      {# Nest state #}
+      <div class="status-item">
+        <span class="status-item-label">Nest cooling</span>
+        <span class="status-item-value" style="color:{% if hvac.collection.style == 'ok' %}var(--accent){% else %}var(--muted){% endif %}">
+          {{ hvac.collection.status }}
+        </span>
+      </div>
+
+      {# SMT freshness #}
+      <div class="status-item">
+        <span class="status-item-label">SMT latest</span>
+        <span class="status-item-value">
+          {% if kestrel.generated_at %}{{ kestrel.generated_at }}{% else %}—{% endif %}
+        </span>
+      </div>
+
+      {# Sample times #}
+      <div class="status-item">
+        <span class="status-item-label">Tuya age</span>
+        <span class="status-item-value {% if tuya.state == 'stale' %}fail{% elif tuya.state == 'online' %}ok{% endif %}">
+          {% if tuya.updated_age %}{{ tuya.updated_age }}{% else %}—{% endif %}
+        </span>
+      </div>
+      <div class="status-item">
+        <span class="status-item-label">Nest age</span>
+        <span class="status-item-value">
+          {% if hvac.latest_sample_at %}{{ hvac.latest_sample_at }}{% else %}—{% endif %}
+        </span>
+      </div>
+    </div>
+
+    {# ------------------------------------------------------------------ #}
+    {# 3. Source Agreement                                                 #}
+    {# ------------------------------------------------------------------ #}
+    {% set agreement = energy.agreement %}
+    <div class="agreement-card">
+      <div class="section-header">
+        <span class="card-title" style="margin-bottom:0">Do SMT and Tuya agree?</span>
+        {% if agreement.available %}
+        <span class="status-badge warn">Partial</span>
+        {% else %}
+        <span class="status-badge unknown">Not comparable</span>
+        {% endif %}
+      </div>
+      <div class="summary-grid">
+        <div class="summary-item">
+          <span>Comparison window</span>
+          <strong>{{ window.label }}</strong>
+        </div>
+        {% if agreement.smt_kwh is not none %}
+        <div class="summary-item">
+          <span>SMT total (utility reference)</span>
+          <strong>{{ "%.2f"|format(agreement.smt_kwh) }} kWh</strong>
+        </div>
+        {% endif %}
+        {% if agreement.tuya_kwh is not none %}
+        <div class="summary-item">
+          <span>Tuya measured loads <span class="estimate-tag">(est.)</span></span>
+          <strong>{{ "%.2f"|format(agreement.tuya_kwh) }} kWh</strong>
+        </div>
+        {% endif %}
+        {% if agreement.tuya_hvac_kwh is not none %}
+        <div class="summary-item">
+          <span>Tuya HVAC load <span class="estimate-tag">(est.)</span></span>
+          <strong>{{ "%.2f"|format(agreement.tuya_hvac_kwh) }} kWh</strong>
+        </div>
+        {% endif %}
+        {% if agreement.tuya_fraction_pct is not none %}
+        <div class="summary-item">
+          <span>Tuya as % of SMT</span>
+          <strong>{{ "%.1f"|format(agreement.tuya_fraction_pct) }}%</strong>
+        </div>
+        {% endif %}
+        {% if agreement.smt_coverage_pct is not none %}
+        <div class="summary-item">
+          <span>SMT coverage</span>
+          <strong>{{ agreement.smt_coverage_pct }}%</strong>
+        </div>
+        {% endif %}
+        {% if agreement.tuya_coverage_pct is not none %}
+        <div class="summary-item">
+          <span>Tuya coverage</span>
+          <strong>{{ agreement.tuya_coverage_pct }}%</strong>
+        </div>
+        {% endif %}
+      </div>
+      <p class="agreement-note">{{ agreement.note }}</p>
+    </div>
+
     <div class="cards">
+
+      {# ---------------------------------------------------------------- #}
+      {# 4. Combined Energy + HVAC Timeline                               #}
+      {# ---------------------------------------------------------------- #}
       <div class="card full-width">
-        <div class="card-title">Daily usage — last 30 days</div>
+        <div class="section-header">
+          <span class="card-title" style="margin-bottom:0">Energy + HVAC Timeline</span>
+          <span class="story-window">{{ window.label }}</span>
+        </div>
+        <div class="card-subtitle">
+          Blue bars: SMT average kW (utility) &nbsp;·&nbsp;
+          Orange line: Tuya measured load &nbsp;·&nbsp;
+          Red line: Compressor &nbsp;·&nbsp;
+          Blue shading: Nest cooling period
+        </div>
+        {% if not window.has_smt and not window.has_tuya %}
+        <div class="chart-empty">No data for the selected window. Check data sources below.</div>
+        {% else %}
+        <div class="chart-host" id="chart-energy-timeline"></div>
+        {% endif %}
+        <script type="application/json" id="chart-data-energy-timeline">{{ energy.timeline | tojson }}</script>
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# 5. Peak Analysis                                                  #}
+      {# ---------------------------------------------------------------- #}
+      <div class="card full-width">
+        <div class="card-title">Top Demand Peaks</div>
+        {% if energy.peaks %}
+        <div class="peak-list">
+          {% for peak in energy.peaks %}
+          <div class="peak-item">
+            <span class="peak-rank">#{{ loop.index }}</span>
+            <div class="peak-details">
+              <span class="peak-time">
+                {{ peak.timestamp | tojson | replace('"','') | truncate(16, False, '') }}
+                {# format in JS is nicer, but we show ISO fallback here #}
+                — {{ "%.2f"|format(peak.total_kw) }} kW
+              </span>
+              <span class="peak-numbers">
+                {% if peak.hvac_kw is not none %}HVAC {{ "%.2f"|format(peak.hvac_kw) }} kW · {% endif %}
+                {% if peak.compressor_kw is not none %}Compressor {{ "%.2f"|format(peak.compressor_kw) }} kW · {% endif %}
+                {% if peak.non_hvac_kw is not none %}Other {{ "%.2f"|format(peak.non_hvac_kw) }} kW · {% endif %}
+                {% if peak.nest_action %}Nest: {{ peak.nest_action }}{% endif %}
+              </span>
+              <span class="peak-explanation">{{ peak.explanation }}</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="section-note">
+          Peaks from {% if energy.peaks[0].source == 'smt_interval' %}SMT 15-minute intervals{% else %}Tuya instantaneous readings{% endif %}.
+          Nearby samples within 30 minutes are grouped into one event.
+        </div>
+        {% else %}
+        <div class="chart-empty">No peak data available for the selected window.</div>
+        {% endif %}
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# 6. HVAC Performance                                               #}
+      {# ---------------------------------------------------------------- #}
+      {% set hvac_stats = energy.hvac_stats %}
+      <div class="card full-width">
+        <div class="section-header">
+          <span class="card-title" style="margin-bottom:0">HVAC Performance</span>
+          <span class="status-badge {{ hvac.collection.style }}">{{ hvac.collection.status }}</span>
+        </div>
+        {% if hvac.warning %}
+        <div class="section-warning">{{ hvac.warning }}</div>
+        {% endif %}
+        {% if hvac_stats.available %}
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span>Total cooling runtime</span>
+            <strong>
+              {% set h = (hvac_stats.total_runtime_minutes // 60) | int %}
+              {% set m = (hvac_stats.total_runtime_minutes % 60) | int %}
+              {% if h > 0 %}{{ h }}h {% endif %}{{ m }}m
+            </strong>
+          </div>
+          <div class="summary-item">
+            <span>Cooling cycles</span>
+            <strong>{{ hvac_stats.cycle_count }}</strong>
+          </div>
+          {% if hvac_stats.avg_cycle_minutes is not none %}
+          <div class="summary-item">
+            <span>Average cycle length</span>
+            <strong>{{ "%.0f"|format(hvac_stats.avg_cycle_minutes) }} min</strong>
+          </div>
+          {% endif %}
+          {% if hvac_stats.longest_cycle_minutes is not none %}
+          <div class="summary-item">
+            <span>Longest cycle</span>
+            <strong>{{ "%.0f"|format(hvac_stats.longest_cycle_minutes) }} min</strong>
+          </div>
+          {% endif %}
+          {% if hvac_stats.avg_compressor_kw is not none %}
+          <div class="summary-item">
+            <span>Avg compressor power</span>
+            <strong>{{ "%.2f"|format(hvac_stats.avg_compressor_kw) }} kW</strong>
+          </div>
+          {% endif %}
+          {% if hvac_stats.hvac_energy_kwh is not none %}
+          <div class="summary-item">
+            <span>HVAC energy <span class="estimate-tag">(est.)</span></span>
+            <strong>{{ "%.2f"|format(hvac_stats.hvac_energy_kwh) }} kWh</strong>
+          </div>
+          {% endif %}
+          {% if hvac_stats.short_cycle_count is not none %}
+          <div class="summary-item">
+            <span>Short cycles (&lt;{{ hvac_stats.short_cycle_threshold_minutes }}m)</span>
+            <strong>{{ hvac_stats.short_cycle_count }}</strong>
+          </div>
+          {% endif %}
+          {% if hvac_stats.long_cycle_count is not none %}
+          <div class="summary-item">
+            <span>Long cycles (&gt;{{ hvac_stats.long_cycle_threshold_minutes }}m)</span>
+            <strong>{{ hvac_stats.long_cycle_count }}</strong>
+          </div>
+          {% endif %}
+        </div>
+        {% elif hvac.collection.missing %}
+        <div class="chart-empty">No Nest HVAC history yet. Samples appear after the poll timer runs.</div>
+        {% else %}
+        <div class="card-subtitle">No cooling cycles detected in the selected window.</div>
+        {% endif %}
+        {# Always show Nest zone runtime table when data is available #}
+        {% if hvac.primary_summary and hvac.primary_summary.rows %}
+        <div style="margin-top:0.75rem;">
+          <div class="card-subtitle">{{ hvac.primary_summary.title }}</div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Zone</th>
+                <th class="num">Cooling</th>
+                <th class="num">Heating</th>
+                <th class="num">Idle</th>
+                <th class="num">% Cooling</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in hvac.primary_summary.rows %}
+              <tr>
+                <td>{{ row.zone }}</td>
+                <td class="num">{{ row.cooling }}</td>
+                <td class="num">{{ row.heating }}</td>
+                <td class="num">{{ row.idle }}</td>
+                <td class="num">{{ row.percent_cooling }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% if hvac.primary_summary.estimate_note %}
+          <div class="section-note">{{ hvac.primary_summary.estimate_note }}</div>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# 7. Energy Breakdown                                               #}
+      {# ---------------------------------------------------------------- #}
+      {% set bd = energy.breakdown %}
+      <div class="card full-width">
+        <div class="card-title">Energy Breakdown</div>
+        <div class="card-subtitle">{{ window.label }}</div>
+        {% if bd.has_smt or bd.has_tuya %}
+        {% set smt_total = bd.smt_kwh | default(0) %}
+        {% set hvac_kwh  = bd.hvac_kwh | default(0) %}
+        {% set non_hvac  = bd.non_hvac_measured_kwh | default(0) %}
+        {% set unattr    = bd.unattributed_kwh | default(0) %}
+        <div class="breakdown-bars">
+          {% if bd.has_smt %}
+          <div class="breakdown-row">
+            <span class="breakdown-label">SMT total</span>
+            <div class="breakdown-bar-track">
+              <div class="breakdown-bar-fill" style="width:100%;background:var(--accent);opacity:0.6;"></div>
+            </div>
+            <span class="breakdown-value">{{ "%.2f"|format(smt_total) }} kWh</span>
+          </div>
+          {% endif %}
+          {% if bd.has_tuya and hvac_kwh > 0 %}
+          <div class="breakdown-row">
+            <span class="breakdown-label">HVAC <span class="estimate-tag">(est.)</span></span>
+            <div class="breakdown-bar-track">
+              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * hvac_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--orange);"></div>
+            </div>
+            <span class="breakdown-value">
+              {{ "%.2f"|format(hvac_kwh) }} kWh
+              {% if bd.hvac_pct_of_smt is not none %}<small style="color:var(--muted)">({{ "%.0f"|format(bd.hvac_pct_of_smt) }}%)</small>{% endif %}
+            </span>
+          </div>
+          {% endif %}
+          {% if bd.has_tuya and non_hvac > 0 %}
+          <div class="breakdown-row">
+            <span class="breakdown-label">Dryer + Dishwasher <span class="estimate-tag">(est.)</span></span>
+            <div class="breakdown-bar-track">
+              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * non_hvac / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:#d29922;opacity:0.8;"></div>
+            </div>
+            <span class="breakdown-value">{{ "%.2f"|format(non_hvac) }} kWh</span>
+          </div>
+          {% endif %}
+          {% if bd.has_smt and bd.has_tuya and unattr is not none %}
+          <div class="breakdown-row">
+            <span class="breakdown-label">Other (unmetered)</span>
+            <div class="breakdown-bar-track">
+              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * [unattr, 0] | max / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.5;"></div>
+            </div>
+            <span class="breakdown-value">{{ "%.2f"|format([unattr, 0] | max) }} kWh</span>
+          </div>
+          {% endif %}
+        </div>
+        <div class="section-note">
+          HVAC and appliance values are estimates from Tuya CT clamps.
+          SMT is the utility billing reference.
+          Tuya does not measure whole-home consumption; "unmetered" includes lighting, small appliances, etc.
+        </div>
+        {% else %}
+        <div class="chart-empty">Energy breakdown requires at least one data source.</div>
+        {% endif %}
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# 8. Historical Trends (7-day)                                     #}
+      {# ---------------------------------------------------------------- #}
+      <div class="card full-width">
+        <div class="card-title">7-Day Trends</div>
+        <div class="card-subtitle">Blue: SMT · Orange: HVAC · "?" = inadequate coverage</div>
+        <div class="chart-host" id="chart-daily-trends"></div>
+        <script type="application/json" id="chart-data-daily-trends">{{ energy.trends | tojson }}</script>
+        {% if energy.trends %}
+        <div style="margin-top:0.65rem;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Day</th>
+                <th class="num">SMT kWh</th>
+                <th class="num">HVAC kWh</th>
+                <th class="num">Cooling</th>
+                <th class="num">Peak kW</th>
+                <th class="num">SMT cov.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for day in energy.trends %}
+              <tr>
+                <td>{{ day.date_label }}{% if day.is_today %} <small style="color:var(--accent)">(today)</small>{% endif %}</td>
+                <td class="num">{% if day.smt_kwh is not none %}{{ "%.1f"|format(day.smt_kwh) }}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+                <td class="num">{% if day.hvac_kwh is not none %}{{ "%.1f"|format(day.hvac_kwh) }} <span class="estimate-tag">est.</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+                <td class="num">{% if day.cooling_minutes is not none %}{{ day.cooling_minutes | int }}m{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+                <td class="num">{% if day.peak_kw is not none %}{{ "%.1f"|format(day.peak_kw) }}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+                <td class="num">{{ day.smt_coverage_pct }}%</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="chart-empty">No trend data available.</div>
+        {% endif %}
+      </div>
+
+      {# ---------------------------------------------------------------- #}
+      {# SMT historical charts (retained from previous design)            #}
+      {# ---------------------------------------------------------------- #}
+      <div class="card full-width">
+        <div class="card-title">Daily usage — last 30 days (SMT)</div>
         <div class="chart-host" id="chart-daily-30"></div>
         <script type="application/json" id="chart-data-daily-30">{{ kestrel.charts.daily_30 | tojson }}</script>
       </div>
 
-      <div class="card full-width">
-        <div class="card-title">Daily usage — full imported range</div>
-        <div class="card-subtitle">Long ranges may be grouped by week for readability.</div>
-        <div class="chart-host" id="chart-daily-full"></div>
-        <script type="application/json" id="chart-data-daily-full">{{ kestrel.charts.daily_full | tojson }}</script>
-      </div>
-
-      <div class="card full-width">
-        <div class="card-title">Average usage by hour of day — last 30 days</div>
-        <div class="chart-host" id="chart-hourly-30"></div>
-        <script type="application/json" id="chart-data-hourly-30">{{ kestrel.charts.hourly_30 | tojson }}</script>
-      </div>
-
-      <div class="card full-width">
-        <div class="card-title">Top 10 peak 15-minute intervals — last 30 days</div>
-        <div class="chart-host" id="chart-peaks-30"></div>
-        <script type="application/json" id="chart-data-peaks-30">{{ kestrel.charts.top_intervals_30 | tojson }}</script>
-      </div>
-
       {% if kestrel.show_monthly %}
       <div class="card full-width">
-        <div class="card-title">Monthly totals</div>
+        <div class="card-title">Monthly totals (SMT)</div>
         <div class="chart-host" id="chart-monthly"></div>
         <script type="application/json" id="chart-data-monthly">{{ kestrel.charts.monthly_totals | tojson }}</script>
       </div>
       {% endif %}
 
-      {% set hvac = kestrel.hvac %}
+      {# ---------------------------------------------------------------- #}
+      {# 9. Data Quality and Diagnostics                                  #}
+      {# ---------------------------------------------------------------- #}
       <div class="card full-width">
-        <div class="summary-header" style="margin-bottom:0.65rem;">
-          <span class="card-title" style="margin-bottom:0;">Nest Collection</span>
-          <span class="status-badge {{ hvac.collection.style }}">{{ hvac.collection.status }}</span>
-        </div>
-        <div class="summary-grid">
-          <div class="summary-item">
-            <span>Samples last 30m</span>
-            <strong>{{ hvac.collection.samples_last_30m_display }}</strong>
-          </div>
-          <div class="summary-item">
-            <span>Latest</span>
-            <strong>
-              {% if hvac.collection.latest_age %}
-              {{ hvac.collection.latest_age }}
-              {% elif hvac.collection.latest_at %}
-              {{ hvac.collection.latest_at }}
-              {% else %}
-              —
-              {% endif %}
-            </strong>
-          </div>
-          <div class="summary-item">
-            <span>Zones</span>
-            <strong>{{ hvac.collection.zones }}</strong>
-          </div>
-        </div>
-        {% if hvac.collection.missing %}
-        <div class="section-note" style="margin-top:0.65rem;">
-          No Nest history yet. Samples appear after the poll timer runs.
-        </div>
-        {% elif hvac.warning in ('Nest auth failure', 'Nest stale') %}
-        <div class="section-warning" style="margin-top:0.65rem;">{{ hvac.warning }}</div>
-        {% endif %}
-      </div>
+        <details>
+          <summary>Data Quality &amp; Diagnostics</summary>
 
-      <div class="card full-width">
-        <div class="card-title">HVAC Runtime</div>
-        {% if hvac.warning %}
-        <div class="section-warning">{{ hvac.warning }}</div>
-        {% endif %}
-        {% if hvac.latest_sample_at %}
-        <div class="card-subtitle">Latest Nest sample: {{ hvac.latest_sample_at }}</div>
-        {% endif %}
-        {% if hvac.primary_summary %}
-        <div class="card-subtitle">{{ hvac.primary_summary.title }}</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Zone</th>
-              <th class="num">Cooling</th>
-              <th class="num">Heating</th>
-              <th class="num">Idle/Off</th>
-              <th class="num">% Cooling</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in hvac.primary_summary.rows %}
-            <tr>
-              <td>{{ row.zone }}</td>
-              <td class="num">{{ row.cooling }}</td>
-              <td class="num">{{ row.heating }}</td>
-              <td class="num">{{ row.idle }}</td>
-              <td class="num">{{ row.percent_cooling }}</td>
-            </tr>
-            {% if row.both_cooling is defined %}
-            <tr>
-              <td colspan="5" class="section-note">Both zones cooling: {{ row.both_cooling }}</td>
-            </tr>
+          {% set quality = energy.quality %}
+          <div class="summary-grid" style="margin-bottom:0.65rem;">
+            {% if quality.smt_age_minutes is not none %}
+            <div class="summary-item">
+              <span>SMT data age</span>
+              <strong>{% if quality.smt_age_minutes < 1440 %}{{ quality.smt_age_minutes }} min{% else %}{{ (quality.smt_age_minutes / 60) | int }}h{% endif %}</strong>
+            </div>
             {% endif %}
-            {% endfor %}
-          </tbody>
-        </table>
-        {% if hvac.primary_summary.estimate_note %}
-        <div class="section-note">{{ hvac.primary_summary.estimate_note }}</div>
-        {% endif %}
-        {% else %}
-        <div class="chart-empty">No Nest HVAC history yet. Samples appear after the poll timer runs.</div>
-        {% endif %}
-      </div>
-
-      {% if hvac.summaries|length > 1 and hvac.primary_summary %}
-      <div class="card full-width">
-        <div class="card-title">HVAC Runtime — other windows</div>
-        {% for summary in hvac.summaries %}
-        {% if summary.window != hvac.primary_summary.window %}
-        <div class="card-subtitle">{{ summary.title }}</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Zone</th>
-              <th class="num">Cooling</th>
-              <th class="num">Heating</th>
-              <th class="num">Idle/Off</th>
-              <th class="num">% Cooling</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in summary.rows %}
-            <tr>
-              <td>{{ row.zone }}</td>
-              <td class="num">{{ row.cooling }}</td>
-              <td class="num">{{ row.heating }}</td>
-              <td class="num">{{ row.idle }}</td>
-              <td class="num">{{ row.percent_cooling }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% endif %}
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      {% set tuya = kestrel.tuya_power %}
-      <div class="card full-width">
-        <div class="summary-header" style="margin-bottom:0.65rem;">
-          <span class="card-title" style="margin-bottom:0;">Tuya Appliance Power</span>
-          <span class="status-badge {{ tuya.style }}">{{ tuya.status }}</span>
-        </div>
-        <div class="card-subtitle">{{ tuya.headline }}</div>
-        {% if tuya.warning %}
-        <div class="section-warning">{{ tuya.warning }}</div>
-        {% endif %}
-        <div class="summary-grid" style="margin-bottom:0.75rem;">
-          {% if tuya.updated_at %}
-          <div class="summary-item">
-            <span>Last sample</span>
-            <strong>{{ tuya.updated_at }}{% if tuya.updated_age %} ({{ tuya.updated_age }}){% endif %}</strong>
-          </div>
-          {% endif %}
-          {% if tuya.source %}
-          <div class="summary-item">
-            <span>Source</span>
-            <strong>{{ tuya.source }}</strong>
-          </div>
-          {% endif %}
-          {% if tuya.device_model %}
-          <div class="summary-item">
-            <span>Device model</span>
-            <strong>{{ tuya.device_model }}</strong>
-          </div>
-          {% endif %}
-        </div>
-        {% if tuya.appliances %}
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Appliance</th>
-              <th class="num">Power</th>
-              <th class="num">Voltage</th>
-              <th class="num">Energy</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in tuya.appliances %}
-            <tr>
-              <td>{{ row.label }}</td>
-              <td class="num">{{ row.power_display }}</td>
-              <td class="num">{{ row.voltage_display }}</td>
-              <td class="num">{% if row.energy_display %}{{ row.energy_display }}{% else %}—{% endif %}</td>
-              <td><span class="status-badge {{ row.style }}">{{ row.status }}</span></td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <div class="chart-empty">No Tuya appliance power data yet. Samples appear after the poll timer runs.</div>
-        {% endif %}
-        {% if tuya.poll_error and tuya.poll_error.last_success %}
-        <div class="section-note">Last successful poll: {{ tuya.poll_error.last_success }}</div>
-        {% endif %}
-      </div>
-
-      <div class="card full-width">
-        <div class="card-title">Appliance power — last 1 hour</div>
-        <div class="chart-host" id="chart-tuya-power-1h"></div>
-        <script type="application/json" id="chart-data-tuya-power-1h">{{ tuya.charts.power_1h | tojson }}</script>
-      </div>
-
-      <div class="card full-width">
-        <div class="card-title">Appliance power — last 24 hours</div>
-        <div class="chart-host" id="chart-tuya-power-24h"></div>
-        <script type="application/json" id="chart-data-tuya-power-24h">{{ tuya.charts.power_24h | tojson }}</script>
-      </div>
-
-      <div class="card full-width">
-        <div class="card-title">Energy + HVAC Correlation — Latest Overlapping 24h</div>
-        {% if hvac.correlation.warning %}
-        <div class="section-warning">{{ hvac.correlation.warning }}</div>
-        {% endif %}
-        {% if hvac.correlation.diagnostics %}
-        <div class="summary-grid" style="margin-bottom:0.75rem;">
-          {% for item in hvac.correlation.diagnostics %}
-          <div class="summary-item">
-            <span>{{ item.label }}</span>
-            <strong>{{ item.value }}</strong>
-          </div>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if hvac.correlation.available and hvac.correlation.rows %}
-        <div class="card-subtitle">Latest overlapping {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Interval</th>
-              <th class="num">kWh</th>
-              <th>Downstairs</th>
-              <th>Upstairs</th>
-              <th>Cooling?</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in hvac.correlation.rows %}
-            <tr>
-              <td>{{ row.interval }}</td>
-              <td class="num">{{ row.kwh }}</td>
-              <td>{{ row.downstairs }}</td>
-              <td>{{ row.upstairs }}</td>
-              <td>{{ row.cooling }}</td>
-            </tr>
-            {% if row.note %}
-            <tr class="note-row">
-              <td colspan="5">{{ row.note }}</td>
-            </tr>
+            {% if quality.tuya_age_minutes is not none %}
+            <div class="summary-item">
+              <span>Tuya data age</span>
+              <strong style="color:{% if quality.tuya_fresh %}var(--ok){% else %}var(--warn){% endif %}">{{ quality.tuya_age_minutes }} min</strong>
+            </div>
             {% endif %}
-            {% endfor %}
-          </tbody>
-        </table>
-        {% if hvac.correlation.estimate_note %}
-        <div class="section-note">{{ hvac.correlation.estimate_note }}</div>
-        {% endif %}
-        {% else %}
-        <div class="chart-empty">
-          {% if hvac.correlation.status == 'no_overlap' %}
-          Waiting for Nest HVAC history and Smart Meter Texas intervals to overlap.
-          {% elif hvac.correlation.status == 'no_nest_data' %}
-          Correlation requires Nest HVAC history from the poll timer.
-          {% elif hvac.correlation.status in ('no_smt_db', 'no_smt_data') %}
-          Correlation requires Smart Meter Texas interval data in the Kestrel database.
-          {% elif hvac.correlation.status == 'no_matched_rows' %}
-          Smart Meter Texas intervals were found, but none could be matched to Nest HVAC samples in the selected window.
-          {% else %}
-          Correlation rows will appear once overlapping Nest HVAC history and Smart Meter Texas intervals exist in the selected window.
+            {% if quality.nest_age_minutes is not none %}
+            <div class="summary-item">
+              <span>Nest data age</span>
+              <strong style="color:{% if quality.nest_fresh %}var(--ok){% else %}var(--warn){% endif %}">{{ quality.nest_age_minutes }} min</strong>
+            </div>
+            {% endif %}
+            {% if quality.smt_coverage_pct is not none %}
+            <div class="summary-item">
+              <span>SMT window coverage</span>
+              <strong>{{ quality.smt_coverage_pct }}%</strong>
+            </div>
+            {% endif %}
+            {% if quality.tuya_coverage_pct is not none %}
+            <div class="summary-item">
+              <span>Tuya window coverage</span>
+              <strong>{{ quality.tuya_coverage_pct }}%</strong>
+            </div>
+            {% endif %}
+            {% if quality.smt_row_count is not none %}
+            <div class="summary-item">
+              <span>SMT rows (window)</span>
+              <strong>{{ quality.smt_row_count }}</strong>
+            </div>
+            {% endif %}
+            {% if quality.tuya_row_count is not none %}
+            <div class="summary-item">
+              <span>Tuya samples (window)</span>
+              <strong>{{ quality.tuya_row_count }}</strong>
+            </div>
+            {% endif %}
+            {% if quality.nest_row_count is not none %}
+            <div class="summary-item">
+              <span>Nest samples (window)</span>
+              <strong>{{ quality.nest_row_count }}</strong>
+            </div>
+            {% endif %}
+          </div>
+
+          {# SMT status details #}
+          <div class="summary-grid" style="margin-bottom:0.65rem;">
+            {% if kestrel.range %}
+            <div class="summary-item">
+              <span>SMT data range</span>
+              <strong>{{ kestrel.range }}</strong>
+            </div>
+            {% endif %}
+            {% if kestrel.total_kwh %}
+            <div class="summary-item">
+              <span>SMT total kWh (all time)</span>
+              <strong>{{ kestrel.total_kwh }}</strong>
+            </div>
+            {% endif %}
+            {% if kestrel.missing_interval_count is not none %}
+            <div class="summary-item">
+              <span>Missing SMT intervals</span>
+              <strong>{{ kestrel.missing_interval_count }}</strong>
+            </div>
+            {% endif %}
+            {% if kestrel.last_refresh_success_at %}
+            <div class="summary-item">
+              <span>Last SMT live refresh</span>
+              <strong>{{ kestrel.last_refresh_success_at }}{% if kestrel.last_refresh_source %} ({{ kestrel.last_refresh_source }}){% endif %}</strong>
+            </div>
+            {% endif %}
+          </div>
+
+          {# Tuya diagnostics #}
+          <div class="section-header">
+            <span style="font-size:0.88rem;font-weight:600;">Tuya Appliance Power</span>
+            <span class="status-badge {{ tuya.style }}">{{ tuya.status }}</span>
+          </div>
+          {% if tuya.warning %}
+          <div class="section-warning">{{ tuya.warning }}</div>
           {% endif %}
-        </div>
-        {% endif %}
+          <div class="summary-grid" style="margin-bottom:0.65rem;">
+            {% if tuya.updated_at %}
+            <div class="summary-item">
+              <span>Last Tuya sample</span>
+              <strong>{{ tuya.updated_at }}{% if tuya.updated_age %} ({{ tuya.updated_age }}){% endif %}</strong>
+            </div>
+            {% endif %}
+            {% if tuya.source %}
+            <div class="summary-item">
+              <span>Source</span>
+              <strong>{{ tuya.source }}</strong>
+            </div>
+            {% endif %}
+            {% if tuya.device_model %}
+            <div class="summary-item">
+              <span>Device model</span>
+              <strong>{{ tuya.device_model }}</strong>
+            </div>
+            {% endif %}
+          </div>
+          {% if tuya.appliances %}
+          <table class="data-table" style="margin-bottom:0.5rem;">
+            <thead>
+              <tr>
+                <th>Appliance</th>
+                <th class="num">Power</th>
+                <th class="num">Voltage</th>
+                <th class="num">Energy</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in tuya.appliances %}
+              <tr>
+                <td>{{ row.label }}</td>
+                <td class="num">{{ row.power_display }}</td>
+                <td class="num">{{ row.voltage_display }}</td>
+                <td class="num">{% if row.energy_display %}{{ row.energy_display }}{% else %}—{% endif %}</td>
+                <td><span class="status-badge {{ row.style }}">{{ row.status }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+          {# Tuya appliance power charts (diagnostics) #}
+          {% if tuya.has_history %}
+          <div style="margin-top:0.5rem;">
+            <div style="font-size:0.82rem;color:var(--muted);margin-bottom:0.35rem;">Appliance power — last 1 hour</div>
+            <div class="chart-host" id="chart-tuya-power-1h-diag"></div>
+            <div style="font-size:0.82rem;color:var(--muted);margin-top:0.5rem;margin-bottom:0.35rem;">Appliance power — last 24 hours</div>
+            <div class="chart-host" id="chart-tuya-power-24h-diag"></div>
+          </div>
+          {% endif %}
+          <script type="application/json" id="chart-data-tuya-power-1h">{{ tuya.charts.power_1h | tojson }}</script>
+          <script type="application/json" id="chart-data-tuya-power-24h">{{ tuya.charts.power_24h | tojson }}</script>
+
+          {# Nest collection health #}
+          <div class="section-header" style="margin-top:0.55rem;">
+            <span style="font-size:0.88rem;font-weight:600;">Nest Collection</span>
+            <span class="status-badge {{ hvac.collection.style }}">{{ hvac.collection.status }}</span>
+          </div>
+          <div class="summary-grid">
+            <div class="summary-item">
+              <span>Samples last 30m</span>
+              <strong>{{ hvac.collection.samples_last_30m_display }}</strong>
+            </div>
+            <div class="summary-item">
+              <span>Latest sample</span>
+              <strong>
+                {% if hvac.collection.latest_age %}{{ hvac.collection.latest_age }}
+                {% elif hvac.collection.latest_at %}{{ hvac.collection.latest_at }}
+                {% else %}—{% endif %}
+              </strong>
+            </div>
+            <div class="summary-item">
+              <span>Zones</span>
+              <strong>{{ hvac.collection.zones }}</strong>
+            </div>
+          </div>
+
+          {# Correlation diagnostics #}
+          {% if hvac.correlation.diagnostics %}
+          <div style="margin-top:0.55rem;">
+            <div style="font-size:0.88rem;font-weight:600;margin-bottom:0.35rem;">SMT ↔ Nest Overlap</div>
+            <div class="summary-grid">
+              {% for item in hvac.correlation.diagnostics %}
+              <div class="summary-item">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          {# Assumptions #}
+          <div style="margin-top:0.75rem;font-size:0.78rem;color:var(--muted);">
+            <strong style="color:var(--text);">Assumptions &amp; caveats:</strong>
+            Tuya CT clamps measure ac_compressor (CH1/Meter1), furnace_air_handler (CH2/Meter1),
+            dryer (CH1/Meter2), dishwasher (CH2/Meter2).
+            No whole-home CT is installed; source agreement is unavailable for direct meter comparison.
+            HVAC energy estimates use rectangular integration of Tuya instantaneous power.
+            SMT is the utility billing reference (15-minute intervals, America/Chicago).
+          </div>
+        </details>
       </div>
-    </div>
+
+    </div>{# /cards #}
   </main>
 </div>
 
@@ -700,6 +1168,7 @@
 </nav>
 
 <script src="/static/kestrel_charts.js"></script>
+<script src="/static/kestrel_energy_timeline.js"></script>
 <script src="/static/tuya_power_charts.js"></script>
 </body>
 </html>

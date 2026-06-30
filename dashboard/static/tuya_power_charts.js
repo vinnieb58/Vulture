@@ -173,15 +173,22 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    renderLineChart(
-      document.getElementById("chart-tuya-power-1h"),
-      parseChartData("chart-data-tuya-power-1h"),
-      { title: "Appliance power last 1 hour", emptyText: "No appliance power history in the last hour." }
-    );
-    renderLineChart(
-      document.getElementById("chart-tuya-power-24h"),
-      parseChartData("chart-data-tuya-power-24h"),
-      { title: "Appliance power last 24 hours", emptyText: "No appliance power history in the last 24 hours." }
-    );
+    // Render to diagnostics containers (new design) or legacy containers if present
+    var c1h = document.getElementById("chart-tuya-power-1h-diag") || document.getElementById("chart-tuya-power-1h");
+    if (c1h) {
+      renderLineChart(
+        c1h,
+        parseChartData("chart-data-tuya-power-1h"),
+        { title: "Appliance power last 1 hour", emptyText: "No appliance power history in the last hour." }
+      );
+    }
+    var c24h = document.getElementById("chart-tuya-power-24h-diag") || document.getElementById("chart-tuya-power-24h");
+    if (c24h) {
+      renderLineChart(
+        c24h,
+        parseChartData("chart-data-tuya-power-24h"),
+        { title: "Appliance power last 24 hours", emptyText: "No appliance power history in the last 24 hours." }
+      );
+    }
   });
 })();

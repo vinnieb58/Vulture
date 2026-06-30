@@ -40,11 +40,22 @@ from host_status import (
 )
 from house_formatting import format_house_card_display
 from house_status import read_house_status
+import nest_hvac_runtime
+import tuya_power_history as _tuya_power_history_module
+from kestrel_analysis import compute_kestrel_analysis
 from kestrel_formatting import format_kestrel_card_display, format_kestrel_detail_display
-from kestrel_metrics import get_detail_metrics, get_home_metrics
+from kestrel_metrics import (
+    KESTREL_TIMEZONE,
+    fetch_interval_rows,
+    get_detail_metrics,
+    get_home_metrics,
+)
 from kestrel_status import read_kestrel_status
+from nest_history import read_history as read_nest_history
 from nest_hvac_formatting import format_hvac_section
 from tuya_power_formatting import format_tuya_power_section
+from tuya_power_history import read_tuya_power_history
+from tuya_power_status import read_tuya_power_status
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_health_details import RAVEN_HEALTH_REFRESH_SECONDS, build_raven_health_details
 from raven_metrics_history import (
@@ -393,7 +404,7 @@ def _compute_kestrel_card(kestrel: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
-    """Read-only Kestrel detail page context."""
+    """Read-only Kestrel detail page context — energy-explanation redesign."""
     state = kestrel.get("state", "no_data")
     status_labels = {
         "available": "Available",
@@ -405,11 +416,15 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
         "no_data": "unknown",
         "error": "fail",
     }
+
+    # --- Legacy display fields (used by diagnostics section and home card) ---
     try:
         metrics = get_detail_metrics()
     except Exception:
         metrics = {"available": False}
     display = format_kestrel_detail_display(kestrel, metrics)
+
+    # --- HVAC section (collection health, runtime summaries) ---
     try:
         hvac = format_hvac_section()
     except Exception:
@@ -428,6 +443,8 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
             },
             "correlation": {"available": False, "rows": []},
         }
+
+    # --- Tuya appliance section (status table + charts) ---
     try:
         tuya_power = format_tuya_power_section()
     except Exception:
@@ -441,12 +458,59 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
             "charts": {"power_1h": [], "power_24h": []},
             "has_history": False,
         }
+
+    # --- New energy-explanation analysis ---
+    try:
+        smt_rows = fetch_interval_rows()
+        # Use module-level paths so test monkeypatches are respected
+        tuya_records = read_tuya_power_history(_tuya_power_history_module.TUYA_HISTORY_PATH)
+        nest_records = read_nest_history(nest_hvac_runtime.NEST_HISTORY_PATH)
+
+        # Gather latest timestamps for freshness display
+        tuya_status_now = read_tuya_power_status()
+        tuya_latest_ts = None
+        if tuya_status_now.get("updated_at"):
+            try:
+                from kestrel_metrics import _parse_iso as _pi
+                tuya_latest_ts = _pi(str(tuya_status_now["updated_at"]))
+            except Exception:
+                pass
+
+        nest_latest_ts = None
+        if nest_records:
+            nest_latest_ts = max(r.timestamp for r in nest_records)
+
+        smt_latest_ts = kestrel.get("range_end")
+
+        energy = compute_kestrel_analysis(
+            smt_rows,
+            tuya_records,
+            nest_records,
+            tz_name=KESTREL_TIMEZONE,
+            smt_latest_ts=smt_latest_ts,
+            tuya_latest_ts=tuya_latest_ts,
+            nest_latest_ts=nest_latest_ts,
+        )
+    except Exception:
+        energy = {
+            "window": {"label": "Unavailable", "basis": "fallback", "has_smt": False, "has_tuya": False, "has_nest": False},
+            "story": [],
+            "hvac_stats": {"available": False},
+            "agreement": {"available": False},
+            "breakdown": {"has_smt": False, "has_tuya": False},
+            "peaks": [],
+            "timeline": {"has_smt": False, "has_tuya": False, "has_nest": False, "smt_bars": [], "tuya_measured": [], "tuya_hvac": [], "tuya_compressor": [], "nest_samples": [], "cooling_bands": []},
+            "trends": [],
+            "quality": {},
+        }
+
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
         "hvac": hvac,
         "tuya_power": tuya_power,
+        "energy": energy,
         **display,
     }
 
