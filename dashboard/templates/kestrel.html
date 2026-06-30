@@ -624,55 +624,53 @@
     <div class="agreement-card">
       <div class="section-header">
         <span class="card-title" style="margin-bottom:0">Do SMT and Tuya agree?</span>
-        {% if agreement.available %}
-        <span class="status-badge warn">Partial</span>
-        {% else %}
-        <span class="status-badge unknown">Not comparable</span>
-        {% endif %}
+        <span class="status-badge unknown">Not comparable — no whole-home CT</span>
       </div>
+      {# SMT is whole-home billing. Tuya measures 4 individual appliance circuits.
+         No panel-main or whole-home CT is installed, so direct comparison is invalid.
+         Show the circuit and SMT totals for context only — not as a comparison. #}
       <div class="summary-grid">
         <div class="summary-item">
-          <span>Comparison window</span>
+          <span>Window</span>
           <strong>{{ window.label }}</strong>
         </div>
         {% if agreement.smt_kwh is not none %}
         <div class="summary-item">
-          <span>SMT total (utility reference)</span>
+          <span>SMT total <span class="estimate-tag">(whole home, utility)</span></span>
           <strong>{{ "%.2f"|format(agreement.smt_kwh) }} kWh</strong>
         </div>
         {% endif %}
-        {% if agreement.tuya_kwh is not none %}
+        {% if agreement.circuit_kwh is not none %}
         <div class="summary-item">
-          <span>Tuya measured loads <span class="estimate-tag">(est.)</span></span>
-          <strong>{{ "%.2f"|format(agreement.tuya_kwh) }} kWh</strong>
+          <span>Tuya monitored circuits <span class="estimate-tag">(est., 4 circuits)</span></span>
+          <strong>{{ "%.2f"|format(agreement.circuit_kwh) }} kWh</strong>
         </div>
         {% endif %}
-        {% if agreement.tuya_hvac_kwh is not none %}
+        {% if agreement.hvac_circuit_kwh is not none %}
         <div class="summary-item">
-          <span>Tuya HVAC load <span class="estimate-tag">(est.)</span></span>
-          <strong>{{ "%.2f"|format(agreement.tuya_hvac_kwh) }} kWh</strong>
-        </div>
-        {% endif %}
-        {% if agreement.tuya_fraction_pct is not none %}
-        <div class="summary-item">
-          <span>Tuya as % of SMT</span>
-          <strong>{{ "%.1f"|format(agreement.tuya_fraction_pct) }}%</strong>
+          <span>HVAC circuits <span class="estimate-tag">(est., 2 circuits)</span></span>
+          <strong>{{ "%.2f"|format(agreement.hvac_circuit_kwh) }} kWh</strong>
         </div>
         {% endif %}
         {% if agreement.smt_coverage_pct is not none %}
         <div class="summary-item">
-          <span>SMT coverage</span>
+          <span>SMT window coverage</span>
           <strong>{{ agreement.smt_coverage_pct }}%</strong>
         </div>
         {% endif %}
         {% if agreement.tuya_coverage_pct is not none %}
         <div class="summary-item">
-          <span>Tuya coverage</span>
+          <span>Tuya window coverage</span>
           <strong>{{ agreement.tuya_coverage_pct }}%</strong>
         </div>
         {% endif %}
       </div>
-      <p class="agreement-note">{{ agreement.note }}</p>
+      <p class="agreement-note">
+        Tuya CT channels: AC compressor (Meter 1 Ch 1) · Furnace/air handler (Meter 1 Ch 2) ·
+        Dryer (Meter 2 Ch 1) · Dishwasher (Meter 2 Ch 2).
+        No panel-main or whole-home CT is installed.
+        A whole-home CT on each service leg would be required to compare against SMT.
+      </p>
     </div>
 
     <div class="cards">

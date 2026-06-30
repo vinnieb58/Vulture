@@ -899,9 +899,9 @@ class TestKestrelRenderVerification:
         # The card must show one of the known classification labels
         known_classifications = [
             "Not comparable",
+            "no whole-home CT",
             "Partial coverage",
             "Insufficient data",
-            "partial",
             "Not available",
         ]
         assert any(label in text for label in known_classifications), (

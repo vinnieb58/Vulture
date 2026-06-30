@@ -302,19 +302,18 @@ class TestSelectAnalysisWindow:
 # ---------------------------------------------------------------------------
 
 class TestComputeSourceAgreement:
-    def test_no_data_returns_insufficient(self):
+    def test_always_returns_unavailable_no_whole_home_ct(self):
+        """
+        Source agreement is never available because Tuya monitors individual
+        appliance circuits, not whole-home consumption.  The function always
+        returns available=False with the 'no_whole_home_ct' classification.
+        """
         result = compute_source_agreement([], [], window_start=NOW, window_end=NOW + timedelta(hours=1))
         assert not result["available"]
-        assert result["classification"] == "insufficient_data"
+        assert result["classification"] == "no_whole_home_ct"
 
-    def test_with_smt_only_no_tuya(self):
-        smt = [_smt_row(NOW.isoformat(), 1.0) for _ in range(4)]
-        result = compute_source_agreement(smt, [], window_start=NOW, window_end=NOW + timedelta(hours=1))
-        assert not result["available"]
-        assert result["smt_kwh"] is None or result["tuya_kwh"] is None
-
-    def test_partial_coverage_classification_when_both_present(self):
-        # Enough SMT rows for 50%+ coverage
+    def test_with_both_sources_still_unavailable(self):
+        """Even with full SMT and Tuya coverage, agreement is unavailable."""
         base = NOW - timedelta(hours=2)
         smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(8)]
         tuya = [_tuya_record(base + timedelta(minutes=i), ac_w=3000) for i in range(120)]
@@ -322,18 +321,30 @@ class TestComputeSourceAgreement:
             smt, tuya,
             window_start=base, window_end=base + timedelta(hours=2)
         )
-        assert result["available"]
-        assert result["classification"] == "partial_coverage"
-        assert result["smt_kwh"] > 0
-        assert result["tuya_kwh"] > 0
+        assert not result["available"]
+        assert result["classification"] == "no_whole_home_ct"
 
-    def test_note_mentions_appliances_not_whole_home(self):
+    def test_diagnostic_totals_present_when_data_available(self):
+        """Circuit and SMT totals are provided for diagnostics even though
+        comparison is invalid."""
         base = NOW - timedelta(hours=2)
         smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(8)]
         tuya = [_tuya_record(base + timedelta(minutes=i), ac_w=3000) for i in range(120)]
         result = compute_source_agreement(smt, tuya, window_start=base, window_end=base + timedelta(hours=2))
-        assert "appliance" in result["note"].lower() or "CT" in result["note"]
-        assert "whole-home" in result["note"].lower() or "whole_home" in result["note"].lower()
+        assert result["smt_kwh"] is not None and result["smt_kwh"] > 0
+        assert result["circuit_kwh"] is not None and result["circuit_kwh"] > 0
+        # No percentage comparison returned
+        assert result["tuya_fraction_pct"] is None
+
+    def test_note_explains_circuit_limitation(self):
+        """The note must mention that Tuya monitors circuits, not whole-home."""
+        base = NOW - timedelta(hours=2)
+        smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(8)]
+        tuya = [_tuya_record(base + timedelta(minutes=i), ac_w=3000) for i in range(120)]
+        result = compute_source_agreement(smt, tuya, window_start=base, window_end=base + timedelta(hours=2))
+        note = result["note"].lower()
+        assert "circuit" in note or "ct" in note.upper()
+        assert "whole-home" in note or "whole_home" in note
 
 
 # ---------------------------------------------------------------------------
@@ -346,12 +357,14 @@ class TestMissingSourceBehavior:
         tuya = [_tuya_record(base + timedelta(minutes=i), ac_w=2000) for i in range(120)]
         result = compute_source_agreement([], tuya, window_start=base, window_end=NOW)
         assert not result["available"]
+        assert result["classification"] == "no_whole_home_ct"
 
     def test_no_tuya_agreement_unavailable(self):
         base = NOW - timedelta(hours=2)
         smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(8)]
         result = compute_source_agreement(smt, [], window_start=base, window_end=NOW)
         assert not result["available"]
+        assert result["classification"] == "no_whole_home_ct"
 
     def test_compute_kestrel_analysis_with_no_data(self):
         result = compute_kestrel_analysis([], [], [], now=NOW)

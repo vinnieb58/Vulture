@@ -427,6 +427,25 @@ def select_analysis_window(
 # Source agreement
 # ---------------------------------------------------------------------------
 
+"""
+Tuya channel-to-circuit mapping (from kestrel/tuya_power.py CHANNEL_MAPPING):
+
+  Meter 1, Channel 1  →  ac_compressor        (AC compressor CT clamp)
+  Meter 1, Channel 2  →  furnace_air_handler   (Furnace / air handler CT clamp)
+  Meter 2, Channel 1  →  dryer                 (Dryer CT clamp)
+  Meter 2, Channel 2  →  dishwasher            (Dishwasher CT clamp)
+
+There is NO whole-home or panel-main CT.  Each channel measures one specific
+appliance circuit.  The sum of all four channels is a "monitored circuits"
+total, not a whole-home total.
+
+Because no whole-home Tuya channel exists, meter-to-meter comparison against
+SMT (which bills the entire premises) is not calculable.  The source-agreement
+function always returns available=False with an explanation.  Individual
+channels are still used for HVAC attribution and peak labeling.
+"""
+
+
 def compute_source_agreement(
     smt_rows: list[dict[str, Any]],
     tuya_records: list[Any],
@@ -435,24 +454,27 @@ def compute_source_agreement(
     window_end: datetime,
 ) -> dict[str, Any]:
     """
-    Compare SMT utility billing data to Tuya measured appliance loads.
+    Attempt SMT vs Tuya source agreement.
 
-    Note: Tuya uses individual appliance CT clamps (ac_compressor,
-    furnace_air_handler, dryer, dishwasher) — NOT a whole-home CT. Full
-    meter-to-meter comparison is unavailable; this section shows what
-    fraction of SMT utility energy is accounted for by the 4 monitored
-    loads.
+    Because the Tuya installation measures four individual appliance circuits
+    (ac_compressor, furnace_air_handler, dryer, dishwasher) and does NOT
+    include a whole-home or panel-main CT, meter-to-meter comparison with
+    SMT whole-home billing data is not valid.
+
+    This function always returns available=False and provides the raw circuit
+    and SMT totals for diagnostic context only.  No SMT-vs-Tuya percentage is
+    calculated or returned.
     """
-    smt_kwh = smt_total_kwh(smt_rows, window_start=window_start, window_end=window_end)
+    smt_kwh_val = smt_total_kwh(smt_rows, window_start=window_start, window_end=window_end)
     smt_cov = smt_coverage_pct(smt_rows, window_start=window_start, window_end=window_end)
 
-    tuya_kwh = integrate_tuya_energy(
+    circuit_kwh = integrate_tuya_energy(
         tuya_records,
         TUYA_ALL_KEYS,
         window_start=window_start,
         window_end=window_end,
     )
-    tuya_hvac_kwh = integrate_tuya_energy(
+    hvac_circuit_kwh = integrate_tuya_energy(
         tuya_records,
         TUYA_HVAC_KEYS,
         window_start=window_start,
@@ -460,51 +482,27 @@ def compute_source_agreement(
     )
     tuya_cov = tuya_coverage_pct(tuya_records, window_start=window_start, window_end=window_end)
 
-    has_smt = smt_kwh > 0 and smt_cov >= COVERAGE_MINIMUM_PCT
-    has_tuya = tuya_kwh > 0 and tuya_cov >= COVERAGE_MINIMUM_PCT
-
-    if not has_smt or not has_tuya:
-        return {
-            "available": False,
-            "classification": "insufficient_data",
-            "classification_label": "Insufficient data",
-            "note": "Whole-home comparison unavailable — Tuya monitors individual appliances, not total household consumption.",
-            "smt_kwh": smt_kwh if has_smt else None,
-            "tuya_kwh": None,
-            "tuya_hvac_kwh": None,
-            "diff_kwh": None,
-            "diff_pct": None,
-            "tuya_fraction_pct": None,
-            "smt_coverage_pct": smt_cov,
-            "tuya_coverage_pct": tuya_cov,
-            "window_start": window_start.isoformat(),
-            "window_end": window_end.isoformat(),
-        }
-
-    diff_kwh = round(tuya_kwh - smt_kwh, 4)
-    diff_pct = round(100.0 * abs(diff_kwh) / smt_kwh, 2) if smt_kwh > 0 else None
-    tuya_fraction_pct = round(100.0 * tuya_kwh / smt_kwh, 1) if smt_kwh > 0 else None
-
-    # Classification based on Tuya measured fraction vs SMT
-    # Since Tuya is partial (4 appliances), diff_pct will typically be large.
-    # We report "partial coverage" rather than a standard agreement rating.
-    classification = "partial_coverage"
-    classification_label = "Partial coverage (4 appliances, not whole-home)"
-
     return {
-        "available": True,
-        "classification": classification,
-        "classification_label": classification_label,
+        "available": False,
+        "classification": "no_whole_home_ct",
+        "classification_label": "Not comparable — no whole-home CT",
         "note": (
-            "Tuya monitors 4 individual appliances via CT clamps (not whole-home). "
-            f"These account for approximately {tuya_fraction_pct:.0f}% of SMT total."
+            "SMT measures whole-home consumption (utility billing reference). "
+            "Tuya monitors four individual circuits via CT clamps: "
+            "AC compressor, furnace/air handler, dryer, dishwasher. "
+            "No panel-main or whole-home CT is installed, so meter-to-meter "
+            "comparison is not valid."
         ),
-        "smt_kwh": smt_kwh,
-        "tuya_kwh": tuya_kwh,
-        "tuya_hvac_kwh": tuya_hvac_kwh,
-        "diff_kwh": diff_kwh,
-        "diff_pct": diff_pct,
-        "tuya_fraction_pct": tuya_fraction_pct,
+        # Diagnostic totals — shown for context, not as a comparison
+        "smt_kwh": round(smt_kwh_val, 4) if smt_kwh_val > 0 else None,
+        "circuit_kwh": round(circuit_kwh, 4) if circuit_kwh > 0 else None,
+        "hvac_circuit_kwh": round(hvac_circuit_kwh, 4) if hvac_circuit_kwh > 0 else None,
+        # These fields are None because the comparison is not calculable
+        "tuya_kwh": None,
+        "tuya_hvac_kwh": None,
+        "diff_kwh": None,
+        "diff_pct": None,
+        "tuya_fraction_pct": None,
         "smt_coverage_pct": smt_cov,
         "tuya_coverage_pct": tuya_cov,
         "window_start": window_start.isoformat(),
@@ -1088,13 +1086,8 @@ def generate_energy_story(
         else:
             findings.append(f"Cooling ran for {mins} minute{'s' if mins != 1 else ''}.")
 
-    # SMT / Tuya comparison note
-    if agreement.get("available"):
-        tuya_frac = agreement.get("tuya_fraction_pct")
-        if tuya_frac is not None:
-            findings.append(
-                f"The 4 Tuya-monitored appliances accounted for {tuya_frac:.0f}% of SMT total."
-            )
+    # No SMT/Tuya fraction finding: Tuya monitors circuits, not whole-home,
+    # so any SMT-vs-Tuya percentage would be misleading.
 
     # Largest non-HVAC peak
     non_hvac_peaks = [p for p in peaks if p.get("explanation") in ("Non-HVAC load", "Mixed load")]
