@@ -18,7 +18,7 @@ Conventions
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -256,6 +256,24 @@ def _parse_ts(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _format_local_time(ts: datetime, tz_name: str) -> str:
+    """Format a UTC datetime as local 12-hour time, e.g. '2:35 PM'."""
+    local = ts.astimezone(ZoneInfo(tz_name))
+    h = local.hour % 12 or 12
+    m = local.minute
+    period = "AM" if local.hour < 12 else "PM"
+    return f"{h}:{m:02d} {period}"
+
+
+def _format_local_datetime(ts: datetime, tz_name: str) -> str:
+    """Format a UTC datetime as local date+time, e.g. 'Jun 30, 2:35 PM'."""
+    local = ts.astimezone(ZoneInfo(tz_name))
+    h = local.hour % 12 or 12
+    m = local.minute
+    period = "AM" if local.hour < 12 else "PM"
+    return f"{local.strftime('%b %-d')}, {h}:{m:02d} {period}"
 
 
 def _today_bounds(now: datetime, tz_name: str) -> tuple[datetime, datetime]:
@@ -740,6 +758,7 @@ def find_demand_peaks(
     window_end: datetime,
     top_n: int = MAX_PEAKS,
     cooldown_minutes: int = PEAK_COOLDOWN_MINUTES,
+    tz_name: str = KESTREL_TIMEZONE,
 ) -> list[dict[str, Any]]:
     """
     Find top demand peaks in the analysis window.
@@ -753,7 +772,7 @@ def find_demand_peaks(
         key=lambda r: r.timestamp,
     )
     if not in_window:
-        return _find_peaks_from_smt(smt_rows, nest_records, window_start=window_start, window_end=window_end, top_n=top_n)
+        return _find_peaks_from_smt(smt_rows, nest_records, window_start=window_start, window_end=window_end, top_n=top_n, tz_name=tz_name)
 
     # Build (timestamp, total_kw, hvac_kw, compressor_kw, non_hvac_kw) for each record
     data_points: list[tuple[datetime, float, float, float, float]] = []
@@ -822,6 +841,8 @@ def find_demand_peaks(
         )
         results.append({
             "timestamp": ts.isoformat(),
+            "timestamp_display": _format_local_datetime(ts, tz_name),
+            "time_display": _format_local_time(ts, tz_name),
             "total_kw": round(total_kw, 2),
             "compressor_kw": round(comp_kw, 2),
             "hvac_kw": round(hvac_kw, 2),
@@ -831,7 +852,6 @@ def find_demand_peaks(
             "source": "tuya_instantaneous",
         })
 
-    # Sort back by timestamp for display
     results.sort(key=lambda r: r["total_kw"], reverse=True)
     return results
 
@@ -843,6 +863,7 @@ def _find_peaks_from_smt(
     window_start: datetime,
     window_end: datetime,
     top_n: int,
+    tz_name: str = KESTREL_TIMEZONE,
 ) -> list[dict[str, Any]]:
     """Fallback: find peaks from SMT 15-min intervals when no Tuya data."""
     in_window = sorted(
@@ -867,6 +888,8 @@ def _find_peaks_from_smt(
         )
         results.append({
             "timestamp": ts.isoformat(),
+            "timestamp_display": _format_local_datetime(ts, tz_name),
+            "time_display": _format_local_time(ts, tz_name),
             "total_kw": avg_kw,
             "compressor_kw": None,
             "hvac_kw": None,
@@ -1020,6 +1043,7 @@ def generate_energy_story(
     hvac_stats: dict[str, Any],
     agreement: dict[str, Any],
     *,
+    primary_zone: str = "downstairs",
     tz_name: str = KESTREL_TIMEZONE,
 ) -> list[str]:
     """
@@ -1028,34 +1052,39 @@ def generate_energy_story(
     Only reports findings supported by actual data; does not fabricate
     appliance identification.
     """
-    tz = ZoneInfo(tz_name)
     findings: list[str] = []
 
     # Peak demand finding
     if peaks:
         top_peak = peaks[0]
-        ts = _parse_ts(top_peak["timestamp"]).astimezone(tz)
-        time_str = ts.strftime("%-I:%M %p")
+        time_str = top_peak.get("time_display") or ""
         kw = top_peak["total_kw"]
-        if kw > 0:
-            findings.append(f"Peak demand was {kw:.1f} kW at {time_str}.")
+        if kw > 0 and time_str:
+            source_note = "" if top_peak.get("source") != "smt_interval" else " (SMT 15-min avg)"
+            findings.append(f"Peak demand was {kw:.1f} kW at {time_str}{source_note}.")
 
-    # HVAC contribution at peak
-    if peaks and hvac_stats.get("available"):
-        top_peak = peaks[0]
-        hvac_kw = top_peak.get("hvac_kw")
-        total_kw = top_peak.get("total_kw", 0)
-        if hvac_kw and total_kw > 0:
-            hvac_pct = 100.0 * hvac_kw / total_kw
-            findings.append(f"HVAC accounted for approximately {hvac_pct:.0f}% of that peak.")
+    # HVAC % of total energy (primary story finding — more meaningful than peak fraction)
+    hvac_pct_total = breakdown.get("hvac_pct_of_smt")
+    if hvac_pct_total is not None and breakdown.get("has_smt") and breakdown.get("has_tuya"):
+        findings.append(
+            f"HVAC used approximately {hvac_pct_total:.0f}% of total household energy."
+        )
 
     # Cooling runtime
     if hvac_stats.get("available") and hvac_stats.get("total_runtime_minutes", 0) > 0:
         total_min = hvac_stats["total_runtime_minutes"]
         hours = int(total_min // 60)
         mins = int(total_min % 60)
-        if hours > 0:
-            findings.append(f"Cooling ran for {hours} hour{'s' if hours != 1 else ''} {mins} minute{'s' if mins != 1 else ''}.")
+        if hours > 0 and mins > 0:
+            findings.append(
+                f"Cooling ran for {hours} hr {mins} min "
+                f"across {hvac_stats['cycle_count']} cycle{'s' if hvac_stats['cycle_count'] != 1 else ''}."
+            )
+        elif hours > 0:
+            findings.append(
+                f"Cooling ran for {hours} hour{'s' if hours != 1 else ''} "
+                f"({hvac_stats['cycle_count']} cycle{'s' if hvac_stats['cycle_count'] != 1 else ''})."
+            )
         else:
             findings.append(f"Cooling ran for {mins} minute{'s' if mins != 1 else ''}.")
 
@@ -1064,27 +1093,19 @@ def generate_energy_story(
         tuya_frac = agreement.get("tuya_fraction_pct")
         if tuya_frac is not None:
             findings.append(
-                f"The 4 Tuya-monitored appliances used approximately {tuya_frac:.0f}% of SMT total energy."
+                f"The 4 Tuya-monitored appliances accounted for {tuya_frac:.0f}% of SMT total."
             )
 
-    # HVAC % of total
-    hvac_pct_total = breakdown.get("hvac_pct_of_smt")
-    if hvac_pct_total is not None and breakdown.get("has_smt"):
-        findings.append(
-            f"HVAC accounted for approximately {hvac_pct_total:.0f}% of total household energy."
-        )
-
-    # Largest non-HVAC peak from peaks list
+    # Largest non-HVAC peak
     non_hvac_peaks = [p for p in peaks if p.get("explanation") in ("Non-HVAC load", "Mixed load")]
     if non_hvac_peaks:
         top_non_hvac = max(non_hvac_peaks, key=lambda p: p.get("non_hvac_kw") or 0)
-        ts = _parse_ts(top_non_hvac["timestamp"]).astimezone(tz)
-        time_str = ts.strftime("%-I:%M %p")
-        non_hvac_kw = top_non_hvac.get("non_hvac_kw", 0)
-        if non_hvac_kw and non_hvac_kw > 0:
-            findings.append(f"The largest non-HVAC load occurred around {time_str}.")
+        time_str = top_non_hvac.get("time_display") or ""
+        non_hvac_kw = top_non_hvac.get("non_hvac_kw") or 0
+        if non_hvac_kw > 0 and time_str:
+            findings.append(f"Largest non-HVAC load was {non_hvac_kw:.1f} kW around {time_str}.")
 
-    return findings[:5]  # cap at 5
+    return findings[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1353,9 @@ def compute_kestrel_analysis(
     )
 
     story = generate_energy_story(
-        window, breakdown, peaks, hvac_stats, agreement, tz_name=tz_name
+        window, breakdown, peaks, hvac_stats, agreement,
+        primary_zone=primary_zone,
+        tz_name=tz_name,
     )
 
     return {

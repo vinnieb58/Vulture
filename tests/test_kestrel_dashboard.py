@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -23,21 +23,33 @@ from kestrel.storage import init_db, upsert_intervals
 
 
 CHICAGO = ZoneInfo("America/Chicago")
-FIXED_NOW = datetime(2026, 6, 17, 12, 0, tzinfo=CHICAGO)
+UTC = timezone.utc
+
+# Use timestamps relative to "now" so retention-window pruning (14 days for
+# Nest, 7 days for SMT peak queries) does not silently drop test data as the
+# test calendar advances past any hardcoded date.
+def _recent_iso(hours_ago: float = 1.0) -> str:
+    ts = datetime.now(UTC) - timedelta(hours=hours_ago)
+    return ts.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 def _seed_db(db_path: Path) -> None:
+    # Two intervals on different days so "Avg daily (last 2 days)" renders.
+    # Place one today (~2h ago) and one yesterday (~26h ago), both within the
+    # 7-day peak-query window.
+    today_start = datetime.now(UTC) - timedelta(hours=2)
+    yesterday_start = datetime.now(UTC) - timedelta(hours=26)
     rows = [
         EnergyInterval(
             provider=PROVIDER_SMART_METER_TEXAS,
-            start_ts="2026-06-15T18:00:00+00:00",
-            end_ts="2026-06-15T18:15:00+00:00",
+            start_ts=today_start.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            end_ts=(today_start + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             kwh=2.5,
         ),
         EnergyInterval(
             provider=PROVIDER_SMART_METER_TEXAS,
-            start_ts="2026-06-16T05:00:00+00:00",
-            end_ts="2026-06-16T05:15:00+00:00",
+            start_ts=yesterday_start.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            end_ts=(yesterday_start + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             kwh=1.5,
         ),
     ]
@@ -46,11 +58,14 @@ def _seed_db(db_path: Path) -> None:
 
 
 def _write_status(path: Path, **overrides: object) -> None:
+    now = datetime.now(UTC)
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    week_ago = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     payload = {
-        "generated_at": "2026-06-16T12:00:00+00:00",
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
         "interval_count": 96,
-        "range_start": "2026-06-09T00:00:00+00:00",
-        "range_end": "2026-06-16T00:00:00+00:00",
+        "range_start": week_ago,
+        "range_end": yesterday,
         "total_kwh": 42.5,
         "missing_interval_count": 3,
     }
@@ -176,12 +191,16 @@ class TestKestrelDashboardHTTP:
         monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
         monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", history_path)
         monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", history_path)
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", history_path)
 
         from kestrel.nest_history import append_history_from_snapshot
 
+        # Use recent timestamps so the 14-day retention window does not prune the record.
+        recent_ts = datetime.now(UTC) - timedelta(hours=1)
+        recent_iso = recent_ts.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         append_history_from_snapshot(
             {
-                "updated_at": "2026-06-16T05:05:00+00:00",
+                "updated_at": recent_iso,
                 "thermostats": {
                     "downstairs": {
                         "temperature": 72,
@@ -202,7 +221,7 @@ class TestKestrelDashboardHTTP:
                 },
             },
             path=history_path,
-            now=datetime(2026, 6, 16, 5, 5, tzinfo=ZoneInfo("UTC")),
+            now=recent_ts,
         )
 
         response = self._stub_host(client).get("/kestrel")
@@ -211,7 +230,8 @@ class TestKestrelDashboardHTTP:
         assert "HVAC Performance" in text
         assert "Nest Collection" in text
         assert "Today's Energy Story" in text
-        assert "Downstairs" in text or "House any" in text
+        # Zone table should render (either cycle-analysis or polling-status fallback)
+        assert "Downstairs" in text or "House any" in text or "downstairs" in text.lower()
 
     def test_kestrel_page_shows_nest_auth_failure_when_stale_and_error_file(
         self, client, tmp_path, monkeypatch

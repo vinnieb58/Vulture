@@ -429,6 +429,27 @@ class TestPeakEventGrouping:
         assert len(peaks) >= 1
         assert peaks[0]["source"] == "smt_interval"
 
+    def test_peaks_include_local_time_display(self):
+        """Each peak must include human-readable local-time fields."""
+        base = NOW
+        records = [_tuya_record(base + timedelta(seconds=i * 60), ac_w=2500) for i in range(5)]
+        peaks = find_demand_peaks(records, [], [], window_start=base, window_end=base + timedelta(hours=1))
+        if peaks:
+            assert "timestamp_display" in peaks[0]
+            assert "time_display" in peaks[0]
+            # timestamp_display must not be a raw ISO string (must contain space or comma)
+            display = peaks[0]["timestamp_display"]
+            assert " " in display, f"timestamp_display looks like raw ISO: {display!r}"
+
+    def test_smt_fallback_peaks_no_tuya_fields_as_zero(self):
+        """SMT-only peaks must show None for Tuya fields, not 0."""
+        smt = [_smt_row(NOW.isoformat(), 1.5)]
+        peaks = find_demand_peaks([], smt, [], window_start=NOW, window_end=NOW + timedelta(hours=1))
+        if peaks:
+            assert peaks[0]["compressor_kw"] is None
+            assert peaks[0]["hvac_kw"] is None
+            assert peaks[0]["non_hvac_kw"] is None
+
 
 # ---------------------------------------------------------------------------
 # 7. HVAC cycle detection

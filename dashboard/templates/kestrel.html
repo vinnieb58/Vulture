@@ -693,13 +693,11 @@
             <span class="peak-rank">#{{ loop.index }}</span>
             <div class="peak-details">
               <span class="peak-time">
-                {{ peak.timestamp | tojson | replace('"','') | truncate(16, False, '') }}
-                {# format in JS is nicer, but we show ISO fallback here #}
+                {{ peak.timestamp_display if peak.timestamp_display else peak.timestamp[:16] }}
                 — {{ "%.2f"|format(peak.total_kw) }} kW
               </span>
               <span class="peak-numbers">
-                {% if peak.hvac_kw is not none %}HVAC {{ "%.2f"|format(peak.hvac_kw) }} kW · {% endif %}
-                {% if peak.compressor_kw is not none %}Compressor {{ "%.2f"|format(peak.compressor_kw) }} kW · {% endif %}
+                {% if peak.hvac_kw is not none %}HVAC {{ "%.2f"|format(peak.hvac_kw) }} kW{% if peak.compressor_kw is not none %} (comp. {{ "%.2f"|format(peak.compressor_kw) }} kW){% endif %} · {% endif %}
                 {% if peak.non_hvac_kw is not none %}Other {{ "%.2f"|format(peak.non_hvac_kw) }} kW · {% endif %}
                 {% if peak.nest_action %}Nest: {{ peak.nest_action }}{% endif %}
               </span>
@@ -709,8 +707,11 @@
           {% endfor %}
         </div>
         <div class="section-note">
-          Peaks from {% if energy.peaks[0].source == 'smt_interval' %}SMT 15-minute intervals{% else %}Tuya instantaneous readings{% endif %}.
-          Nearby samples within 30 minutes are grouped into one event.
+          {% if energy.peaks[0].source == 'smt_interval' %}
+          Peaks from SMT 15-minute average-kW (Tuya data unavailable for this window).
+          {% else %}
+          Peaks from Tuya instantaneous readings; nearby samples within 30 minutes grouped as one event.
+          {% endif %}
         </div>
         {% else %}
         <div class="chart-empty">No peak data available for the selected window.</div>
@@ -785,10 +786,17 @@
         {% else %}
         <div class="card-subtitle">No cooling cycles detected in the selected window.</div>
         {% endif %}
-        {# Always show Nest zone runtime table when data is available #}
+        {# Show Nest zone runtime table as fallback polling status when available #}
         {% if hvac.primary_summary and hvac.primary_summary.rows %}
         <div style="margin-top:0.75rem;">
-          <div class="card-subtitle">{{ hvac.primary_summary.title }}</div>
+          <div class="card-subtitle">
+            {% if hvac_stats.available %}
+              {{ hvac.primary_summary.title }}
+            {% else %}
+              Nest polling status — {{ hvac.primary_summary.title | lower }}
+              <span style="color:var(--muted);font-size:0.75rem;">(no cycles detected in selected window)</span>
+            {% endif %}
+          </div>
           <table class="data-table">
             <thead>
               <tr>
