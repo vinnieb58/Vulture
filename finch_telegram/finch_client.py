@@ -163,3 +163,38 @@ def preference_alias(new_key: str, existing_key: str) -> dict[str, Any]:
         "/finch/preferences/alias",
         json={"from_key": new_key, "to_key": existing_key},
     )
+
+
+def staples_list() -> dict[str, Any]:
+    return _request("GET", "/finch/staples")
+
+
+def staples_pending(chat_key: str) -> dict[str, Any]:
+    return _request("GET", "/finch/staples/pending", params={"chat_key": chat_key})
+
+
+def staples_start(chat_key: str) -> dict[str, Any]:
+    return _request("POST", "/finch/staples/start", json={"chat_key": chat_key})
+
+
+def staples_remove(chat_key: str, targets: str) -> dict[str, Any]:
+    return _request(
+        "POST",
+        "/finch/staples/remove",
+        json={"chat_key": chat_key, "targets": targets},
+    )
+
+
+def staples_confirm(chat_key: str, *, source: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"chat_key": chat_key}
+    if source:
+        body["source"] = source
+    return _request("POST", "/finch/staples/confirm", json=body)
+
+
+def staples_cancel(chat_key: str) -> dict[str, Any]:
+    return _request("POST", "/finch/staples/cancel", json={"chat_key": chat_key})
+
+
+def cart_pending(chat_key: str) -> dict[str, Any]:
+    return _request("GET", "/finch/cart/pending", params={"chat_key": chat_key})

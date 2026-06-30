@@ -70,10 +70,64 @@ def _handle_pending_reply(
     return commands.format_choose_response(payload)
 
 
+def _handle_staple_reply(
+    message: telegram_client.InboundTextMessage,
+    command: commands.StaplesConfirmCommand
+    | commands.StaplesRemoveCommand
+    | commands.StaplesCancelCommand,
+) -> str:
+    chat_key = _chat_key(message)
+    try:
+        if isinstance(command, commands.StaplesCancelCommand):
+            payload = finch_client.staples_cancel(chat_key)
+            return commands.format_staple_batch_response(payload)
+        if isinstance(command, commands.StaplesRemoveCommand):
+            payload = finch_client.staples_remove(chat_key, command.targets)
+            if not payload.get("ok"):
+                return commands.format_staple_batch_response(payload)
+            return commands.format_staple_batch_response(payload)
+        payload = finch_client.staples_confirm(
+            chat_key,
+            source="telegram",
+        )
+    except finch_client.FinchApiError as exc:
+        if exc.status_code == 403:
+            return commands.format_cart_blocked(exc.detail)
+        return _format_finch_api_error(exc)
+    if payload.get("needs_choice"):
+        return commands.format_add_list_response(payload)
+    if not payload.get("ok") and payload.get("message"):
+        return commands.format_staple_batch_response(payload)
+    return commands.format_add_list_response(payload)
+
+
 def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
-    pending = commands.parse_pending_reply(message.text)
-    if pending is not None:
-        return _handle_pending_reply(message, pending)
+    chat_key = _chat_key(message)
+
+    pending_reply = commands.parse_pending_reply(message.text)
+    staple_reply = commands.parse_staple_reply(message.text)
+
+    if pending_reply is not None and not isinstance(pending_reply, commands.CancelPendingCommand):
+        return _handle_pending_reply(message, pending_reply)
+
+    if isinstance(pending_reply, commands.CancelPendingCommand) or staple_reply is not None:
+        product_pending = None
+        staple_pending = None
+        try:
+            product_pending = finch_client.cart_pending(chat_key).get("pending")
+        except Exception:
+            product_pending = None
+        if staple_reply is not None:
+            try:
+                staple_pending = finch_client.staples_pending(chat_key).get("pending")
+            except Exception:
+                staple_pending = None
+
+        if isinstance(pending_reply, commands.CancelPendingCommand):
+            if product_pending or not staple_pending:
+                return _handle_pending_reply(message, pending_reply)
+        if staple_reply is not None and staple_pending:
+            return _handle_staple_reply(message, staple_reply)
 
     command = commands.parse_command(message.text)
     if command is None:
@@ -82,7 +136,19 @@ def handle_message(message: telegram_client.InboundTextMessage) -> str | None:
             return "Usage: preview eggs, milk"
         return "Unknown command. Send 'help' for available commands."
 
-    chat_key = _chat_key(message)
+    if isinstance(command, commands.AddStaplesCommand):
+        try:
+            payload = finch_client.staples_start(chat_key)
+        except finch_client.FinchApiError as exc:
+            return _format_finch_api_error(exc)
+        return commands.format_staple_batch_response(payload)
+
+    if isinstance(command, commands.StaplesListCommand):
+        try:
+            payload = finch_client.staples_list()
+        except finch_client.FinchApiError as exc:
+            return _format_finch_api_error(exc)
+        return commands.format_staples_response(payload)
 
     if isinstance(command, commands.StartCommand):
         return commands.START_TEXT

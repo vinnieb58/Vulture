@@ -17,6 +17,32 @@ _QUANTITY_ADD_RE = re.compile(
 
 
 @dataclass(frozen=True)
+class AddStaplesCommand:
+    kind: str = "add-staples"
+
+
+@dataclass(frozen=True)
+class StaplesListCommand:
+    kind: str = "staples-list"
+
+
+@dataclass(frozen=True)
+class StaplesConfirmCommand:
+    kind: str = "staples-confirm"
+
+
+@dataclass(frozen=True)
+class StaplesRemoveCommand:
+    targets: str
+    kind: str = "staples-remove"
+
+
+@dataclass(frozen=True)
+class StaplesCancelCommand:
+    kind: str = "staples-cancel"
+
+
+@dataclass(frozen=True)
 class StartCommand:
     kind: str = "start"
 
@@ -133,6 +159,8 @@ Command = (
     | PreviewCommand
     | AddCommand
     | AddListCommand
+    | AddStaplesCommand
+    | StaplesListCommand
     | ChooseReplyCommand
     | CancelPendingCommand
     | SearchPendingCommand
@@ -145,6 +173,8 @@ Command = (
     | AliasPrefCommand
 )
 
+StapleReplyCommand = StaplesConfirmCommand | StaplesRemoveCommand | StaplesCancelCommand
+
 _PENDING_PREFER_RE = re.compile(r"^prefer\s+(\d+)\s*$", re.IGNORECASE)
 _PENDING_CHOOSE_RE = re.compile(r"^choose\s+(\d+)\s*$", re.IGNORECASE)
 _PENDING_DIGIT_RE = re.compile(r"^(\d+)\s*$")
@@ -154,6 +184,7 @@ _PENDING_BACK_RE = re.compile(r"^back\s*$", re.IGNORECASE)
 _PENDING_SEARCH_RE = re.compile(r"^search\s+(.+)$", re.IGNORECASE)
 _ALIAS_PREF_RE = re.compile(r"^alias\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
 _REMOVE_PREF_RE = re.compile(r"^remove\s+preference\s+(.+)$", re.IGNORECASE)
+_STAPLES_REMOVE_RE = re.compile(r"^remove\s+(.+)$", re.IGNORECASE)
 
 HELP_TEXT = """Finch grocery commands:
 - add eggs
@@ -193,6 +224,25 @@ def normalize_message(message: str) -> str:
     if text.startswith("/") and "@" in text:
         text = text.split("@", 1)[0]
     return text
+
+
+def parse_staple_reply(message: str) -> StapleReplyCommand | None:
+    text = normalize_message(message)
+    if not text:
+        return None
+    if _REMOVE_PREF_RE.match(text):
+        return None
+    lower = text.lower()
+    if lower == "confirm":
+        return StaplesConfirmCommand()
+    if lower in ("nvm", "cancel"):
+        return StaplesCancelCommand()
+    match = _STAPLES_REMOVE_RE.match(text)
+    if match:
+        targets = match.group(1).strip()
+        if targets:
+            return StaplesRemoveCommand(targets=targets)
+    return None
 
 
 def parse_pending_reply(
@@ -289,12 +339,26 @@ def parse_command(message: str) -> Command | None:
     if lower.startswith("add-list "):
         payload = text[len("add-list ") :].strip()
         return AddListCommand(text=payload) if payload else None
+    if lower == "add staples":
+        return AddStaplesCommand()
     if lower.startswith("add "):
         payload = text[len("add ") :].strip()
         return AddCommand(item=payload) if payload else None
+    if lower == "staples":
+        return StaplesListCommand()
     if _QUANTITY_ADD_RE.match(text):
         return AddCommand(item=text.strip())
     return None
+
+
+def format_staples_response(payload: dict[str, Any]) -> str:
+    return str(payload.get("text") or "No staples configured.")
+
+
+def format_staple_batch_response(payload: dict[str, Any]) -> str:
+    if payload.get("message") and not payload.get("text"):
+        return str(payload["message"])
+    return str(payload.get("text") or payload.get("message") or "Staple batch updated.")
 
 
 def format_preview_response(payload: dict[str, Any]) -> str:
