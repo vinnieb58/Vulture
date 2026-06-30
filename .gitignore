@@ -45,4 +45,8 @@ experiments/simplyfresh_probe/artifacts/
 
 # Kestrel probe runtime data (SQLite, status JSON, debug artifacts)
 data/kestrel/
+data/telemetry/
+data/kestrel_nest_history.jsonl
+data/kestrel_tuya_power_history.jsonl
+data/raven_metrics_history.jsonl
 *.trace.zip

@@ -35,12 +35,21 @@ DISPOSABLE_FILE_GLOBS = (
     "tuya-raw.json",
 )
 
-# Critical JSONL history files (bounded retention at runtime, still long-term operational).
-CRITICAL_JSONL_REL_PATHS = (
+# Dashboard rolling JSONL (short retention; long-term copies live in data/telemetry/*_archive.jsonl).
+CRITICAL_JSONL_DASHBOARD_REL_PATHS = (
     "data/kestrel_nest_history.jsonl",
     "data/kestrel_tuya_power_history.jsonl",
     "data/raven_metrics_history.jsonl",
 )
+
+# Indefinite long-term telemetry archives (append-only; never pruned at runtime).
+CRITICAL_JSONL_ARCHIVE_REL_PATHS = (
+    "data/telemetry/nest_history_archive.jsonl",
+    "data/telemetry/tuya_power_history_archive.jsonl",
+    "data/telemetry/raven_metrics_history_archive.jsonl",
+)
+
+CRITICAL_JSONL_REL_PATHS = CRITICAL_JSONL_ARCHIVE_REL_PATHS + CRITICAL_JSONL_DASHBOARD_REL_PATHS
 
 # Latest-value snapshots needed for dashboard/probe continuity after restore.
 CRITICAL_SNAPSHOT_REL_PATHS = (
@@ -167,17 +176,40 @@ def discover_long_term_data(
 
     for rel in CRITICAL_JSONL_REL_PATHS:
         path = repo_root / rel
+        is_archive = rel.startswith("data/telemetry/") and rel.endswith("_archive.jsonl")
         entry = LongTermDataEntry(
             rel_path=rel,
-            category="jsonl",
-            description="Append-only telemetry/history JSONL",
+            category="jsonl_archive" if is_archive else "jsonl",
+            description=(
+                "Indefinite append-only telemetry archive"
+                if is_archive
+                else "Dashboard rolling telemetry JSONL"
+            ),
             optional=True,
         )
         inventory.catalog.append(entry)
         if path.is_file():
-            inventory.jsonl_files.append(path.resolve())
+            if path not in inventory.jsonl_files:
+                inventory.jsonl_files.append(path.resolve())
         else:
             inventory.missing_optional.append(rel)
+
+    telemetry_dir = repo_root / "data" / "telemetry"
+    if telemetry_dir.is_dir():
+        for path in sorted(telemetry_dir.glob("*.jsonl")):
+            rel = _rel_posix(path, repo_root)
+            if rel in {entry.rel_path for entry in inventory.catalog}:
+                continue
+            inventory.catalog.append(
+                LongTermDataEntry(
+                    rel_path=rel,
+                    category="jsonl_archive",
+                    description="Indefinite telemetry archive (discovered)",
+                    optional=True,
+                )
+            )
+            if path.is_file() and path.resolve() not in inventory.jsonl_files:
+                inventory.jsonl_files.append(path.resolve())
 
     for rel in CRITICAL_SNAPSHOT_REL_PATHS:
         path = repo_root / rel

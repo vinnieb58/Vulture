@@ -11,12 +11,30 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from kestrel.telemetry_retention import (
+        append_jsonl_archive,
+        bootstrap_archive_from_dashboard,
+        tuya_archive_path,
+        tuya_archive_policy,
+        tuya_dashboard_retention_days,
+    )
+except ImportError:
+    from telemetry_retention import (  # type: ignore[no-redef]
+        append_jsonl_archive,
+        bootstrap_archive_from_dashboard,
+        tuya_archive_path,
+        tuya_archive_policy,
+        tuya_dashboard_retention_days,
+    )
+
 log = logging.getLogger(__name__)
 
 _history_io_lock = threading.Lock()
 
 POLL_INTERVAL_MINUTES = 5
-RETENTION_DAYS = 14
+RETENTION_DAYS = tuya_dashboard_retention_days()
+DASHBOARD_RETENTION_DAYS = RETENTION_DAYS
 
 DEFAULT_HISTORY_PATH = "data/kestrel_tuya_power_history.jsonl"
 
@@ -178,17 +196,32 @@ def append_history_from_snapshot(
     snapshot: dict[str, Any],
     *,
     path: Path | str | None = None,
+    archive_path: Path | str | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Append one history record and prune old rows. Returns True on success."""
+    """Append one history record, archive indefinitely, prune dashboard rolling file."""
     history_path = Path(path or default_history_path())
+    archive_file = Path(archive_path or tuya_archive_path())
     record = TuyaPowerHistoryRecord.from_dict(build_history_record(snapshot))
     if record is None:
         log.warning("Could not build Tuya power history record from snapshot")
         return False
 
     ts_now = now or record.timestamp
+    json_line = record.to_json_line()
+    policy = tuya_archive_policy()
+
     with _history_io_lock:
+        bootstrap_archive_from_dashboard(archive_file, history_path, policy=policy)
+        if not append_jsonl_archive(
+            archive_file,
+            json_line,
+            record_timestamp=record.timestamp.isoformat(),
+            policy=policy,
+        ):
+            log.warning("Tuya long-term archive append failed")
+            return False
+
         current = prune_history_records(read_history(history_path), now=ts_now)
         current.append(record)
         current.sort(key=lambda item: item.timestamp)

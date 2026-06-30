@@ -52,6 +52,10 @@ def collect_source_files(repo_root: Path) -> list[Path]:
         if kestrel_dir.is_dir():
             candidates.extend(sorted(kestrel_dir.glob("*.db")))
 
+        telemetry_dir = data_dir / "telemetry"
+        if telemetry_dir.is_dir():
+            candidates.extend(sorted(telemetry_dir.glob("*.jsonl")))
+
         for name in (
             "kestrel_nest_status.json",
             "kestrel_nest_history.jsonl",
