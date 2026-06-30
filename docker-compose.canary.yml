@@ -4,7 +4,8 @@
 services:
   canary:
     build:
-      context: ./canary
+      context: .
+      dockerfile: canary/Dockerfile
     container_name: canary
     restart: unless-stopped
     network_mode: host
