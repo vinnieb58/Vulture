@@ -7,6 +7,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UPDATE_RAVEN = REPO_ROOT / "scripts" / "update_raven.sh"
 UPDATE_RAVEN_QUICK = REPO_ROOT / "scripts" / "update_raven_quick.sh"
+REBUILD_DOCKER = REPO_ROOT / "scripts" / "rebuild_docker.sh"
+GIT_STATE = REPO_ROOT / "scripts" / "raven_git_state.sh"
 FINCH_HELPER = REPO_ROOT / "scripts" / "raven_finch_services.sh"
 PREUPDATE_BACKUP = REPO_ROOT / "scripts" / "raven_preupdate_backup.sh"
 PREUPDATE_BACKUP_PY = REPO_ROOT / "scripts" / "raven_preupdate_backup.py"
@@ -138,3 +140,39 @@ def test_preupdate_backup_does_not_print_secret_values() -> None:
     text = _read(PREUPDATE_BACKUP)
     assert "cat .env" not in text
     assert "Files included" in text
+
+
+def test_raven_git_state_helper_exists() -> None:
+    assert GIT_STATE.is_file()
+
+
+def test_rebuild_docker_sources_git_state_helper() -> None:
+    text = _read(REBUILD_DOCKER)
+    assert "raven_git_state.sh" in text
+    assert "print_raven_git_state" in text
+
+
+def test_rebuild_docker_prints_git_state_before_deploy() -> None:
+    text = _read(REBUILD_DOCKER)
+    assert 'section "Git state (deploy)"' in text
+    git_section_idx = text.index('section "Git state (deploy)"')
+    docker_check_idx = text.index('if ! command -v docker', git_section_idx)
+    assert git_section_idx < docker_check_idx
+
+
+def test_update_raven_quick_sources_git_state_helper() -> None:
+    text = _read(UPDATE_RAVEN_QUICK)
+    assert "raven_git_state.sh" in text
+    assert "print_raven_git_state" in text
+
+
+def test_update_raven_quick_prints_dashboard_logs_on_health_failure() -> None:
+    text = _read(UPDATE_RAVEN_QUICK)
+    assert "print_dashboard_logs_on_failure" in text
+    assert "Dashboard health check failed" in text
+
+
+def test_rebuild_docker_prints_dashboard_logs_on_health_failure() -> None:
+    text = _read(REBUILD_DOCKER)
+    assert "print_dashboard_logs_on_failure" in text
+    assert "dashboard health check failed" in text

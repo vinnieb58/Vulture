@@ -8,6 +8,13 @@ __pycache__/
 *.sqlite3
 *.db
 
+# Runtime data — data/.gitkeep is tracked to preserve the directory in git
+data/*.json
+data/*.jsonl
+
+# Generated deploy/diagnostic snapshot (not source documentation)
+docs/current/RAVEN_DOCKER_SNAPSHOT.md
+
 # Secrets
 .env
 
