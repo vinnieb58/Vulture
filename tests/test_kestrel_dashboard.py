@@ -105,11 +105,15 @@ class TestKestrelDashboardHTTP:
         text = response.text
         # Redesigned page structure (energy-explanation layout)
         assert "Today's Energy Story" in text
+        # Donut card always renders (may show unavailable state without Tuya history)
+        assert "Energy Use Breakdown" in text
         assert "Daily usage — last 30 days" in text
         assert "Historical Trends" in text
         assert "chart-data-daily-30" in text
         assert "chart-data-energy-timeline" in text
         assert "kestrel_energy_timeline.js" in text
+        # Old horizontal breakdown bars must be removed
+        assert "Dryer + Dishwasher" not in text
 
     def test_nest_home_card_no_longer_renders_top_intervals_or_full_daily_totals(
         self, client, tmp_path, monkeypatch
@@ -777,7 +781,7 @@ class TestKestrelRenderVerification:
         assert "Combined Energy + HVAC Timeline" in text, "Section 4 heading missing"
         assert "Top Demand Peaks" in text,               "Section 5 heading missing"
         assert "HVAC Performance" in text,               "Section 6 heading missing"
-        assert "Energy Breakdown" in text,               "Section 7 heading missing"
+        assert "Energy Use Breakdown" in text,           "Section 7 (donut) heading missing"
         assert "Historical Trends" in text,              "Section 8 heading missing"
         assert "Data Quality and Diagnostics" in text,   "Section 9 heading missing"
 
@@ -1045,7 +1049,7 @@ class TestKestrelRenderVerification:
         assert response.status_code == 200
         text = response.text
 
-        assert "Energy Breakdown" in text
+        assert "Energy Use Breakdown" in text  # donut card (shows unavailable state)
 
         # Without Tuya data, HVAC energy row should not show "0.00 kWh"
         # (it should either be omitted or show an empty-state message).
@@ -1120,6 +1124,63 @@ class TestKestrelRenderVerification:
     # ------------------------------------------------------------------
     # Stale source degrades gracefully
     # ------------------------------------------------------------------
+
+    def test_donut_appears_before_combined_timeline(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Test 7: Energy Use Breakdown donut must appear before Combined Timeline."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        _write_status(status_path)
+        _seed_db(db_path)
+        self._patch_all_sources(
+            monkeypatch, tmp_path,
+            status_path=status_path, db_path=db_path,
+            tuya_status_path=tmp_path / "no_tuya.json",
+            tuya_history_path=tmp_path / "no_tuya.jsonl",
+            nest_history_path=tmp_path / "no_nest.jsonl",
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        donut_pos = text.find("Energy Use Breakdown")
+        timeline_pos = text.find("Combined Energy + HVAC Timeline")
+        assert donut_pos != -1, "Energy Use Breakdown section not found"
+        assert timeline_pos != -1, "Combined Energy + HVAC Timeline section not found"
+        assert donut_pos < timeline_pos, (
+            "Energy Use Breakdown must appear before Combined Energy + HVAC Timeline"
+        )
+
+    def test_old_horizontal_breakdown_bars_removed(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Test 8: The old horizontal Energy Breakdown bar card must not render."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        _write_status(status_path)
+        _seed_db(db_path)
+        self._patch_all_sources(
+            monkeypatch, tmp_path,
+            status_path=status_path, db_path=db_path,
+            tuya_status_path=tmp_path / "no_tuya.json",
+            tuya_history_path=tmp_path / "no_tuya.jsonl",
+            nest_history_path=tmp_path / "no_nest.jsonl",
+        )
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        # Old bar-chart rendered markup must be absent (CSS definitions may remain)
+        assert "Dryer + Dishwasher" not in text, (
+            "Old 'Dryer + Dishwasher' combined bar must be removed"
+        )
+        # Check the rendered div element is gone (not just the CSS class definition)
+        assert '<div class="breakdown-bar-track">' not in text, (
+            "Old horizontal breakdown-bar-track div elements must not render"
+        )
 
     def test_stale_tuya_degrades_gracefully(
         self, client, tmp_path, monkeypatch

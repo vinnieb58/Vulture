@@ -32,6 +32,8 @@ sys.path.insert(0, str(DASHBOARD_DIR))
 from kestrel_analysis import (
     AGREEMENT_ACCEPTABLE_PCT,
     AGREEMENT_GOOD_PCT,
+    DONUT_SMT_COVERAGE_THRESHOLD,
+    DONUT_TUYA_CHANNEL_THRESHOLD,
     HVAC_CYCLE_GAP_TOLERANCE_MINUTES,
     LONG_CYCLE_MINUTES,
     NEST_ACTION_COOLING,
@@ -51,6 +53,7 @@ from kestrel_analysis import (
     build_tuya_kw_series,
     compute_daily_trends,
     compute_energy_breakdown,
+    compute_energy_donut,
     compute_hvac_cycle_stats,
     compute_kestrel_analysis,
     compute_source_agreement,
@@ -62,6 +65,7 @@ from kestrel_analysis import (
     smt_coverage_pct,
     smt_kwh_to_avg_kw,
     smt_total_kwh,
+    tuya_channel_coverage_pct,
     tuya_coverage_pct,
 )
 
@@ -1101,3 +1105,243 @@ class TestUnmonitoredRemainderConditions:
         smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(4)]
         bd = compute_energy_breakdown(smt, [], window_start=base, window_end=base + timedelta(hours=1))
         assert bd["unmonitored_remainder_kwh"] is None
+
+
+# ---------------------------------------------------------------------------
+# Energy donut chart tests
+# ---------------------------------------------------------------------------
+
+def _make_complete_day_fixtures(
+    now_ref: datetime,
+    *,
+    smt_intervals: int = 96,
+    tuya_per_minute: int = 1200,
+    channel_power_w: dict | None = None,
+):
+    """
+    Build SMT rows and Tuya records for the calendar day BEFORE now_ref
+    (i.e. yesterday in America/Chicago).
+
+    smt_intervals: number of 15-min intervals (96 = full day, ≥87 for 90% coverage)
+    tuya_per_minute: Tuya records evenly distributed in the day (1200 ≈ 83%)
+    channel_power_w: per-channel watts; defaults to test values
+    """
+    from zoneinfo import ZoneInfo as _ZI
+    tz = _ZI("America/Chicago")
+    local_now = now_ref.astimezone(tz)
+    today_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = (today_local - timedelta(days=1)).astimezone(timezone.utc)
+    yesterday_end   = today_local.astimezone(timezone.utc)
+
+    if channel_power_w is None:
+        channel_power_w = {
+            "ac_compressor":       1820.0,
+            "furnace_air_handler":  510.0,
+            "dryer":                240.0,
+            "dishwasher":            80.0,
+        }
+
+    # SMT rows: evenly distributed across the day
+    smt = []
+    day_seconds = (yesterday_end - yesterday_start).total_seconds()
+    step = day_seconds / smt_intervals
+    for i in range(smt_intervals):
+        start = yesterday_start + timedelta(seconds=i * step)
+        end   = start + timedelta(minutes=15)
+        smt.append(_smt_row(start.isoformat(), 0.75))
+
+    # Tuya records: evenly distributed
+    tuya = []
+    step_t = day_seconds / tuya_per_minute
+    for i in range(tuya_per_minute):
+        ts = yesterday_start + timedelta(seconds=i * step_t)
+        tuya.append(FakeTuyaRecord(
+            timestamp=ts,
+            appliances={k: {"power_w": v} for k, v in channel_power_w.items()},
+        ))
+
+    return smt, tuya, yesterday_start, yesterday_end
+
+
+class TestComputeEnergyDonut:
+    """
+    Tests 1-10 for the energy-use donut chart.
+    Uses a frozen NOW so yesterday is always a complete calendar day.
+    """
+
+    # A reference "now" at noon on a test day (yesterday will be fully elapsed).
+    FROZEN_NOW = datetime(2026, 6, 17, 17, 0, tzinfo=timezone.utc)
+
+    def _valid_donut(self, channel_power_w=None, smt_intervals=96, tuya_per_minute=1200):
+        smt, tuya, _, _ = _make_complete_day_fixtures(
+            self.FROZEN_NOW,
+            smt_intervals=smt_intervals,
+            tuya_per_minute=tuya_per_minute,
+            channel_power_w=channel_power_w,
+        )
+        return compute_energy_donut(smt, tuya, now=self.FROZEN_NOW)
+
+    # --- Test 1: all four Tuya channels in payload ---
+    def test_donut_slices_contain_all_four_channels(self):
+        result = self._valid_donut()
+        assert result["available"], f"Expected available, got: {result}"
+        keys = {s["key"] for s in result["slices"]}
+        for key in TUYA_ALL_KEYS:
+            assert key in keys, f"Channel '{key}' missing from donut slices"
+
+    # --- Test 2: percentages sum to ~100% ---
+    def test_percentages_sum_to_approximately_100(self):
+        result = self._valid_donut()
+        assert result["available"]
+        total_pct = sum(s["pct"] for s in result["slices"])
+        assert abs(total_pct - 100.0) < 1.0, (
+            f"Percentages sum to {total_pct}, expected ~100%"
+        )
+
+    # --- Test 3: SMT total ≈ sum of all slices ---
+    def test_smt_total_equals_sum_of_slices_within_tolerance(self):
+        result = self._valid_donut()
+        assert result["available"]
+        slice_sum = sum(s["kwh"] for s in result["slices"])
+        assert abs(result["smt_kwh"] - slice_sum) < 0.5, (
+            f"SMT {result['smt_kwh']} != slice sum {slice_sum}"
+        )
+
+    # --- Test 4: unmonitored remainder withheld when coverage inadequate ---
+    def test_unmonitored_withheld_when_smt_coverage_below_threshold(self):
+        # Only 50 SMT intervals (50/96 ≈ 52% < 90% threshold)
+        result = self._valid_donut(smt_intervals=50)
+        assert not result["available"], "Should be unavailable with low SMT coverage"
+        assert "unmonitored" not in {s.get("key") for s in result.get("slices", [])}
+
+    # --- Test 5: partial Tuya coverage → no donut ---
+    def test_partial_tuya_coverage_returns_unavailable(self):
+        # Only 600 Tuya records (600/1440 ≈ 42% < 80% threshold)
+        result = self._valid_donut(tuya_per_minute=600)
+        assert not result["available"], "Should be unavailable with low Tuya coverage"
+
+    # --- Test 6: None power_w not treated as coverage ---
+    def test_none_power_not_counted_as_coverage(self):
+        # Records where power_w is None for all channels
+        smt, _, yesterday_start, yesterday_end = _make_complete_day_fixtures(
+            self.FROZEN_NOW, smt_intervals=96
+        )
+        # Build Tuya records with None power for ac_compressor
+        null_tuya = [
+            FakeTuyaRecord(
+                timestamp=yesterday_start + timedelta(seconds=i * 60),
+                appliances={
+                    "ac_compressor": {"power_w": None},  # no reading
+                    "furnace_air_handler": {"power_w": 500.0},
+                    "dryer": {"power_w": 200.0},
+                    "dishwasher": {"power_w": 100.0},
+                },
+            )
+            for i in range(1200)
+        ]
+        result = compute_energy_donut(smt, null_tuya, now=self.FROZEN_NOW)
+        # ac_compressor has 0% channel coverage → below 80% threshold → unavailable
+        assert not result["available"], (
+            "None power_w must not count as coverage — should be unavailable"
+        )
+
+    # --- Test 9: center total is SMT whole-home kWh ---
+    def test_center_total_is_smt_kwh(self):
+        result = self._valid_donut()
+        assert result["available"]
+        assert "smt_kwh" in result
+        assert result["smt_kwh"] > 0, "SMT kWh must be positive"
+
+    # --- Test 10: no negative remainder ---
+    def test_no_negative_unmonitored_remainder(self):
+        result = self._valid_donut()
+        assert result["available"]
+        unmon = next(s for s in result["slices"] if s["key"] == "unmonitored")
+        assert unmon["kwh"] >= 0, f"Unmonitored kWh is negative: {unmon['kwh']}"
+        assert unmon["pct"] >= 0, f"Unmonitored % is negative: {unmon['pct']}"
+
+    def test_calibration_issue_not_rendered(self):
+        """When circuits exceed SMT (calibration issue), donut must not render."""
+        # Give extremely high channel power so monitored > SMT
+        result = self._valid_donut(
+            channel_power_w={
+                "ac_compressor":       5000.0,
+                "furnace_air_handler": 5000.0,
+                "dryer":               5000.0,
+                "dishwasher":          5000.0,
+            }
+        )
+        # monitored_total will far exceed SMT → unavailable
+        assert not result["available"], (
+            "Should be unavailable when monitored circuits exceed SMT total"
+        )
+
+    def test_unavailable_state_has_diagnostics(self):
+        """Unavailable result must include diagnostic fields for display."""
+        result = compute_energy_donut([], [], now=self.FROZEN_NOW)
+        assert not result["available"]
+        assert "unavailable_reason" in result
+        assert result["unavailable_reason"]
+        assert "latest_smt_day" in result
+        assert "latest_tuya_day" in result
+
+    def test_window_label_uses_shared_phrasing(self):
+        result = self._valid_donut()
+        assert result["available"]
+        label = result.get("window_label", "")
+        assert "shared" in label.lower() or "Tuya" in label, (
+            f"Label should reference shared coverage; got: {label!r}"
+        )
+        # Must NOT say "Latest complete SMT day" when Tuya is also required
+        assert "SMT day" not in label, (
+            f"Label must not say 'SMT day' when Tuya is required; got: {label!r}"
+        )
+
+
+class TestTuyaChannelCoveragePct:
+    """Tests for the per-channel coverage helper."""
+
+    def test_full_coverage(self):
+        base = NOW
+        records = [
+            FakeTuyaRecord(
+                timestamp=base + timedelta(seconds=i * 60),
+                appliances={"ac_compressor": {"power_w": 2000.0}},
+            )
+            for i in range(60)
+        ]
+        cov = tuya_channel_coverage_pct(
+            records, "ac_compressor",
+            window_start=base, window_end=base + timedelta(hours=1)
+        )
+        assert cov == pytest.approx(100.0, abs=5.0)
+
+    def test_none_power_w_not_counted(self):
+        base = NOW
+        records = [
+            FakeTuyaRecord(
+                timestamp=base + timedelta(seconds=i * 60),
+                appliances={"ac_compressor": {"power_w": None}},
+            )
+            for i in range(60)
+        ]
+        cov = tuya_channel_coverage_pct(
+            records, "ac_compressor",
+            window_start=base, window_end=base + timedelta(hours=1)
+        )
+        assert cov == 0.0, "None power_w must not count as coverage"
+
+    def test_absent_channel_gives_zero(self):
+        base = NOW
+        records = [
+            FakeTuyaRecord(
+                timestamp=base + timedelta(seconds=i * 60),
+                appliances={},  # no channels
+            )
+            for i in range(60)
+        ]
+        cov = tuya_channel_coverage_pct(
+            records, "dryer",
+            window_start=base, window_end=base + timedelta(hours=1)
+        )
+        assert cov == 0.0

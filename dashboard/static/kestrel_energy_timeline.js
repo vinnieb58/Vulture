@@ -647,10 +647,229 @@
   }
 
   // -------------------------------------------------------------------------
+  // Donut chart
+  // -------------------------------------------------------------------------
+
+  function describeDonutArc(cx, cy, R, r, startAngle, endAngle) {
+    var x1o = cx + R * Math.cos(startAngle);
+    var y1o = cy + R * Math.sin(startAngle);
+    var x2o = cx + R * Math.cos(endAngle);
+    var y2o = cy + R * Math.sin(endAngle);
+    var x1i = cx + r * Math.cos(endAngle);
+    var y1i = cy + r * Math.sin(endAngle);
+    var x2i = cx + r * Math.cos(startAngle);
+    var y2i = cy + r * Math.sin(startAngle);
+    var largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+    return [
+      "M", x1o.toFixed(2), y1o.toFixed(2),
+      "A", R, R, 0, largeArc, 1, x2o.toFixed(2), y2o.toFixed(2),
+      "L", x1i.toFixed(2), y1i.toFixed(2),
+      "A", r, r, 0, largeArc, 0, x2i.toFixed(2), y2i.toFixed(2),
+      "Z",
+    ].join(" ");
+  }
+
+  function renderDonutUnavailable(container, data) {
+    container.innerHTML = "";
+    var wrapper = document.createElement("div");
+    wrapper.className = "donut-unavailable";
+
+    var msg = document.createElement("p");
+    msg.textContent = (data && data.unavailable_reason)
+      ? data.unavailable_reason
+      : "Energy breakdown unavailable.";
+    wrapper.appendChild(msg);
+
+    if (data) {
+      var diag = document.createElement("div");
+      diag.className = "donut-diag";
+      var items = [];
+      if (data.latest_smt_day) {
+        items.push(
+          "Latest SMT day: " + data.latest_smt_day +
+          " (" + (data.latest_smt_coverage_pct || 0).toFixed(0) + "% coverage, need \u226590%)"
+        );
+      }
+      if (data.latest_tuya_day) {
+        items.push(
+          "Latest Tuya day: " + data.latest_tuya_day +
+          " (" + (data.latest_tuya_channel_coverage_pct || 0).toFixed(0) +
+          "% min-channel coverage, need \u226580%)"
+        );
+      }
+      items.forEach(function (txt) {
+        var p = document.createElement("p");
+        p.textContent = txt;
+        diag.appendChild(p);
+      });
+      if (items.length) wrapper.appendChild(diag);
+    }
+    container.appendChild(wrapper);
+  }
+
+  function renderDonut(container, data) {
+    container.innerHTML = "";
+
+    if (!data || !data.available) {
+      renderDonutUnavailable(container, data);
+      return;
+    }
+
+    var slices = data.slices || [];
+    if (!slices.length) {
+      renderDonutUnavailable(container, null);
+      return;
+    }
+
+    // Layout: donut on left (0‥215), legend on right (215‥540)
+    var cx = 107, cy = 107, R = 90, r = 54;
+    var svgW = 540, svgH = 220;
+    var legendX = 215, legendY = 14, lineH = 32;
+
+    var svg = svgEl("svg", {
+      viewBox: "0 0 " + svgW + " " + svgH,
+      role: "img",
+      "aria-label": "Energy use breakdown donut chart",
+      style: "width:100%;height:auto;display:block;overflow:visible;",
+    });
+
+    // Background ring (empty state color)
+    svg.appendChild(svgEl("circle", {
+      cx: String(cx), cy: String(cy), r: String((R + r) / 2),
+      fill: "none",
+      stroke: "#2d3a4f",
+      "stroke-width": String(R - r),
+      opacity: "0.3",
+    }));
+
+    // Slices
+    var startAngle = -Math.PI / 2;
+    slices.forEach(function (slice) {
+      if (slice.pct <= 0) return;
+      var arcAngle = 2 * Math.PI * slice.pct / 100;
+      var endAngle = startAngle + arcAngle;
+      var path = svgEl("path", {
+        d: describeDonutArc(cx, cy, R, r, startAngle, endAngle),
+        fill: slice.color || "#8b949e",
+        stroke: "#0f1419",
+        "stroke-width": "1.5",
+        style: "cursor:crosshair;",
+        "data-series": "donut",
+        "data-label": slice.label,
+        "data-kwh": slice.kwh.toFixed(2),
+        "data-pct": slice.pct.toFixed(1),
+      });
+      svg.appendChild(path);
+      startAngle = endAngle;
+    });
+
+    // Center: SMT kWh (whole-home total)
+    var centerVal = svgEl("text", {
+      x: String(cx), y: String(cy - 6),
+      "text-anchor": "middle",
+      fill: "#e6edf3",
+      "font-size": "16",
+      "font-weight": "700",
+    });
+    centerVal.textContent = data.smt_kwh.toFixed(1);
+    svg.appendChild(centerVal);
+    var centerUnit = svgEl("text", {
+      x: String(cx), y: String(cy + 10),
+      "text-anchor": "middle",
+      fill: "#8b949e",
+      "font-size": "9",
+    });
+    centerUnit.textContent = "kWh SMT";
+    svg.appendChild(centerUnit);
+
+    // Legend
+    slices.forEach(function (slice, i) {
+      var y = legendY + i * lineH;
+
+      // Color swatch
+      svg.appendChild(svgEl("rect", {
+        x: String(legendX), y: String(y),
+        width: "10", height: "10",
+        fill: slice.color || "#8b949e",
+        rx: "2",
+      }));
+
+      // Label
+      var lbl = svgEl("text", {
+        x: String(legendX + 14), y: String(y + 9),
+        fill: "#e6edf3", "font-size": "11",
+      });
+      // Truncate long labels for narrow screens
+      var labelText = slice.label;
+      lbl.textContent = labelText;
+      svg.appendChild(lbl);
+
+      // kWh
+      var kwh = svgEl("text", {
+        x: String(legendX + 210), y: String(y + 9),
+        fill: "#e6edf3", "font-size": "11",
+        "text-anchor": "end",
+      });
+      kwh.textContent = slice.kwh.toFixed(1) + " kWh";
+      svg.appendChild(kwh);
+
+      // Percentage
+      var pct = svgEl("text", {
+        x: String(legendX + 260), y: String(y + 9),
+        fill: "#8b949e", "font-size": "11",
+        "text-anchor": "end",
+      });
+      pct.textContent = slice.pct.toFixed(0) + "%";
+      svg.appendChild(pct);
+    });
+
+    // Monitored total summary row below legend
+    if (data.monitored_total_kwh != null) {
+      var sumY = legendY + slices.length * lineH + 4;
+      var sumLine = svgEl("line", {
+        x1: String(legendX), x2: String(legendX + 265),
+        y1: String(sumY - 4), y2: String(sumY - 4),
+        stroke: "#2d3a4f", "stroke-width": "1",
+      });
+      svg.appendChild(sumLine);
+      var sumLbl = svgEl("text", {
+        x: String(legendX + 14), y: String(sumY + 8),
+        fill: "#8b949e", "font-size": "10",
+      });
+      sumLbl.textContent = "Monitored circuits: " + data.monitored_total_kwh.toFixed(1) + " kWh";
+      svg.appendChild(sumLbl);
+    }
+
+    container.appendChild(svg);
+
+    // Tooltip
+    var tip = buildTooltip(container);
+    svg.addEventListener("mousemove", function (event) {
+      var target = event.target;
+      if (target.getAttribute("data-series") !== "donut") {
+        hideTooltip(tip);
+        return;
+      }
+      showTooltip(tip, svg, event, [
+        "<strong>" + target.getAttribute("data-label") + "</strong>",
+        target.getAttribute("data-kwh") + " kWh",
+        target.getAttribute("data-pct") + "% of SMT total",
+      ]);
+    });
+    svg.addEventListener("mouseleave", function () { hideTooltip(tip); });
+  }
+
+  // -------------------------------------------------------------------------
   // Init
   // -------------------------------------------------------------------------
 
   document.addEventListener("DOMContentLoaded", function () {
+    // Energy Use Breakdown donut chart
+    var donutContainer = document.getElementById("chart-energy-donut");
+    if (donutContainer) {
+      renderDonut(donutContainer, parseData("chart-data-energy-donut"));
+    }
+
     var timelineContainer = document.getElementById("chart-energy-timeline");
     if (timelineContainer) {
       var timelineData = parseData("chart-data-energy-timeline");

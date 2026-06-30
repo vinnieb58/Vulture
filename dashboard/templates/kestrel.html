@@ -335,6 +335,42 @@
     }
 
     /* ---- Breakdowns ---- */
+    .donut-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--card-radius);
+      padding: 1rem 1.05rem;
+      margin-bottom: 0.9rem;
+    }
+
+    .donut-unavailable {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .donut-unavailable p { margin-bottom: 0.35rem; }
+
+    .donut-diag {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .donut-chart-host {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    .donut-chart-host svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    /* Legacy bar-chart breakdown CSS — kept for diagnostics section */
     .breakdown-bars {
       display: flex;
       flex-direction: column;
@@ -610,7 +646,49 @@
     </div>
 
     {# ------------------------------------------------------------------ #}
-    {# 3. Source Agreement                                                 #}
+    {# 3. Energy Use Breakdown (donut chart)                              #}
+    {# Placed before the combined timeline per spec.                      #}
+    {# ------------------------------------------------------------------ #}
+    {% set donut = energy.donut %}
+    <div class="donut-card" id="energy-use-breakdown">
+      <div class="section-header">
+        <span class="card-title" style="margin-bottom:0">Energy Use Breakdown</span>
+        {% if donut.available %}
+        <span class="story-window">{{ donut.window_label }}</span>
+        {% else %}
+        <span class="status-badge unknown">Unavailable</span>
+        {% endif %}
+      </div>
+      {% if donut.available %}
+      <div class="card-subtitle">
+        {{ donut.window_date }} · SMT {{ donut.smt_coverage_pct }}% coverage · Center: SMT whole-home total
+      </div>
+      <div class="donut-chart-host" id="chart-energy-donut"></div>
+      <script type="application/json" id="chart-data-energy-donut">{{ donut | tojson }}</script>
+      {% else %}
+      <div class="donut-unavailable">
+        <p>{{ donut.unavailable_reason }}</p>
+        <div class="donut-diag">
+          {% if donut.latest_smt_day %}
+          <span>Latest SMT day with data: {{ donut.latest_smt_day }} ({{ donut.latest_smt_coverage_pct }}% coverage — need ≥ {{ 90 }}%)</span>
+          {% else %}
+          <span>No SMT day found with ≥ 90% coverage in the last 14 days.</span>
+          {% endif %}
+          {% if donut.latest_tuya_day %}
+          <span>Latest Tuya day with data: {{ donut.latest_tuya_day }} ({{ donut.latest_tuya_channel_coverage_pct }}% min-channel coverage — need ≥ {{ 80 }}%)</span>
+          {% else %}
+          <span>No Tuya day found with ≥ 80% per-channel coverage in the last 14 days.</span>
+          {% endif %}
+          {% if kestrel.last_refresh_success_at %}
+          <span>Last SMT refresh: {{ kestrel.last_refresh_success_at }}</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    {# ------------------------------------------------------------------ #}
+    {# 4. Source Agreement                                                 #}
     {# ------------------------------------------------------------------ #}
     {% set agreement = energy.agreement %}
     <div class="agreement-card">
@@ -847,78 +925,8 @@
         {% endif %}
       </div>
 
-      {# ---------------------------------------------------------------- #}
-      {# 7. Energy Breakdown                                               #}
-      {# ---------------------------------------------------------------- #}
-      {% set bd = energy.breakdown %}
-      <div class="card full-width">
-        <div class="card-title">Energy Breakdown</div>
-        <div class="card-subtitle">{{ window.label }}</div>
-        {% if bd.has_smt or bd.has_tuya %}
-        {% set smt_total = bd.smt_kwh | default(0) %}
-        {# Per-circuit data — bd.channel_kwh is a dict keyed by appliance key #}
-        {%- set channel_rows = [
-          ("ac_compressor",      "AC Compressor",          "var(--red)"),
-          ("furnace_air_handler","Furnace / Air Handler",   "var(--orange)"),
-          ("dryer",              "Dryer",                   "var(--warn)"),
-          ("dishwasher",         "Dishwasher",              "var(--ok)"),
-        ] -%}
-        <div class="breakdown-bars">
-          {# Reference bar: SMT whole-home (100%) #}
-          {% if bd.has_smt %}
-          <div class="breakdown-row">
-            <span class="breakdown-label">SMT whole-home</span>
-            <div class="breakdown-bar-track">
-              <div class="breakdown-bar-fill" style="width:100%;background:var(--accent);opacity:0.6;"></div>
-            </div>
-            <span class="breakdown-value">{{ "%.2f"|format(smt_total) }} kWh</span>
-          </div>
-          {% endif %}
-          {# Individual circuit bars #}
-          {% if bd.has_tuya and bd.channel_kwh %}
-            {% for key, label, color in channel_rows %}
-              {% if bd.channel_kwh[key] is defined and bd.channel_kwh[key] > 0 %}
-              <div class="breakdown-row">
-                <span class="breakdown-label">{{ label }} <span class="estimate-tag">(est.)</span></span>
-                <div class="breakdown-bar-track">
-                  <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.channel_kwh[key] / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:{{ color }};opacity:0.85;"></div>
-                </div>
-                <span class="breakdown-value">{{ "%.2f"|format(bd.channel_kwh[key]) }} kWh</span>
-              </div>
-              {% endif %}
-            {% endfor %}
-            {# Monitored circuits total #}
-            {% if bd.monitored_total_kwh > 0 %}
-            <div class="breakdown-row" style="border-top:1px dashed var(--border);padding-top:0.25rem;margin-top:0.1rem;">
-              <span class="breakdown-label" style="font-weight:600;">Monitored total <span class="estimate-tag">(est.)</span></span>
-              <div class="breakdown-bar-track">
-                <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.monitored_total_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.5;"></div>
-              </div>
-              <span class="breakdown-value" style="font-weight:600;">{{ "%.2f"|format(bd.monitored_total_kwh) }} kWh</span>
-            </div>
-            {% endif %}
-          {% endif %}
-          {# Unmonitored remainder = SMT - monitored total (only when both present) #}
-          {% if bd.has_smt and bd.has_tuya and bd.unmonitored_remainder_kwh is not none %}
-          <div class="breakdown-row">
-            <span class="breakdown-label">Unmonitored remainder <span class="estimate-tag">(est.)</span></span>
-            <div class="breakdown-bar-track">
-              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.unmonitored_remainder_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.3;"></div>
-            </div>
-            <span class="breakdown-value">{{ "%.2f"|format(bd.unmonitored_remainder_kwh) }} kWh</span>
-          </div>
-          {% endif %}
-        </div>
-        <div class="section-note">
-          Circuit values are estimates from Tuya CT clamps (ac_compressor, furnace/AHU, dryer, dishwasher).
-          SMT is the utility billing reference (whole-home).
-          Unmonitored remainder = SMT total minus sum of measured circuits;
-          includes lighting, small appliances, and any other unmonitored loads.
-        </div>
-        {% else %}
-        <div class="chart-empty">Energy breakdown requires at least one data source.</div>
-        {% endif %}
-      </div>
+      {# Section 7 (Energy Breakdown) is replaced by the donut chart above      #}
+      {# the cards grid. The old horizontal bar card has been removed.          #}
 
       {# ---------------------------------------------------------------- #}
       {# 8. Historical Trends (7-day)                                     #}

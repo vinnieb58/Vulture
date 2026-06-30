@@ -70,6 +70,20 @@ AGREEMENT_ACCEPTABLE_PCT: float = 10.0
 # Coverage thresholds.
 COVERAGE_MINIMUM_PCT: float = 50.0  # below this → "insufficient data"
 
+# Donut chart validity thresholds — both sources must meet these for a
+# meaningful percentage breakdown to be shown.
+DONUT_SMT_COVERAGE_THRESHOLD: float = 90.0   # % of calendar day covered by SMT
+DONUT_TUYA_CHANNEL_THRESHOLD: float = 80.0   # % each Tuya channel must cover
+
+# Donut slice colors — kept in sync with kestrel_energy_timeline.js
+DONUT_CHANNEL_COLORS: dict[str, str] = {
+    "ac_compressor":       "#da3633",
+    "furnace_air_handler": "#f0883e",
+    "dryer":               "#d29922",
+    "dishwasher":          "#3fb950",
+    "unmonitored":         "#8b949e",
+}
+
 NEST_ACTION_COOLING: str = "COOLING"
 NEST_ACTION_HEATING: str = "HEATING"
 
@@ -212,6 +226,38 @@ def tuya_coverage_pct(
     if expected < 1:
         return 0.0
     actual = sum(1 for r in records if window_start <= r.timestamp < window_end)
+    return round(min(100.0, 100.0 * actual / expected), 1)
+
+
+def tuya_channel_coverage_pct(
+    records: list[Any],  # TuyaPowerHistoryRecord
+    appliance_key: str,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    expected_poll_seconds: int = TUYA_EXPECTED_POLL_SECONDS,
+) -> float:
+    """
+    Coverage % for a single Tuya channel based on records that have a
+    non-None power_w reading for that channel.
+
+    A record where the channel entry is absent or power_w is None does NOT
+    count as coverage — it means the device was polled but the circuit was
+    not reporting (e.g. CT disconnected).  A genuine 0.0 W reading counts.
+    """
+    window_seconds = (window_end - window_start).total_seconds()
+    if window_seconds <= 0:
+        return 0.0
+    expected = window_seconds / expected_poll_seconds
+    if expected < 1:
+        return 0.0
+    actual = sum(
+        1
+        for r in records
+        if window_start <= r.timestamp < window_end
+        and isinstance(r.appliances.get(appliance_key), dict)
+        and r.appliances[appliance_key].get("power_w") is not None
+    )
     return round(min(100.0, 100.0 * actual / expected), 1)
 
 
@@ -1364,6 +1410,158 @@ def build_combined_timeline(
 
 
 # ---------------------------------------------------------------------------
+# Energy donut breakdown
+# ---------------------------------------------------------------------------
+
+def compute_energy_donut(
+    smt_rows: list[dict[str, Any]],
+    tuya_records: list[Any],
+    *,
+    now: datetime | None = None,
+    tz_name: str = KESTREL_TIMEZONE,
+    smt_threshold: float = DONUT_SMT_COVERAGE_THRESHOLD,
+    tuya_channel_threshold: float = DONUT_TUYA_CHANNEL_THRESHOLD,
+) -> dict[str, Any]:
+    """
+    Find the most recent complete calendar day where SMT AND all four Tuya
+    channels each have adequate coverage, then compute percentage slices.
+
+    Validity requirements (all must pass):
+    - Day must be fully elapsed in local time (yesterday or earlier).
+    - SMT coverage ≥ smt_threshold % of the calendar day.
+    - Every configured Tuya channel must have ≥ tuya_channel_threshold %
+      coverage based on non-None power_w readings (not just record presence).
+    - The monitored-circuit total must not exceed the SMT total (which would
+      indicate a calibration issue and produce a negative remainder).
+
+    When no valid day is found within 14 days the function returns
+    available=False with diagnostics for the unavailable state display.
+    """
+    ts_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    tz = ZoneInfo(tz_name)
+    today_local = ts_now.astimezone(tz).date()
+
+    # Track best individual days for diagnostics shown in unavailable state.
+    best_smt_day: str | None = None
+    best_smt_cov: float = 0.0
+    best_tuya_day: str | None = None
+    best_tuya_min_cov: float = 0.0  # worst-channel coverage across best tuya day
+
+    for days_ago in range(1, 15):  # 1 = yesterday; today never complete during use
+        local_day = today_local - timedelta(days=days_ago)
+        day_start_local = datetime(
+            local_day.year, local_day.month, local_day.day, 0, 0, tzinfo=tz
+        )
+        day_end_local = day_start_local + timedelta(days=1)
+        day_start_utc = day_start_local.astimezone(timezone.utc)
+        day_end_utc = day_end_local.astimezone(timezone.utc)
+
+        # --- SMT coverage for this day ---
+        day_smt = [
+            r for r in smt_rows
+            if day_start_utc <= _parse_ts(str(r["start_ts"])) < day_end_utc
+        ]
+        smt_cov = smt_coverage_pct(
+            day_smt, window_start=day_start_utc, window_end=day_end_utc
+        )
+        if smt_cov > best_smt_cov:
+            best_smt_cov = smt_cov
+            best_smt_day = local_day.isoformat()
+
+        # --- Per-channel Tuya coverage ---
+        day_tuya = [
+            r for r in tuya_records
+            if day_start_utc <= r.timestamp < day_end_utc
+        ]
+        channel_covs: dict[str, float] = {
+            key: tuya_channel_coverage_pct(
+                day_tuya, key, window_start=day_start_utc, window_end=day_end_utc
+            )
+            for key in TUYA_ALL_KEYS
+        }
+        min_channel_cov = min(channel_covs.values()) if channel_covs else 0.0
+        if min_channel_cov > best_tuya_min_cov:
+            best_tuya_min_cov = min_channel_cov
+            best_tuya_day = local_day.isoformat()
+
+        # --- Validity gates ---
+        if smt_cov < smt_threshold:
+            continue
+        if min_channel_cov < tuya_channel_threshold:
+            continue
+
+        smt_kwh_val = smt_total_kwh(
+            day_smt, window_start=day_start_utc, window_end=day_end_utc
+        )
+        if smt_kwh_val <= 0:
+            continue
+
+        # --- Per-channel energy integration ---
+        channel_kwh: dict[str, float] = {}
+        for key in TUYA_ALL_KEYS:
+            kwh = integrate_tuya_energy(
+                day_tuya, (key,), window_start=day_start_utc, window_end=day_end_utc
+            )
+            channel_kwh[key] = round(kwh, 3)
+
+        monitored_total = round(sum(channel_kwh.values()), 3)
+
+        # Guard: if monitored circuits exceed SMT by more than 5% it signals
+        # a calibration issue — do not show a negative or near-zero remainder.
+        if monitored_total > smt_kwh_val * 1.05:
+            continue
+
+        unmonitored = round(max(smt_kwh_val - monitored_total, 0.0), 3)
+
+        # --- Build slices (all 4 channels always present; 0 kWh is valid) ---
+        slices: list[dict[str, Any]] = []
+        for key in TUYA_ALL_KEYS:
+            kwh = channel_kwh[key]
+            pct = round(100.0 * kwh / smt_kwh_val, 1) if smt_kwh_val > 0 else 0.0
+            slices.append({
+                "key": key,
+                "label": TUYA_CHANNEL_LABELS[key],
+                "kwh": kwh,
+                "pct": pct,
+                "color": DONUT_CHANNEL_COLORS[key],
+            })
+        unmon_pct = round(100.0 * unmonitored / smt_kwh_val, 1) if smt_kwh_val > 0 else 0.0
+        slices.append({
+            "key": "unmonitored",
+            "label": "Estimated Unmonitored",
+            "kwh": unmonitored,
+            "pct": unmon_pct,
+            "color": DONUT_CHANNEL_COLORS["unmonitored"],
+        })
+
+        return {
+            "available": True,
+            "window_label": "Latest complete shared SMT + Tuya day",
+            "window_start": day_start_utc.isoformat(),
+            "window_end": day_end_utc.isoformat(),
+            "window_date": local_day.isoformat(),
+            "smt_kwh": round(smt_kwh_val, 2),
+            "slices": slices,
+            "monitored_total_kwh": round(monitored_total, 2),
+            "smt_coverage_pct": smt_cov,
+            "channel_coverages": {k: round(v, 1) for k, v in channel_covs.items()},
+        }
+
+    # No valid shared day found within 14-day look-back.
+    return {
+        "available": False,
+        "unavailable_reason": (
+            "Breakdown unavailable — SMT and Tuya do not yet cover "
+            "the same complete period."
+        ),
+        "latest_smt_day": best_smt_day,
+        "latest_smt_coverage_pct": round(best_smt_cov, 1),
+        "latest_tuya_day": best_tuya_day,
+        "latest_tuya_channel_coverage_pct": round(best_tuya_min_cov, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Data quality and freshness
 # ---------------------------------------------------------------------------
 
@@ -1499,6 +1697,10 @@ def compute_kestrel_analysis(
         tz_name=tz_name,
     )
 
+    donut = compute_energy_donut(
+        smt_rows, tuya_records, now=ts_now, tz_name=tz_name
+    )
+
     return {
         "window": {
             "label": window.label,
@@ -1513,6 +1715,7 @@ def compute_kestrel_analysis(
         "hvac_stats": hvac_stats,
         "agreement": agreement,
         "breakdown": breakdown,
+        "donut": donut,
         "peaks": peaks,
         "timeline": timeline,
         "trends": trends,
