@@ -548,7 +548,7 @@
     {# ------------------------------------------------------------------ #}
     {# 2. Current Status                                                   #}
     {# ------------------------------------------------------------------ #}
-
+    <div style="font-size:0.78rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.35rem;">Current Status</div>
     <div class="status-row">
       {# Tuya whole-home proxy (sum of 4 CTs) — latest snapshot #}
       {% set compressor_entry = tuya.appliances | selectattr("key", "equalto", "ac_compressor") | first | default(none) %}
@@ -682,7 +682,7 @@
       {# ---------------------------------------------------------------- #}
       <div class="card full-width">
         <div class="section-header">
-          <span class="card-title" style="margin-bottom:0">Energy + HVAC Timeline</span>
+          <span class="card-title" style="margin-bottom:0">Combined Energy + HVAC Timeline</span>
           <span class="story-window">{{ window.label }}</span>
         </div>
         <div class="card-subtitle">
@@ -911,8 +911,8 @@
       {# 8. Historical Trends (7-day)                                     #}
       {# ---------------------------------------------------------------- #}
       <div class="card full-width">
-        <div class="card-title">7-Day Trends</div>
-        <div class="card-subtitle">Blue: SMT · Orange: HVAC · "?" = inadequate coverage</div>
+        <div class="card-title">Historical Trends</div>
+        <div class="card-subtitle">Last 7 days · Blue: SMT · Orange: HVAC · "?" = inadequate coverage</div>
         <div class="chart-host" id="chart-daily-trends"></div>
         <script type="application/json" id="chart-data-daily-trends">{{ energy.trends | tojson }}</script>
         {% if energy.trends %}
@@ -969,7 +969,7 @@
       {# ---------------------------------------------------------------- #}
       <div class="card full-width">
         <details>
-          <summary>Data Quality &amp; Diagnostics</summary>
+          <summary>Data Quality and Diagnostics</summary>
 
           {% set quality = energy.quality %}
           <div class="summary-grid" style="margin-bottom:0.65rem;">
