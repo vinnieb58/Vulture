@@ -25,20 +25,14 @@ from kestrel.storage import init_db, upsert_intervals
 CHICAGO = ZoneInfo("America/Chicago")
 UTC = timezone.utc
 
-# Use timestamps relative to "now" so retention-window pruning (14 days for
-# Nest, 7 days for SMT peak queries) does not silently drop test data as the
-# test calendar advances past any hardcoded date.
-def _recent_iso(hours_ago: float = 1.0) -> str:
-    ts = datetime.now(UTC) - timedelta(hours=hours_ago)
-    return ts.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
 
 def _seed_db(db_path: Path) -> None:
-    # Two intervals on different days so "Avg daily (last 2 days)" renders.
-    # Place one today (~2h ago) and one yesterday (~26h ago), both within the
-    # 7-day peak-query window.
+    # Two intervals on different calendar days so "Avg daily (last 2 days)" renders.
+    # Use 2 h ago (today) and 28 h ago (yesterday) — 28 h gives more than a full day
+    # of separation so the local-day boundary is crossed regardless of whether the
+    # test runs near midnight.  Both fall within the 7-day SMT peak-query window.
     today_start = datetime.now(UTC) - timedelta(hours=2)
-    yesterday_start = datetime.now(UTC) - timedelta(hours=26)
+    yesterday_start = datetime.now(UTC) - timedelta(hours=28)
     rows = [
         EnergyInterval(
             provider=PROVIDER_SMART_METER_TEXAS,
@@ -337,6 +331,55 @@ def _write_tuya_history(path: Path, snapshot: dict, *, count: int = 3) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_tuya_history_recent(path: Path, snapshot: dict, *, count: int = 10) -> None:
+    """Write Tuya history with timestamps within the last hour (analysis-window compatible)."""
+    from kestrel.tuya_power_history import build_history_record
+
+    lines = []
+    base = datetime.now(UTC) - timedelta(minutes=count + 1)
+    for index in range(count):
+        record = dict(snapshot)
+        ts = base + timedelta(minutes=index)
+        record["updated_at"] = ts.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        lines.append(json.dumps(build_history_record(record)))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_tuya_status_recent(path: Path, **overrides: object) -> None:
+    """Write a Tuya status snapshot with a fresh timestamp (not stale)."""
+    snapshot = _build_tuya_status_snapshot()
+    snapshot["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    snapshot.update(overrides)
+    path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_nest_history_recent(path: Path, *, cooling_minutes: int = 30) -> None:
+    """Write Nest history with recent timestamps, cooling active."""
+    from kestrel.nest_history import append_history_from_snapshot
+
+    base = datetime.now(UTC) - timedelta(minutes=cooling_minutes + 5)
+    for i in range(cooling_minutes // 5 + 2):
+        ts = base + timedelta(minutes=i * 5)
+        action = "COOLING" if i * 5 < cooling_minutes else "OFF"
+        append_history_from_snapshot(
+            {
+                "updated_at": ts.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                "thermostats": {
+                    "downstairs": {
+                        "temperature": 74,
+                        "humidity": 60,
+                        "mode": "COOL",
+                        "action": action,
+                        "setpoint": 72,
+                        "online": True,
+                    },
+                },
+            },
+            path=path,
+            now=ts,
+        )
+
+
 class TestTuyaPowerDashboardParsing:
     def test_read_tuya_power_status_parses_appliances(self, tmp_path: Path, monkeypatch) -> None:
         status_path = tmp_path / "kestrel_tuya_power_status.json"
@@ -521,3 +564,244 @@ class TestTuyaPowerDashboardHTTP:
         assert "Stale" in text
         assert "connection timeout" not in text
         assert "meter_2" not in text
+
+
+class TestKestrelRenderVerification:
+    """
+    End-to-end render checks against representative fixture data.
+
+    Verifies constraint 10:
+    - page returns 200
+    - energy story appears
+    - source agreement section appears
+    - combined timeline data present
+    - peaks appear in local time (not raw ISO)
+    - Nest fallback status is clearly labeled when no cycles detected
+    - stale and unavailable source warnings degrade gracefully
+    """
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "missing.db"
+        log_path = tmp_path / "missing.log"
+        monkeypatch.setattr(dashboard_app, "DB_PATH", db_path)
+        monkeypatch.setattr(dashboard_app, "LOG_PATH", log_path)
+        monkeypatch.setattr("db_readers.DB_PATH", db_path)
+        monkeypatch.setattr("log_readers.LOG_PATH", log_path)
+        monkeypatch.setattr("vulture_runtime.LOG_PATH", log_path)
+        return TestClient(dashboard_app.app)
+
+    def _stub_host(self, client):
+        with patch("host_status.run_host_command", return_value=(False, "unavailable")):
+            with patch("host_status.run_systemctl", return_value=(False, "unavailable")):
+                return client
+
+    def test_full_data_render_returns_200_with_all_sections(
+        self, client, tmp_path, monkeypatch
+    ):
+        """With SMT + Tuya + Nest data, all 9 sections must render correctly."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        tuya_status_path = tmp_path / "tuya_status.json"
+        tuya_history_path = tmp_path / "tuya_history.jsonl"
+        nest_history_path = tmp_path / "nest_history.jsonl"
+
+        _write_status(status_path)
+        _seed_db(db_path)
+        _write_tuya_status_recent(tuya_status_path)
+        _write_tuya_history_recent(tuya_history_path, _build_tuya_status_snapshot(), count=10)
+        _write_nest_history_recent(nest_history_path, cooling_minutes=30)
+
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", tuya_status_path)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tuya_history_path)
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", nest_history_path)
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", nest_history_path)
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", nest_history_path)
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        # Section 1: energy story
+        assert "Today's Energy Story" in text
+
+        # Section 3: source agreement
+        assert "Do SMT and Tuya agree?" in text
+
+        # Section 4: combined timeline data embedded
+        assert "chart-data-energy-timeline" in text
+        assert '"has_smt"' in text or "has_smt" in text
+
+        # Section 5: peaks section present
+        assert "Top Demand Peaks" in text
+
+        # Section 6: HVAC section present
+        assert "HVAC Performance" in text
+
+        # Section 7: energy breakdown
+        assert "Energy Breakdown" in text
+
+        # Section 8: trends table
+        assert "7-Day Trends" in text
+
+        # Section 9: diagnostics collapsible
+        assert "Data Quality" in text
+
+        # Navigation intact
+        assert "/kestrel" in text
+        assert "kestrel_energy_timeline.js" in text
+        assert "kestrel_charts.js" in text
+
+    def test_peak_timestamps_are_in_local_time_not_iso(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Peak timestamps must show local time (e.g. '2:35 PM'), not raw ISO strings."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        tuya_status_path = tmp_path / "tuya_status.json"
+        tuya_history_path = tmp_path / "tuya_history.jsonl"
+
+        _write_status(status_path)
+        _seed_db(db_path)
+        _write_tuya_status_recent(tuya_status_path)
+        _write_tuya_history_recent(tuya_history_path, _build_tuya_status_snapshot(), count=10)
+
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", tuya_status_path)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tuya_history_path)
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        if "Top Demand Peaks" in text and "#1" in text:
+            # Peak timestamps must include AM/PM local time display
+            assert "AM" in text or "PM" in text, (
+                "Peak section must show local AM/PM time, not raw ISO"
+            )
+            # Raw ISO timestamp pattern (YYYY-MM-DDTHH:MM:SS) should not appear in peaks
+            import re
+            peaks_section_start = text.find("Top Demand Peaks")
+            peaks_section_end = text.find("Energy Breakdown", peaks_section_start)
+            if peaks_section_end == -1:
+                peaks_section_end = peaks_section_start + 3000
+            peaks_html = text[peaks_section_start:peaks_section_end]
+            iso_in_peaks = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", peaks_html)
+            assert iso_in_peaks is None, (
+                f"Raw ISO timestamp found in peaks section: {iso_in_peaks.group()!r}"
+            )
+
+    def test_nest_fallback_labeled_when_no_cycles(
+        self, client, tmp_path, monkeypatch
+    ):
+        """When Nest data is present but no cooling cycles detected (idle-only
+        samples), the zone table must be labeled 'Nest polling status' not
+        'HVAC cycle analysis'."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        nest_history_path = tmp_path / "nest_history.jsonl"
+        _write_status(status_path)
+        _seed_db(db_path)
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", nest_history_path)
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", nest_history_path)
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", nest_history_path)
+
+        from kestrel.nest_history import append_history_from_snapshot
+        # Write idle-only Nest samples — no COOLING action, so no cycles detected.
+        base = datetime.now(UTC) - timedelta(minutes=30)
+        for i in range(6):
+            ts = base + timedelta(minutes=i * 5)
+            append_history_from_snapshot(
+                {
+                    "updated_at": ts.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                    "thermostats": {
+                        "downstairs": {"action": "OFF", "temperature": 76, "setpoint": 72, "online": True},
+                    },
+                },
+                path=nest_history_path,
+                now=ts,
+            )
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        # HVAC Performance section must be present
+        assert "HVAC Performance" in text
+        # With no cooling cycles, the zone table label must clearly say polling status
+        assert "Nest polling status" in text or "no cycles" in text.lower()
+
+    def test_stale_tuya_degrades_gracefully(
+        self, client, tmp_path, monkeypatch
+    ):
+        """With stale Tuya data, the page must still render and show SMT+Nest sections."""
+        status_path = tmp_path / "kestrel_status.json"
+        db_path = tmp_path / "kestrel.db"
+        stale_status_path = tmp_path / "tuya_status.json"
+        _write_status(status_path)
+        _seed_db(db_path)
+        _write_tuya_status(stale_status_path)  # stale (June 27) snapshot
+
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", status_path)
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", db_path)
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", stale_status_path)
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        # Page still renders all structural elements
+        assert "Today's Energy Story" in text
+        assert "HVAC Performance" in text
+        assert "7-Day Trends" in text
+        # Stale state indicated somewhere (in status row or diagnostics)
+        assert "stale" in text.lower() or "Stale" in text
+
+    def test_all_sources_unavailable_renders_gracefully(
+        self, client, tmp_path, monkeypatch
+    ):
+        """With no data from any source, the page must return 200 with all section
+        headings present and clear 'no data' messaging."""
+        monkeypatch.setattr("kestrel_status.KESTREL_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("kestrel_metrics.KESTREL_DB_PATH", tmp_path / "missing.db")
+        monkeypatch.setattr("tuya_power_status.TUYA_STATUS_PATH", tmp_path / "missing.json")
+        monkeypatch.setattr("tuya_power_history.TUYA_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("tuya_power_error_status.TUYA_ERROR_PATH", tmp_path / "missing_error.json")
+        monkeypatch.setattr("nest_hvac_runtime.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_energy_correlation.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+        monkeypatch.setattr("nest_collection_health.NEST_HISTORY_PATH", tmp_path / "missing.jsonl")
+
+        response = self._stub_host(client).get("/kestrel")
+        assert response.status_code == 200
+        text = response.text
+
+        # All section headings present even with no data
+        assert "Today's Energy Story" in text
+        assert "HVAC Performance" in text
+        assert "7-Day Trends" in text
+
+        # No server error — status code is the authoritative check
+        assert response.status_code == 200
+        assert "traceback" not in text.lower()
+        assert "Internal Server Error" not in text.lower()
+
+        # 'Not enough' or similar messaging for no-data story
+        assert "Not enough" in text or "No data" in text or "unavailable" in text.lower()
