@@ -357,7 +357,7 @@
         <div class="drive-card-header">
           <span class="drive-name">{{ mount.label }}</span>
           <div class="drive-badges">
-            <span class="badge {{ card_cls }}">{{ mount.status }}</span>
+            <span class="badge {{ card_cls }}">{{ mount.display_label or mount.status }}</span>
             {% if not mount.required %}
             <span class="badge tag">optional</span>
             {% endif %}
