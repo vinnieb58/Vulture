@@ -218,10 +218,13 @@ def parse_systemctl_failed(text: str) -> tuple[int, list[str]]:
 
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("UNIT") or stripped.startswith("●"):
+        if not stripped or stripped.startswith("UNIT"):
             continue
         if "loaded units listed" in stripped:
             continue
+        # Strip optional leading bullet character used by newer systemctl output.
+        if stripped.startswith("●"):
+            stripped = stripped[1:].lstrip()
         parts = stripped.split()
         if not parts:
             continue
