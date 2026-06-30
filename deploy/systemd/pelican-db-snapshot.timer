@@ -1,0 +1,13 @@
+[Unit]
+Description=Twice-daily Pelican Raven database snapshot backup
+Documentation=file:/home/vinnieb58/projects/vulture/docs/current/PELiCAN_BACKUP.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 15:00:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=pelican-db-snapshot.service
+
+[Install]
+WantedBy=timers.target
