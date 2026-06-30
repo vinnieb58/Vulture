@@ -68,7 +68,7 @@ def _probe_uuid_present(uuid: str) -> tuple[bool, str | None]:
 
 def _findmnt_at_path(resolved_path: str) -> tuple[bool, dict[str, str | None], str | None]:
     ok, out = run_command(
-        ["findmnt", "-rn", "-o", "TARGET,SOURCE,FSTYPE", resolved_path],
+        ["findmnt", "--mountpoint", resolved_path, "-n", "-o", "TARGET,SOURCE,FSTYPE"],
         timeout=config.TIMEOUT_FINDMNT,
     )
     if not ok:
@@ -79,6 +79,10 @@ def _findmnt_at_path(resolved_path: str) -> tuple[bool, dict[str, str | None], s
     if not parsed:
         return False, {}, "findmnt returned no data"
     return True, parsed, None
+
+
+def _trigger_automount(resolved_path: str) -> tuple[bool, str | None]:
+    return path_access_check(resolved_path, timeout=config.TIMEOUT_PATH)
 
 
 def _automount_state(unit: str) -> tuple[str, str | None]:
@@ -119,6 +123,7 @@ def _build_volume_result(
         "label": spec.label,
         "mount_path": spec.mount_path,
         "uuid": spec.uuid,
+        "required": spec.required,
         "fstype": (lsblk or {}).get("fstype") or spec.fstype,
         "label_tag": (lsblk or {}).get("label") or spec.label_tag,
         "mounted": mounted,
@@ -173,6 +178,8 @@ def evaluate_storage_volume(
             detail="UUID not present in blkid/lsblk",
             lsblk=lsblk_info,
         )
+
+    _trigger_automount(resolved)
 
     mounted, findmnt_info, findmnt_err = _findmnt_at_path(resolved)
     if findmnt_err and "timed out" in (findmnt_err or ""):
@@ -301,7 +308,8 @@ def check_raven_storage() -> dict[str, Any]:
     section_statuses: list[str] = []
     for vol in volumes:
         vol_status = vol["status"]
-        overall = storage_volume_to_overall(vol_status)
+        required = bool(vol.get("required", True))
+        overall = storage_volume_to_overall(vol_status, required=required)
         use_level = vol.get("use_level")
         if use_level == "critical":
             overall = "critical"

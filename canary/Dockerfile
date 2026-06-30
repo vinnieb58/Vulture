@@ -10,8 +10,9 @@ RUN apt-get update \
         systemd \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/canary/requirements.txt
-COPY . /app/canary
+COPY canary/requirements.txt /app/canary/requirements.txt
+COPY canary/ /app/canary/
+COPY raven_storage_inventory.py /app/raven_storage_inventory.py
 
 ENV CANARY_PROJECT_ROOT=/app \
     CANARY_DATA_DIR=/app/data \

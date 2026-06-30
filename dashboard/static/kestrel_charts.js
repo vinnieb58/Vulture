@@ -116,29 +116,24 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    renderBarChart(
-      document.getElementById("chart-daily-30"),
-      parseChartData("chart-data-daily-30"),
-      { title: "Daily usage last 30 days", emptyText: "No daily usage in the last 30 days." }
-    );
-    renderBarChart(
-      document.getElementById("chart-daily-full"),
-      parseChartData("chart-data-daily-full"),
-      { title: "Daily usage full range", emptyText: "No imported interval data yet." }
-    );
-    renderBarChart(
-      document.getElementById("chart-hourly-30"),
-      parseChartData("chart-data-hourly-30"),
-      { title: "Average usage by hour", emptyText: "No hourly averages for the last 30 days." }
-    );
-    renderBarChart(
-      document.getElementById("chart-monthly"),
-      parseChartData("chart-data-monthly"),
-      { title: "Monthly totals", emptyText: "Not enough history for monthly totals." }
-    );
-    renderPeakList(
-      document.getElementById("chart-peaks-30"),
-      parseChartData("chart-data-peaks-30")
-    );
+    // chart-daily-30 and chart-monthly are present in the current template.
+    // chart-daily-full, chart-hourly-30, and chart-peaks-30 were removed in
+    // the energy-explanation redesign; their calls are omitted.
+    var c30 = document.getElementById("chart-daily-30");
+    if (c30) {
+      renderBarChart(
+        c30,
+        parseChartData("chart-data-daily-30"),
+        { title: "Daily usage last 30 days", emptyText: "No daily usage in the last 30 days." }
+      );
+    }
+    var cMonthly = document.getElementById("chart-monthly");
+    if (cMonthly) {
+      renderBarChart(
+        cMonthly,
+        parseChartData("chart-data-monthly"),
+        { title: "Monthly totals", emptyText: "Not enough history for monthly totals." }
+      );
+    }
   });
 })();

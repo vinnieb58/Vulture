@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy every dashboard module so new local imports are not dropped from the image.
 COPY dashboard/*.py ./
 COPY kestrel/telemetry_retention.py ./telemetry_retention.py
+COPY raven_storage_inventory.py ./
 # Replace the dev shim with the canonical Kestrel implementation.
 COPY kestrel/nest_history.py ./nest_history.py
 COPY dashboard/templates/ templates/

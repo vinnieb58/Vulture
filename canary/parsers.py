@@ -43,11 +43,13 @@ def combine_status(*levels: str) -> OverallStatus:
     return "ok"
 
 
-def storage_volume_to_overall(status: StorageVolumeStatus) -> OverallStatus:
+def storage_volume_to_overall(status: StorageVolumeStatus, *, required: bool = True) -> OverallStatus:
     if status == "OK":
         return "ok"
     if status in ("STALE_MOUNT", "DF_TIMEOUT", "ERROR"):
         return "critical"
+    if not required and status in ("MISSING_DEVICE", "NOT_MOUNTED", "AUTOMOUNT_INACTIVE"):
+        return "warning"
     return "warning"
 
 
@@ -216,10 +218,13 @@ def parse_systemctl_failed(text: str) -> tuple[int, list[str]]:
 
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("UNIT") or stripped.startswith("●"):
+        if not stripped or stripped.startswith("UNIT"):
             continue
         if "loaded units listed" in stripped:
             continue
+        # Strip optional leading bullet character used by newer systemctl output.
+        if stripped.startswith("●"):
+            stripped = stripped[1:].lstrip()
         parts = stripped.split()
         if not parts:
             continue

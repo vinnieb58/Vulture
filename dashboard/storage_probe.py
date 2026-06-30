@@ -13,6 +13,8 @@ from host_commands import run_host_command, systemctl_is_active
 from parsers import DiskEntry, parse_df_human, parse_findmnt_line, parse_mountinfo
 from storage_config import (
     DEFAULT_EXPECTED_DRIVES,
+    DISK_CRITICAL_PERCENT,
+    DISK_WARN_PERCENT,
     ExpectedDrive,
     container_to_host_path,
     path_to_systemd_unit,
@@ -41,7 +43,9 @@ YELLOW_STATUSES = frozenset(
     {
         "AUTOMOUNT_WAITING",
         "NOT_MOUNTED",
+        "NOT_MOUNTED_PARENT_ROOT",
         "DEVICE_MISSING",
+        "PATH_MISSING",
         "LEGACY_PATH",
         "STALE_AUTOMOUNT",
     }
@@ -79,6 +83,7 @@ class StorageStatus:
     mounted: bool = False
     filesystem: str | None = None
     warning: str | None = None
+    display_label: str = ""
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -89,6 +94,13 @@ class StorageStatus:
         # so they must not appear as dashboard warnings.
         if self.status not in GREEN_STATUSES and self.status != "LEGACY_PATH" and self.message:
             self.warning = self.message
+        if not self.display_label:
+            self.display_label = status_display_label(
+                self.status,
+                required=self.required,
+                legacy=self.legacy,
+                percent_used=self.percent_used,
+            )
 
 
 def _normalize_uuid(value: str | None) -> str | None:
@@ -186,9 +198,25 @@ def _run_findmnt_mountpoint(host_path: str) -> tuple[str | None, str | None, str
         ["findmnt", "--mountpoint", host_path, "-n", "-o", "SOURCE,FSTYPE,UUID"],
         timeout=STORAGE_CMD_TIMEOUT,
     )
-    if not ok or not out.strip():
-        return None, None, None
-    return _pick_best_findmnt_entry(out)
+    if ok and out.strip():
+        return _pick_best_findmnt_entry(out)
+
+    # Host recursive / parent queries can be empty while per-mountpoint findmnt works.
+    # Fall back to the container bind-mount namespace for /mnt/storage paths.
+    if host_path.startswith("/mnt/storage"):
+        local_ok, local_out = run_command(
+            ["findmnt", "--mountpoint", host_path, "-n", "-o", "SOURCE,FSTYPE,UUID"],
+            timeout=STORAGE_CMD_TIMEOUT,
+        )
+        if local_ok and local_out.strip():
+            return _pick_best_findmnt_entry(local_out)
+
+    return None, None, None
+
+
+def _trigger_automount(path: str) -> tuple[bool, str | None]:
+    """List/stat a path so systemd automount can attach a backing device."""
+    return _path_access_check(path)
 
 
 def _pick_best_findmnt_entry(text: str) -> tuple[str | None, str | None, str | None]:
@@ -318,19 +346,65 @@ def _systemd_unit_state(path: str) -> tuple[str | None, str | None]:
 def status_display_class(status: str, *, required: bool, legacy: bool = False) -> str:
     if status in GREEN_STATUSES:
         return "ok"
-    if status in YELLOW_STATUSES and (not required or legacy):
-        return "warn"
+    if status in YELLOW_STATUSES:
+        if not required or legacy:
+            return "warn"
+        if status in (
+            "AUTOMOUNT_WAITING",
+            "STALE_AUTOMOUNT",
+            "NOT_MOUNTED_PARENT_ROOT",
+            "NOT_MOUNTED",
+            "PATH_MISSING",
+            "DEVICE_MISSING",
+        ):
+            return "warn"
     if status == "AUTOMOUNT_WAITING":
         return "warn"
     if status == "STALE_AUTOMOUNT" and not required:
         return "warn"
+    if status == "NOT_MOUNTED_PARENT_ROOT" and not required:
+        return "warn"
+    if status == "PATH_MISSING" and not required:
+        return "warn"
     return "bad"
+
+
+def status_display_label(
+    status: str,
+    *,
+    required: bool,
+    legacy: bool = False,
+    percent_used: float | None = None,
+) -> str:
+    """Human-facing storage state for Nest/dashboard UI."""
+    if status in GREEN_STATUSES:
+        if percent_used is not None and percent_used >= DISK_WARN_PERCENT:
+            return "High usage"
+        return "Mounted"
+    if status == "AUTOMOUNT_WAITING":
+        return "Automount pending"
+    if status in ("STALE_AUTOMOUNT", "NOT_MOUNTED_PARENT_ROOT"):
+        return "Automount pending"
+    if status == "STALE_MOUNT":
+        return "Error"
+    if status in ("NOT_MOUNTED", "DEVICE_MISSING", "PATH_MISSING"):
+        if not required or legacy:
+            return "Optional missing"
+        return "Error"
+    if status in ("UUID_MISMATCH", "FSTYPE_MISMATCH", "LABEL_MISMATCH", "ERROR"):
+        return "Error"
+    if status == "LEGACY_PATH":
+        return "Optional missing"
+    return "Error"
 
 
 def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> StorageStatus:
     host_path = container_to_host_path(drive.path)
     path_obj = Path(drive.path)
     path_exists = path_obj.exists()
+
+    if path_exists and drive.role == "storage":
+        _trigger_automount(drive.path)
 
     is_mountpoint, autofs_present, actual_source, actual_fstype, actual_uuid = (
         _resolve_backing_mount(host_path)
@@ -354,6 +428,26 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
         df_entry, df_error = _df_for_path(drive.path)
         if df_entry:
             df_source = df_entry.filesystem
+
+    if drive.role == "storage" and path_exists and not actual_source and df_source:
+        if not root_source or df_source != root_source:
+            actual_source = df_source
+            is_mountpoint = True
+            autofs_present = False
+
+    if drive.role == "storage" and path_exists and autofs_present and not actual_source:
+        _trigger_automount(drive.path)
+        is_mountpoint, autofs_present, actual_source, actual_fstype, actual_uuid = (
+            _resolve_backing_mount(host_path)
+        )
+        if not df_entry:
+            df_entry, df_error = _df_for_path(drive.path)
+            if df_entry:
+                df_source = df_entry.filesystem
+                if not actual_source and df_source and df_source != root_source:
+                    actual_source = df_source
+                    is_mountpoint = True
+                    autofs_present = False
 
     io_failure = None
     if df_error in ("STALE_MOUNT", "STALE_AUTOMOUNT", "DF_TIMEOUT"):
@@ -811,8 +905,14 @@ def probe_expected_drive(drive: ExpectedDrive, *, root_source: str | None) -> St
             message = f"Root mounted on {actual_source} (expected {drive.expected_source})"
 
     warning = None
-    if percent_used is not None and percent_used >= 90:
+    if percent_used is not None and percent_used >= DISK_WARN_PERCENT:
         warning = f"Disk usage high ({percent_used:.0f}%)"
+    if (
+        drive.role == "root"
+        and percent_used is not None
+        and percent_used >= DISK_CRITICAL_PERCENT
+    ):
+        warning = f"Root disk usage critical ({percent_used:.0f}%)"
 
     result = StorageStatus(
         name=drive.name,

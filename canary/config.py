@@ -6,14 +6,22 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from raven_storage_inventory import (  # noqa: E402
+    CANARY_STORAGE_PATHS,
+    DISK_CRITICAL_PERCENT,
+    DISK_WARN_PERCENT,
+)
+
 DEFAULT_SUBPROCESS_TIMEOUT = 10.0
 DEFAULT_INTERVAL_SECONDS = 300
-
-DISK_WARN_PERCENT = 80
-DISK_CRITICAL_PERCENT = 90
 
 # Per-command timeouts (seconds)
 TIMEOUT_PING = 8.0
@@ -57,13 +65,7 @@ ALERT_STATE_PATH = Path(
 )
 
 # Raven external/storage mount paths (UUIDs resolved from fstab or CANARY_STORAGE_VOLUMES)
-RAVEN_STORAGE_PATHS: list[tuple[str, str]] = [
-    ("toshiba_ext", "/mnt/storage/toshiba_ext"),
-    ("pelican_backup", "/mnt/storage/pelican_backup"),
-    ("roost_spinning_0", "/mnt/storage/roost_spinning_0"),
-    ("raven_nvme", "/mnt/storage/raven_nvme"),
-    ("microsd", "/mnt/storage/microsd"),
-]
+RAVEN_STORAGE_PATHS: list[tuple[str, str]] = list(CANARY_STORAGE_PATHS)
 
 ROOT_MOUNT = ("root", "/")
 
@@ -77,6 +79,7 @@ class StorageVolumeSpec:
     label_tag: str | None = None
     automount_unit: str | None = None
     automount_expected: bool = False
+    required: bool = True
 
 
 def _parse_storage_volumes_env(raw: str) -> list[StorageVolumeSpec]:
@@ -97,16 +100,27 @@ def _parse_storage_volumes_env(raw: str) -> list[StorageVolumeSpec]:
                 label_tag=item.get("label_tag"),
                 automount_unit=item.get("automount_unit"),
                 automount_expected=bool(item.get("automount_expected", False)),
+                required=bool(item.get("required", True)),
             )
         )
     return [v for v in volumes if v.label and v.mount_path]
 
 
 def default_storage_volume_specs() -> list[StorageVolumeSpec]:
-    """Build volume specs from known Raven paths; UUID/fstype filled from fstab at runtime."""
+    """Build volume specs from the shared Raven inventory."""
+    from raven_storage_inventory import ALL_STORAGE_VOLUMES
+
     return [
-        StorageVolumeSpec(label=label, mount_path=path, automount_expected=True)
-        for label, path in RAVEN_STORAGE_PATHS
+        StorageVolumeSpec(
+            label=volume.key,
+            mount_path=volume.path,
+            uuid=volume.expected_uuid,
+            fstype=volume.expected_fstype,
+            label_tag=volume.expected_label,
+            automount_expected=True,
+            required=volume.required,
+        )
+        for volume in ALL_STORAGE_VOLUMES
     ]
 
 

@@ -259,11 +259,11 @@ class TestCrowStorageConfig:
         paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
         assert "/mnt/storage/microsd" in paths
 
-    def test_default_mounts_include_toshiba(self):
+    def test_default_mounts_include_pelican_backup(self):
         from crow.config import EXPECTED_STORAGE_MOUNTS
 
         paths = [path for _, path in EXPECTED_STORAGE_MOUNTS]
-        assert "/mnt/storage/toshiba_ext" in paths
+        assert "/mnt/storage/pelican_backup" in paths
 
     def test_legacy_paths_not_in_defaults(self):
         """Old paths /mnt/microsd and /mnt/toshiba_ext must not appear in defaults."""

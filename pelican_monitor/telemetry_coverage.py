@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pelican.telemetry_data import expected_telemetry_manifest_markers
+from scripts.pelican.telemetry_data import expected_telemetry_manifest_markers
 
 
 @dataclass

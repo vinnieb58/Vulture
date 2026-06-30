@@ -5,7 +5,14 @@ Crow configuration — paths and thresholds only (no secrets).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from raven_storage_inventory import CROW_DEFAULT_MOUNTS
 
 # Subprocess safety
 DEFAULT_SUBPROCESS_TIMEOUT = 10.0
@@ -58,11 +65,7 @@ RAVEN_POST_REBOOT_SCRIPT = Path(
 # Expected storage mounts: "Label:/path" comma-separated.
 # Paths follow the authoritative /mnt/storage/* layout on Raven.
 # Override via CROW_EXPECTED_MOUNTS env var for non-standard host layouts.
-_DEFAULT_EXPECTED_MOUNTS = (
-    "Root SSD:/,"
-    "MicroSD:/mnt/storage/microsd,"
-    "Toshiba EXT:/mnt/storage/toshiba_ext"
-)
+_DEFAULT_EXPECTED_MOUNTS = ",".join(f"{label}:{path}" for label, path in CROW_DEFAULT_MOUNTS)
 _expected_mounts_raw = os.getenv("CROW_EXPECTED_MOUNTS", _DEFAULT_EXPECTED_MOUNTS).strip()
 
 
