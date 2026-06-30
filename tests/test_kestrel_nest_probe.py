@@ -246,3 +246,15 @@ class TestRedactNestMessage:
         raw = "refresh_token=1//0g-not-a-real-refresh-token"
         redacted = redact_nest_message(raw)
         assert "1//0g-not-a-real-refresh-token" not in redacted
+
+    def test_redacts_invalid_grant_json_without_secrets(self) -> None:
+        raw = (
+            'OAuth token request failed: {"error":"invalid_grant",'
+            '"error_description":"Token has been expired or revoked.",'
+            '"refresh_token":"1//0g-not-a-real-refresh-token"}'
+        )
+        redacted = redact_nest_message(raw)
+        assert "invalid_grant" in redacted
+        assert "1//0g-not-a-real-refresh-token" not in redacted
+        assert "refresh_token" in redacted
+        assert "[REDACTED]" in redacted

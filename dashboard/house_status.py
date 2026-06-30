@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nest_error_status import apply_poll_error_to_house_status, read_nest_poll_error
+
 NEST_STATUS_PATH = Path(
     os.environ.get("NEST_STATUS_PATH", "/app/data/kestrel_nest_status.json")
 )
@@ -43,7 +45,7 @@ def read_house_status(*, now: datetime | None = None) -> dict[str, Any]:
     """
     Load a sanitized House status snapshot from the Nest SDM poller output.
 
-    Never raises. ``state`` is one of: ``available``, ``stale``, ``no_data``, ``error``.
+    Never raises. ``state`` is one of: ``available``, ``stale``, ``auth_failure``, ``no_data``, ``error``.
     """
     reference = now or datetime.now(timezone.utc)
     if reference.tzinfo is None:
@@ -121,7 +123,10 @@ def read_house_status(*, now: datetime | None = None) -> dict[str, Any]:
                 result["state"] = "stale"
                 result["headline"] = f"Nest data stale ({age_minutes} min old)"
                 result["warning"] = result["headline"]
-                return result
+                return apply_poll_error_to_house_status(
+                    result,
+                    poll_error=read_nest_poll_error(),
+                )
 
     result["state"] = "available"
     result["headline"] = "House climate available"

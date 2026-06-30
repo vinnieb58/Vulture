@@ -1,14 +1,17 @@
-# Canary v0.1 — read-only Raven monitoring
+# Canary v0.2 — read-only Raven monitoring
 
-**Canary** is an Aviary monitoring service — lightweight, **read-only** Raven health checks in the Vulture monorepo. Platform context: [docs/current/AVIARY_PROJECT_CONTEXT.md](../docs/current/AVIARY_PROJECT_CONTEXT.md). It runs periodic health checks, writes a machine-readable status file, and logs each run. It does **not** perform control or admin actions.
+**Canary** is an Aviary monitoring service — lightweight, **read-only** Raven health checks in the Vulture monorepo. Platform context: [docs/current/AVIARY_PROJECT_CONTEXT.md](../docs/current/AVIARY_PROJECT_CONTEXT.md). It runs periodic infrastructure checks every **5 minutes**, writes a machine-readable status file, and logs each run. It does **not** perform control or admin actions.
+
+**Pelican backup monitoring** (checksum, staleness, backup timer health) runs separately on a **six-hour** schedule via `pelican-monitor.timer`. Canary only **reads** the latest `data/backup_monitor_status.json` snapshot — it does not re-run backup checks every 5 minutes. See [docs/current/PELiCAN_BACKUP.md](../docs/current/PELiCAN_BACKUP.md#pelican-backup-monitoring).
 
 ## What Canary does
 
-- Runs health checks every **5 minutes** by default (`CANARY_INTERVAL_SECONDS`, default `300`).
+- Runs infrastructure health checks every **5 minutes** by default (`CANARY_INTERVAL_SECONDS`, default `300`).
 - Writes the latest snapshot to `data/canary_status.json`.
 - Appends run logs to `logs/canary.log`.
 - Evaluates overall status as `ok`, `warning`, or `critical`.
 - Emits a top-level `alerts` array structured for Discord notifications and dashboard cards.
+- Surfaces the last Pelican backup monitor snapshot at `checks.backup_monitor` (read-only, no checksum re-verification).
 
 ### Checks (read-only)
 
@@ -21,8 +24,9 @@
 | Docker | daemon state, container counts, name/status/ports |
 | Vulture runtime | process scan, optional `tmux ls`, latest log mtime |
 | systemd failed | `systemctl --failed` count + unit names |
+| **backup_monitor** | Reads `data/backup_monitor_status.json` written by `pelican-monitor.service` |
 
-All subprocess calls (`lsblk`, `blkid`, `findmnt`, `df`, `systemctl`, `docker`, `ping`) and mount-path probes use bounded timeouts. Stale or hung mounts surface as `STALE_MOUNT` or `DF_TIMEOUT` instead of crashing Canary.
+All subprocess calls use bounded timeouts. Stale or hung mounts surface as `STALE_MOUNT` or `DF_TIMEOUT` instead of crashing Canary.
 
 ### Raven storage volume statuses
 
@@ -38,109 +42,53 @@ Each volume reports one of:
 | `DF_TIMEOUT` | `df` timed out (often stale NFS/USB mount) |
 | `ERROR` | Unexpected read/check failure |
 
-Volume JSON includes `uuid`, `fstype`, `label_tag`, `mount_path`, `size`, `used`, `available`, `use_percent` when available.
-
-Expected Raven storage paths (UUIDs read from `/etc/fstab` at runtime):
-
-- `/mnt/storage/toshiba_ext`
-- `/mnt/storage/pelican_backup`
-- `/mnt/storage/roost_spinning_0`
-- `/mnt/storage/raven_nvme`
-- `/mnt/storage/microsd`
-
 ## What Canary does **not** do
 
 - No mount, unmount, repair, wipe, format, or restart actions
-- No Discord alerting (JSON is alert-ready; sending is out of scope)
+- No backup checksum/staleness checks on the 5-minute loop (Pelican monitor handles that)
+- No Discord alerts from Canary directly (Pelican monitor sends backup alerts via shared `canary/alerting.py`)
 - No changes to Vulture bot, scheduler, or dashboard runtime
 - No secrets or `.env` mounts
 - No web UI or exposed HTTP port
 
-### Blind spot: USB hardware blocks boot
-
-Canary runs **after** Raven has booted. If faulty USB storage prevents the machine from reaching multi-user target (kernel hang, initramfs stall, or firmware blocking POST), Canary never starts and **cannot report that failure**. Treat absence of fresh `canary_status.json` combined with host unreachable as a separate on-site or out-of-band alert path (BIOS/IPMI/smart plug), not something Canary can detect from inside Raven.
-
 ## Run with Docker
-
-From the Vulture repo root on Raven:
 
 ```bash
 docker compose -f docker-compose.canary.yml up -d --build
 ```
 
-Compose uses `network_mode: host`, `pid: host`, read-only host root at `/host`, D-Bus, and docker.sock so Canary can inspect systemd, storage, and containers without modifying the host.
+Compose uses `network_mode: host`, `pid: host`, read-only host root at `/host`, D-Bus, and docker.sock. Mount `./data` so Canary can read `backup_monitor_status.json` written by the host-side Pelican monitor.
 
 ## View output
 
 ```bash
 cat data/canary_status.json
+python3 -m json.tool data/canary_status.json | jq '.checks.backup_monitor'
+cat data/backup_monitor_status.json
 tail -f logs/canary.log
 ```
 
-Example shape:
+## Shared alerting helper
 
-```json
-{
-  "generated_at": "2026-06-05T22:30:00-05:00",
-  "host": "raven",
-  "overall_status": "warning",
-  "checks": {
-    "storage": {
-      "status": "warning",
-      "volumes": [
-        {
-          "label": "toshiba_ext",
-          "mount_path": "/mnt/storage/toshiba_ext",
-          "uuid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-          "fstype": "ext4",
-          "status": "OK",
-          "mounted": true,
-          "use_percent": 42.0
-        }
-      ],
-      "alerts": []
-    },
-    "services": { "status": "ok", "services": [], "alerts": [] }
-  },
-  "alerts": [
-    {
-      "severity": "warning",
-      "category": "storage",
-      "code": "MISSING_DEVICE",
-      "volume": "microsd",
-      "mount_path": "/mnt/storage/microsd",
-      "message": "microsd: device UUID … not detected"
-    }
-  ],
-  "warnings": [],
-  "critical": []
-}
-```
-
-## Dashboard / Discord consumption
-
-- `overall_status` — top-level health color
-- `checks.storage.volumes[]` — per-drive cards (UUID-based, no sdX)
-- `alerts[]` — flattened, severity-tagged messages ready for Discord embeds or dashboard toast lists
-- `generated_at` — staleness detection if updates stop
+`canary/alerting.py` provides Discord delivery and persisted dedup (`data/canary_alert_state.json`) for **Pelican monitor** state-change alerts. Canary itself does not invoke this on its 5-minute loop.
 
 ## Local development
 
 ```bash
-python3 -m compileall -q canary
-python3 -m pytest tests/test_canary.py -v
+python3 -m compileall -q canary pelican_monitor
+python3 -m pytest tests/test_canary.py tests/test_pelican_monitor.py -v
 ```
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CANARY_INTERVAL_SECONDS` | `300` | Seconds between check runs |
+| `CANARY_INTERVAL_SECONDS` | `300` | Seconds between infrastructure check runs |
 | `CANARY_HOST_ROOT` | `/` | Host prefix when using `/host` mount in Docker |
+| `CANARY_BACKUP_MONITOR_STATUS_PATH` | `data/backup_monitor_status.json` | Snapshot read by `checks.backup_monitor` |
+| `CANARY_BACKUP_MONITOR_SNAPSHOT_STALE_HOURS` | `8` | Warn when monitor snapshot is older than this |
 | `CANARY_FSTAB_PATH` | `$HOST_ROOT/etc/fstab` | Read UUIDs and automount flags |
 | `CANARY_STORAGE_VOLUMES` | built-in paths | JSON override for volume specs |
-| `CANARY_VULTURE_SCHEDULER_TIMER` | `vulture-scheduler.timer` | Scheduler timer unit |
-| `CANARY_DASHBOARD_CONTAINER` | `vulture-dashboard` | Expected dashboard container name |
 | `CANARY_TIMEZONE` | `America/Chicago` | Timestamp timezone in JSON |
 
-Per-command timeouts (`CANARY_*` not required): see `canary/config.py` (`TIMEOUT_DF`, `TIMEOUT_LSBLK`, etc.).
+Pelican monitor configuration is documented in [PELiCAN_BACKUP.md](../docs/current/PELiCAN_BACKUP.md#pelican-backup-monitoring).

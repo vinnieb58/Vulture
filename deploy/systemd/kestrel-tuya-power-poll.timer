@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll Kestrel Tuya appliance power every 60 seconds
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=1s
+Persistent=true
+Unit=kestrel-tuya-power-poll.service
+
+[Install]
+WantedBy=timers.target

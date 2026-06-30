@@ -44,6 +44,7 @@ from kestrel_formatting import format_kestrel_card_display, format_kestrel_detai
 from kestrel_metrics import get_detail_metrics, get_home_metrics
 from kestrel_status import read_kestrel_status
 from nest_hvac_formatting import format_hvac_section
+from tuya_power_formatting import format_tuya_power_section
 from log_readers import LOG_PATH, read_log_snapshot
 from raven_health_details import RAVEN_HEALTH_REFRESH_SECONDS, build_raven_health_details
 from raven_metrics_history import (
@@ -206,49 +207,97 @@ def _compute_raven_card(
 
 def _compute_storage_card(storage: list[StorageStatus]) -> dict[str, Any]:
     """Plain-English storage card for the Nest overview."""
+    from storage_config import DISK_CRITICAL_PERCENT, DISK_WARN_PERCENT
+
     issues: list[str] = []
     drive_lines: list[dict[str, Any]] = []
     overall_status = "OK"
 
     for mount in storage:
         if mount.legacy:
-            # Legacy drives: only show if mounted
             if mount.status in ("OK", "OK_AUTOMOUNTED"):
-                drive_lines.append({"label": mount.label, "line": f"{mount.label}: mounted (legacy)", "status": "OK"})
+                drive_lines.append(
+                    {
+                        "label": mount.label,
+                        "line": f"{mount.label}: mounted (legacy)",
+                        "status": "OK",
+                        "display_label": "Mounted",
+                    }
+                )
             continue
+
+        label = mount.display_label or status_display_label(
+            mount.status,
+            required=mount.required,
+            legacy=mount.legacy,
+            percent_used=mount.percent_used,
+        )
 
         if mount.status in ("OK", "OK_AUTOMOUNTED"):
             if mount.percent_used is not None:
                 pct = mount.percent_used
-                line = f"{mount.label}: {pct:.0f}% used"
-                if pct >= 90:
-                    drive_lines.append({"label": mount.label, "line": line, "status": "FAIL"})
+                if mount.used and mount.size:
+                    detail = f"{mount.used} / {mount.size}"
+                    line = f"{mount.label}: {pct:.0f}% used ({detail})"
+                else:
+                    line = f"{mount.label}: {pct:.0f}% used"
+                if pct >= DISK_CRITICAL_PERCENT and mount.role == "root":
+                    drive_lines.append(
+                        {"label": mount.label, "line": line, "status": "FAIL", "display_label": "Error"}
+                    )
                     issues.append(line)
-                    if overall_status not in ("FAIL",):
-                        overall_status = "WARN"
-                elif pct >= 80:
-                    drive_lines.append({"label": mount.label, "line": line, "status": "WARN"})
+                    overall_status = "FAIL"
+                elif pct >= DISK_WARN_PERCENT:
+                    drive_lines.append(
+                        {
+                            "label": mount.label,
+                            "line": line,
+                            "status": "WARN",
+                            "display_label": "High usage",
+                        }
+                    )
                     issues.append(line)
                     if overall_status == "OK":
                         overall_status = "WARN"
                 else:
-                    # Below warning threshold — always show percentage plus capacity context
-                    if mount.used and mount.size:
-                        detail = f"{mount.used} / {mount.size}"
-                        line_ok = f"{mount.label}: {pct:.0f}% used ({detail})"
-                    else:
-                        line_ok = f"{mount.label}: {pct:.0f}% used"
-                    drive_lines.append({"label": mount.label, "line": line_ok, "status": "OK"})
+                    drive_lines.append(
+                        {"label": mount.label, "line": line, "status": "OK", "display_label": "Mounted"}
+                    )
             else:
-                drive_lines.append({"label": mount.label, "line": f"{mount.label}: mounted", "status": "OK"})
+                drive_lines.append(
+                    {
+                        "label": mount.label,
+                        "line": f"{mount.label}: mounted",
+                        "status": "OK",
+                        "display_label": "Mounted",
+                    }
+                )
+        elif mount.status in ("AUTOMOUNT_WAITING", "STALE_AUTOMOUNT", "NOT_MOUNTED_PARENT_ROOT"):
+            line = f"{mount.label}: {label.lower()}"
+            drive_lines.append(
+                {"label": mount.label, "line": line, "status": "WARN", "display_label": label}
+            )
+            if overall_status == "OK":
+                overall_status = "WARN"
+        elif mount.required and mount.status not in ("NOT_MOUNTED", "PATH_MISSING", "DEVICE_MISSING"):
+            line = f"{mount.label}: {mount.message or label}"
+            drive_lines.append(
+                {"label": mount.label, "line": line, "status": "FAIL", "display_label": "Error"}
+            )
+            issues.append(line)
+            overall_status = "FAIL"
         elif mount.required:
             line = f"{mount.label}: not mounted (required)"
-            drive_lines.append({"label": mount.label, "line": line, "status": "FAIL"})
+            drive_lines.append(
+                {"label": mount.label, "line": line, "status": "FAIL", "display_label": "Error"}
+            )
             issues.append(line)
             overall_status = "FAIL"
         else:
-            line = f"{mount.label}: not mounted"
-            drive_lines.append({"label": mount.label, "line": line, "status": "WARN"})
+            line = f"{mount.label}: {label.lower()}"
+            drive_lines.append(
+                {"label": mount.label, "line": line, "status": "WARN", "display_label": label}
+            )
             if overall_status == "OK":
                 overall_status = "WARN"
 
@@ -379,11 +428,25 @@ def _compute_kestrel_detail(kestrel: dict[str, Any]) -> dict[str, Any]:
             },
             "correlation": {"available": False, "rows": []},
         }
+    try:
+        tuya_power = format_tuya_power_section()
+    except Exception:
+        tuya_power = {
+            "state": "error",
+            "status": "Error",
+            "style": "fail",
+            "headline": "Could not load Tuya appliance power data",
+            "warning": "Could not load Tuya appliance power data",
+            "appliances": [],
+            "charts": {"power_1h": [], "power_24h": []},
+            "has_history": False,
+        }
     return {
         "status": status_labels.get(state, "No data"),
         "style": style_map.get(state, "unknown"),
         "headline": kestrel.get("headline", "No energy data yet"),
         "hvac": hvac,
+        "tuya_power": tuya_power,
         **display,
     }
 

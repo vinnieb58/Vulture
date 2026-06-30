@@ -20,7 +20,7 @@ from finch.cart_ops import (
 from finch.config import KROGER_CART_MODALITY
 from finch.kroger_client import KrogerClient, KrogerProduct
 from finch.models import MatchStatus
-from finch.parser import parse_grocery_text
+from finch.parser import intents_from_json, intents_to_json, parse_grocery_text
 from finch.pending_selection import (
     PendingSearchResult,
     PendingSelection,
@@ -197,6 +197,7 @@ def build_needs_choice_outcome(
     page_size: int | None = None,
     chat_key: str | None = None,
     pending_db_path: Path | None = None,
+    remaining_intents_json: str | None = None,
 ) -> NeedsChoiceOutcome:
     pending = None
     resolved_page_size = page_size or search_result_limit()
@@ -212,6 +213,7 @@ def build_needs_choice_outcome(
             page_size=resolved_page_size,
             total_count=total_count,
             db_path=pending_db_path,
+            remaining_intents_json=remaining_intents_json,
         )
     page_results = cached_results[
         page_offset * resolved_page_size : page_offset * resolved_page_size + resolved_page_size
@@ -322,6 +324,7 @@ def execute_pending_choice(
     db_path: Path | None = None,
     pending_db_path: Path | None = None,
     trip_ledger_db_path: Path | None = None,
+    execute_add_fn=None,
 ) -> dict[str, Any]:
     pending = get_pending_selection(chat_key, db_path=pending_db_path)
     if not pending:
@@ -379,10 +382,9 @@ def execute_pending_choice(
         source=source,
         trip_ledger_db_path=trip_ledger_db_path,
     )
-    clear_pending_selection(chat_key, db_path=pending_db_path)
 
     status = cart_result.get("status", "ok") if isinstance(cart_result, dict) else "ok"
-    outcome: dict[str, Any] = {
+    chosen_outcome: dict[str, Any] = {
         "ok": True,
         "duplicate": False,
         "preferred": prefer,
@@ -396,13 +398,91 @@ def execute_pending_choice(
         },
         "result": f"ok ({status})",
     }
-    return outcome
+
+    remaining_intents = intents_from_json(pending.remaining_intents_json)
+    if remaining_intents and execute_add_fn is not None:
+        progress = process_intents_with_choice(
+            remaining_intents,
+            chat_key=chat_key,
+            client=client,
+            db_path=db_path,
+            pending_db_path=pending_db_path,
+            execute_add_fn=execute_add_fn,
+        )
+        if progress.needs_choice is not None:
+            response = progress.needs_choice.to_dict()
+            response["ok"] = True
+            response["list_continued"] = True
+            response["preferred"] = prefer
+            response["attempt"] = chosen_outcome["attempt"]
+            response["result"] = chosen_outcome["result"]
+            response["duplicate"] = False
+            response["partial_outcomes"] = [chosen_outcome] + progress.added_outcomes
+            response["succeeded"] = [
+                o["attempt"] for o in response["partial_outcomes"] if o.get("attempt")
+            ]
+            return response
+
+        if progress.added_outcomes:
+            chosen_outcome["list_continued"] = True
+            chosen_outcome["continued_outcomes"] = progress.added_outcomes
+            chosen_outcome["succeeded"] = [chosen_outcome["attempt"]] + [
+                o["attempt"] for o in progress.added_outcomes if o.get("attempt")
+            ]
+
+    clear_pending_selection(chat_key, db_path=pending_db_path)
+    return chosen_outcome
 
 
 @dataclass(frozen=True)
 class AddListProgress:
     added_outcomes: list[dict[str, Any]]
     needs_choice: NeedsChoiceOutcome | None = None
+
+
+def process_intents_with_choice(
+    intents: list,
+    *,
+    chat_key: str | None = None,
+    client: KrogerClient,
+    db_path: Path | None = None,
+    pending_db_path: Path | None = None,
+    execute_add_fn,
+) -> AddListProgress:
+    """Add resolved items; stop at the first unresolved item with search results."""
+    added_outcomes: list[dict[str, Any]] = []
+    for index, intent in enumerate(intents):
+        needs = intent_needs_product_choice(
+            intent.raw_text,
+            quantity=None,
+            db_path=db_path,
+        )
+        if needs is not None:
+            requested_item, normalized_name, search_query, qty = needs
+            results, total_count = search_products_for_choice(search_query, client=client)
+            remaining = intents[index + 1 :]
+            return AddListProgress(
+                added_outcomes=added_outcomes,
+                needs_choice=build_needs_choice_outcome(
+                    requested_item=requested_item,
+                    normalized_name=normalized_name,
+                    search_query=search_query,
+                    quantity=qty,
+                    cached_results=results,
+                    total_count=total_count,
+                    chat_key=chat_key,
+                    pending_db_path=pending_db_path,
+                    remaining_intents_json=intents_to_json(remaining) if remaining else None,
+                ),
+            )
+
+        attempt = resolve_cart_item(intent.raw_text, db_path=db_path)
+        outcome = execute_add_fn(attempt)
+        added_outcomes.append(outcome)
+        if not outcome.get("ok") and not outcome.get("duplicate"):
+            break
+
+    return AddListProgress(added_outcomes=added_outcomes)
 
 
 def process_add_list_with_choice(
@@ -424,37 +504,14 @@ def process_add_list_with_choice(
     if not intents:
         raise CartResolveError(f"Could not parse list: {list_text!r}")
 
-    added_outcomes: list[dict[str, Any]] = []
-    for intent in intents:
-        needs = intent_needs_product_choice(
-            intent.raw_text,
-            quantity=None,
-            db_path=db_path,
-        )
-        if needs is not None:
-            requested_item, normalized_name, search_query, qty = needs
-            results, total_count = search_products_for_choice(search_query, client=client)
-            return AddListProgress(
-                added_outcomes=added_outcomes,
-                needs_choice=build_needs_choice_outcome(
-                    requested_item=requested_item,
-                    normalized_name=normalized_name,
-                    search_query=search_query,
-                    quantity=qty,
-                    cached_results=results,
-                    total_count=total_count,
-                    chat_key=chat_key,
-                    pending_db_path=pending_db_path,
-                ),
-            )
-
-        attempt = resolve_cart_item(intent.raw_text, db_path=db_path)
-        outcome = execute_add_fn(attempt)
-        added_outcomes.append(outcome)
-        if not outcome.get("ok") and not outcome.get("duplicate"):
-            break
-
-    return AddListProgress(added_outcomes=added_outcomes)
+    return process_intents_with_choice(
+        intents,
+        chat_key=chat_key,
+        client=client,
+        db_path=db_path,
+        pending_db_path=pending_db_path,
+        execute_add_fn=execute_add_fn,
+    )
 
 
 def rerun_pending_search(
@@ -487,6 +544,7 @@ def rerun_pending_search(
         page_size=pending.page_size,
         chat_key=chat_key,
         pending_db_path=pending_db_path,
+        remaining_intents_json=pending.remaining_intents_json,
     )
 
 

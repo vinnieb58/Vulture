@@ -7,8 +7,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from kestrel_formatting import KESTREL_DISPLAY_TZ, format_timestamp_friendly
-from nest_collection_health import STATUS_MISSING, get_nest_collection_health
+from nest_collection_health import STATUS_MISSING, STATUS_STALE, get_nest_collection_health
 from nest_energy_correlation import get_energy_hvac_correlation
+from nest_error_status import (
+    nest_poll_warning_for_stale_data,
+    read_nest_poll_error,
+)
 from nest_hvac_runtime import (
     HvacRuntimeSummary,
     ThermostatRuntime,
@@ -130,7 +134,22 @@ def format_hvac_section(
 ) -> dict[str, Any]:
     """Build display payloads for HVAC runtime and energy correlation."""
     ts_now = now or datetime.now(timezone.utc)
+    poll_error = read_nest_poll_error()
     collection = format_collection_health_display(now=ts_now, tz_name=tz_name)
+    if collection.get("status_key") == STATUS_STALE and poll_error:
+        warning = nest_poll_warning_for_stale_data(is_stale=True, poll_error=poll_error)
+        if warning == "Nest auth failure":
+            collection = {
+                **collection,
+                "status": "Auth failure",
+                "style": "fail",
+            }
+        elif warning == "Nest stale":
+            collection = {
+                **collection,
+                "status": "Stale",
+                "style": "fail",
+            }
     runtime = get_hvac_runtime_summaries(now=ts_now)
     correlation = get_energy_hvac_correlation(now=ts_now)
 
@@ -181,6 +200,20 @@ def format_hvac_section(
                 ),
             }
         )
+    overlap_start = diagnostics.get("overlap_start")
+    overlap_end = diagnostics.get("overlap_end")
+    if overlap_start and overlap_end and (
+        overlap_start != window_start or overlap_end != window_end
+    ):
+        correlation_diagnostics.append(
+            {
+                "label": "Overlap bounds",
+                "value": (
+                    f"{format_timestamp_friendly(str(overlap_start), tz_name=tz_name, now=ts_now)}"
+                    f" – {format_timestamp_friendly(str(overlap_end), tz_name=tz_name, now=ts_now)}"
+                ),
+            }
+        )
     smt_latest = diagnostics.get("smt_latest")
     if smt_latest:
         correlation_diagnostics.append(
@@ -209,12 +242,42 @@ def format_hvac_section(
     if interval_count is not None:
         correlation_diagnostics.append(
             {
-                "label": "SMT interval rows",
+                "label": "SMT interval rows (total)",
                 "value": f"{int(interval_count):,}",
+            }
+        )
+    smt_rows_in_window = diagnostics.get("smt_rows_in_window")
+    if smt_rows_in_window is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "SMT rows in window",
+                "value": f"{int(smt_rows_in_window):,}",
+            }
+        )
+    nest_samples_in_window = diagnostics.get("nest_samples_in_window")
+    if nest_samples_in_window is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "Nest samples in window",
+                "value": f"{int(nest_samples_in_window):,}",
+            }
+        )
+    matched_correlation_rows = diagnostics.get("matched_correlation_rows")
+    if matched_correlation_rows is not None:
+        correlation_diagnostics.append(
+            {
+                "label": "Matched correlation rows",
+                "value": f"{int(matched_correlation_rows):,}",
             }
         )
 
     warnings: list[str] = []
+    stale_warning = nest_poll_warning_for_stale_data(
+        is_stale=collection.get("status_key") == STATUS_STALE,
+        poll_error=poll_error,
+    )
+    if stale_warning:
+        warnings.append(stale_warning)
     for warning in (runtime.get("warning"), correlation.get("warning")):
         if isinstance(warning, str) and warning:
             warnings.append(warning)

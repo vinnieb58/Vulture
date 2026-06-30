@@ -55,6 +55,7 @@ services:
       VULTURE_DB_PATH: /app/data/vulture.db
       VULTURE_LOG_PATH: /app/logs/vulture.log
       NEST_STATUS_PATH: /app/data/kestrel_nest_status.json
+      NEST_ERROR_PATH: /app/data/kestrel_nest_error.json
       NEST_HISTORY_PATH: /app/data/kestrel_nest_history.jsonl
       DASHBOARD_HOST_ROOT: /host/root
       DASHBOARD_HOST_PROC: /host/proc

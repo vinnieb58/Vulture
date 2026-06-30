@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from finch.models import GroceryIntent
@@ -105,3 +106,31 @@ def parse_grocery_text(text: str) -> list[GroceryIntent]:
             intents.append(intent)
 
     return intents
+
+
+def intent_to_dict(intent: GroceryIntent) -> dict[str, str | float | None]:
+    return {
+        "raw_text": intent.raw_text,
+        "normalized_name": intent.normalized_name,
+        "quantity": intent.quantity,
+        "unit": intent.unit,
+    }
+
+
+def intent_from_dict(data: dict) -> GroceryIntent:
+    return GroceryIntent(
+        raw_text=str(data["raw_text"]),
+        normalized_name=str(data["normalized_name"]),
+        quantity=float(data.get("quantity") or 1.0),
+        unit=data.get("unit"),
+    )
+
+
+def intents_to_json(intents: list[GroceryIntent]) -> str:
+    return json.dumps([intent_to_dict(intent) for intent in intents])
+
+
+def intents_from_json(raw: str | None) -> list[GroceryIntent]:
+    if not raw:
+        return []
+    return [intent_from_dict(item) for item in json.loads(raw)]

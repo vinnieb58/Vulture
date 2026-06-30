@@ -124,12 +124,14 @@ def format_house_card_display(house: dict[str, Any], *, now: datetime | None = N
     style_map = {
         "available": "ok",
         "stale": "warn",
+        "auth_failure": "fail",
         "no_data": "unknown",
         "error": "fail",
     }
     status_map = {
         "available": "OK",
         "stale": "Stale",
+        "auth_failure": "Auth failure",
         "no_data": "No data",
         "error": "Error",
     }

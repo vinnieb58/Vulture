@@ -4,6 +4,7 @@ Read-only Raven health checks for Canary.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -407,6 +408,70 @@ def check_systemd_failed() -> dict[str, Any]:
     }
 
 
+def check_backup_monitor() -> dict[str, Any]:
+    """
+    Read the latest Pelican backup monitor snapshot without re-running backup checks.
+
+    Backup checksum/staleness validation runs on the six-hour pelican-monitor.timer
+    schedule; Canary only surfaces the most recent aggregate JSON here.
+    """
+    path = config.BACKUP_MONITOR_STATUS_PATH
+    if not path.is_file():
+        return {
+            "status": "warning",
+            "source": str(path),
+            "detail": "No backup monitor snapshot (pelican-monitor.timer may be disabled)",
+            "snapshot": None,
+            "alerts": [],
+        }
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "warning",
+            "source": str(path),
+            "detail": f"Cannot read backup monitor snapshot: {exc}",
+            "snapshot": None,
+            "alerts": [],
+        }
+
+    generated_at = data.get("generated_at")
+    snapshot_age_hours: float | None = None
+    snapshot_stale = False
+    if generated_at:
+        try:
+            tz = ZoneInfo(config.DISPLAY_TIMEZONE)
+            ts = datetime.fromisoformat(str(generated_at))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=tz)
+            snapshot_age_hours = round(
+                (datetime.now(tz=timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+                2,
+            )
+            snapshot_stale = snapshot_age_hours >= config.BACKUP_MONITOR_SNAPSHOT_STALE_HOURS
+        except (ValueError, OSError):
+            snapshot_stale = True
+
+    overall = data.get("overall_status", "warning")
+    status = overall if overall in ("ok", "warning", "critical") else "warning"
+    if snapshot_stale and status == "ok":
+        status = "warning"
+
+    return {
+        "status": status,
+        "source": str(path),
+        "generated_at": generated_at,
+        "snapshot_age_hours": snapshot_age_hours,
+        "snapshot_stale": snapshot_stale,
+        "overall_status": data.get("overall_status"),
+        "enabled_backups": data.get("enabled_backups", []),
+        "backups": data.get("backups", {}),
+        "snapshot": data,
+        "alerts": [],
+    }
+
+
 def get_hostname() -> str:
     ok, out = run_command(["hostname"], timeout=config.DEFAULT_SUBPROCESS_TIMEOUT)
     if ok and out.strip():
@@ -449,6 +514,7 @@ def run_all_checks() -> dict[str, Any]:
         "docker": _safe("docker", check_docker),
         "vulture_runtime": _safe("vulture_runtime", check_vulture_runtime),
         "systemd_failed": _safe("systemd_failed", check_systemd_failed),
+        "backup_monitor": _safe("backup_monitor", check_backup_monitor),
     }
 
     section_statuses = [checks[key].get("status", "warning") for key in checks]

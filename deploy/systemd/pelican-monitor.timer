@@ -1,0 +1,12 @@
+[Unit]
+Description=Pelican backup health monitor (every six hours)
+Documentation=file:/home/vinnieb58/projects/vulture/docs/current/PELiCAN_BACKUP.md
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=pelican-monitor.service
+
+[Install]
+WantedBy=timers.target

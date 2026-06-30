@@ -1,0 +1,18 @@
+[Unit]
+Description=Kestrel Tuya dual-meter power poll (oneshot, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vinnieb58
+Group=vinnieb58
+WorkingDirectory=/home/vinnieb58/projects/vulture
+EnvironmentFile=/home/vinnieb58/projects/vulture/.env
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python experiments/kestrel/tuya_power_probe.py --once
+NoNewPrivileges=true
+TimeoutStartSec=120
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

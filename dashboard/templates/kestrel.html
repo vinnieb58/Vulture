@@ -453,6 +453,8 @@
         <div class="section-note" style="margin-top:0.65rem;">
           No Nest history yet. Samples appear after the poll timer runs.
         </div>
+        {% elif hvac.warning in ('Nest auth failure', 'Nest stale') %}
+        <div class="section-warning" style="margin-top:0.65rem;">{{ hvac.warning }}</div>
         {% endif %}
       </div>
 
@@ -534,8 +536,81 @@
       </div>
       {% endif %}
 
+      {% set tuya = kestrel.tuya_power %}
       <div class="card full-width">
-        <div class="card-title">Energy + HVAC Correlation</div>
+        <div class="summary-header" style="margin-bottom:0.65rem;">
+          <span class="card-title" style="margin-bottom:0;">Tuya Appliance Power</span>
+          <span class="status-badge {{ tuya.style }}">{{ tuya.status }}</span>
+        </div>
+        <div class="card-subtitle">{{ tuya.headline }}</div>
+        {% if tuya.warning %}
+        <div class="section-warning">{{ tuya.warning }}</div>
+        {% endif %}
+        <div class="summary-grid" style="margin-bottom:0.75rem;">
+          {% if tuya.updated_at %}
+          <div class="summary-item">
+            <span>Last sample</span>
+            <strong>{{ tuya.updated_at }}{% if tuya.updated_age %} ({{ tuya.updated_age }}){% endif %}</strong>
+          </div>
+          {% endif %}
+          {% if tuya.source %}
+          <div class="summary-item">
+            <span>Source</span>
+            <strong>{{ tuya.source }}</strong>
+          </div>
+          {% endif %}
+          {% if tuya.device_model %}
+          <div class="summary-item">
+            <span>Device model</span>
+            <strong>{{ tuya.device_model }}</strong>
+          </div>
+          {% endif %}
+        </div>
+        {% if tuya.appliances %}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Appliance</th>
+              <th class="num">Power</th>
+              <th class="num">Voltage</th>
+              <th class="num">Energy</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in tuya.appliances %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td class="num">{{ row.power_display }}</td>
+              <td class="num">{{ row.voltage_display }}</td>
+              <td class="num">{% if row.energy_display %}{{ row.energy_display }}{% else %}—{% endif %}</td>
+              <td><span class="status-badge {{ row.style }}">{{ row.status }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="chart-empty">No Tuya appliance power data yet. Samples appear after the poll timer runs.</div>
+        {% endif %}
+        {% if tuya.poll_error and tuya.poll_error.last_success %}
+        <div class="section-note">Last successful poll: {{ tuya.poll_error.last_success }}</div>
+        {% endif %}
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">Appliance power — last 1 hour</div>
+        <div class="chart-host" id="chart-tuya-power-1h"></div>
+        <script type="application/json" id="chart-data-tuya-power-1h">{{ tuya.charts.power_1h | tojson }}</script>
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">Appliance power — last 24 hours</div>
+        <div class="chart-host" id="chart-tuya-power-24h"></div>
+        <script type="application/json" id="chart-data-tuya-power-24h">{{ tuya.charts.power_24h | tojson }}</script>
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">Energy + HVAC Correlation — Latest Overlapping 24h</div>
         {% if hvac.correlation.warning %}
         <div class="section-warning">{{ hvac.correlation.warning }}</div>
         {% endif %}
@@ -550,7 +625,7 @@
         </div>
         {% endif %}
         {% if hvac.correlation.available and hvac.correlation.rows %}
-        <div class="card-subtitle">Last {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
+        <div class="card-subtitle">Latest overlapping {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
         <table class="data-table">
           <thead>
             <tr>
@@ -585,10 +660,12 @@
         <div class="chart-empty">
           {% if hvac.correlation.status == 'no_overlap' %}
           Waiting for Nest HVAC history and Smart Meter Texas intervals to overlap.
-          {% elif hvac.correlation.status == 'no_nest_history' %}
+          {% elif hvac.correlation.status == 'no_nest_data' %}
           Correlation requires Nest HVAC history from the poll timer.
-          {% elif hvac.correlation.status in ('no_smt_db', 'empty_smt') %}
+          {% elif hvac.correlation.status in ('no_smt_db', 'no_smt_data') %}
           Correlation requires Smart Meter Texas interval data in the Kestrel database.
+          {% elif hvac.correlation.status == 'no_matched_rows' %}
+          Smart Meter Texas intervals were found, but none could be matched to Nest HVAC samples in the selected window.
           {% else %}
           Correlation rows will appear once overlapping Nest HVAC history and Smart Meter Texas intervals exist in the selected window.
           {% endif %}
@@ -623,5 +700,6 @@
 </nav>
 
 <script src="/static/kestrel_charts.js"></script>
+<script src="/static/tuya_power_charts.js"></script>
 </body>
 </html>
