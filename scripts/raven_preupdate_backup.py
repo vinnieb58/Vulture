@@ -52,7 +52,13 @@ def collect_source_files(repo_root: Path) -> list[Path]:
         if kestrel_dir.is_dir():
             candidates.extend(sorted(kestrel_dir.glob("*.db")))
 
-        for name in ("kestrel_nest_status.json", "kestrel_nest_history.jsonl"):
+        for name in (
+            "kestrel_nest_status.json",
+            "kestrel_nest_history.jsonl",
+            "kestrel_tuya_power_status.json",
+            "kestrel_tuya_power_history.jsonl",
+            "kestrel/kestrel_status.json",
+        ):
             path = data_dir / name
             if path.is_file():
                 candidates.append(path)

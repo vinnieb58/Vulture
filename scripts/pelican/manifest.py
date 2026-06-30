@@ -11,6 +11,17 @@ from .redaction import assert_manifest_safe
 
 
 @dataclass
+class TelemetryCoverage:
+    sqlite_databases: list[str] = field(default_factory=list)
+    jsonl_history: list[str] = field(default_factory=list)
+    snapshots: list[str] = field(default_factory=list)
+    config_files: list[str] = field(default_factory=list)
+    sqlite_integrity: dict[str, str] = field(default_factory=dict)
+    missing_optional: list[str] = field(default_factory=list)
+    catalog_lines: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ManifestData:
     backup_timestamp: str
     hostname: str
@@ -26,6 +37,7 @@ class ManifestData:
     missing_optional: list[str] = field(default_factory=list)
     source_paths: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    telemetry_coverage: TelemetryCoverage | None = None
 
 
 def render_manifest(data: ManifestData) -> str:
@@ -56,6 +68,58 @@ def render_manifest(data: ManifestData) -> str:
     lines.extend(["", "included_files:"])
     for path in sorted(data.included_files):
         lines.append(f"  - {path}")
+
+    if data.telemetry_coverage is not None:
+        cov = data.telemetry_coverage
+        lines.extend(
+            [
+                "",
+                "telemetry_coverage:",
+                "  Aviary long-term telemetry/history files included in this bundle.",
+                "",
+                "long_term_data_catalog:",
+            ]
+        )
+        if cov.catalog_lines:
+            lines.extend(cov.catalog_lines)
+        else:
+            lines.append("  - (none cataloged)")
+
+        lines.extend(["", "sqlite_databases:"])
+        if cov.sqlite_databases:
+            for path in cov.sqlite_databases:
+                integrity = cov.sqlite_integrity.get(path, "unknown")
+                lines.append(f"  - {path} (integrity={integrity})")
+        else:
+            lines.append("  - (none)")
+
+        lines.extend(["", "jsonl_history:"])
+        if cov.jsonl_history:
+            for path in cov.jsonl_history:
+                lines.append(f"  - {path}")
+        else:
+            lines.append("  - (none)")
+
+        lines.extend(["", "telemetry_snapshots:"])
+        if cov.snapshots:
+            for path in cov.snapshots:
+                lines.append(f"  - {path}")
+        else:
+            lines.append("  - (none)")
+
+        lines.extend(["", "telemetry_config:"])
+        if cov.config_files:
+            for path in cov.config_files:
+                lines.append(f"  - {path}")
+        else:
+            lines.append("  - (none)")
+
+        lines.extend(["", "telemetry_missing_optional:"])
+        if cov.missing_optional:
+            for path in cov.missing_optional:
+                lines.append(f"  - {path}")
+        else:
+            lines.append("  - (none)")
 
     lines.extend(["", "missing_optional:"])
     if data.missing_optional:

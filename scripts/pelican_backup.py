@@ -40,7 +40,7 @@ from pelican.inventory import (  # noqa: E402
     copy_repo_systemd_defs,
     should_exclude_repo_path,
 )
-from pelican.manifest import ManifestData, render_manifest, utc_now_iso, write_manifest  # noqa: E402
+from pelican.manifest import ManifestData, TelemetryCoverage, render_manifest, utc_now_iso, write_manifest  # noqa: E402
 from pelican.mount import verify_backup_target  # noqa: E402
 from pelican.naming import (  # noqa: E402
     archive_suffix,
@@ -52,6 +52,11 @@ from pelican.naming import (  # noqa: E402
 )
 from pelican.retention import plan_retention  # noqa: E402
 from pelican.sqlite_backup import backup_and_verify_sqlite  # noqa: E402
+from pelican.telemetry_data import (  # noqa: E402
+    backup_telemetry_data,
+    discover_long_term_data,
+    render_telemetry_catalog,
+)
 
 
 @dataclass
@@ -71,6 +76,7 @@ class BackupContext:
     git_branch: str = ""
     git_commit: str = ""
     sqlite_integrity: str = ""
+    sqlite_integrity_all: dict[str, str] = field(default_factory=dict)
     archive_checksum: str = ""
     published: bool = False
 
@@ -318,10 +324,40 @@ def run_backup(ctx: BackupContext, *, skip_retention: bool = False) -> int:
             log_error(sqlite_result.message)
             return 1
         ctx.sqlite_integrity = sqlite_result.integrity_result
+        ctx.sqlite_integrity_all[str(ctx.db_path)] = sqlite_result.integrity_result
         integrity_note = bundle_contents / "database" / "integrity_check.txt"
         integrity_note.write_text(sqlite_result.integrity_result, encoding="utf-8")
         ctx.inventory.included.extend([str(db_dest), str(integrity_note)])
         log_info(sqlite_result.message)
+
+        telemetry_inventory = discover_long_term_data(ctx.repo_root, primary_db=ctx.db_path)
+        telemetry_dest = bundle_contents
+        telemetry_result = backup_telemetry_data(
+            ctx.repo_root,
+            dest_root=telemetry_dest,
+            primary_db=ctx.db_path,
+            inventory=telemetry_inventory,
+        )
+        if not telemetry_result.ok:
+            for failure in telemetry_result.failures:
+                log_error(failure)
+            return 1
+        for sqlite_backup in telemetry_result.sqlite_results:
+            rel = sqlite_backup.source.as_posix()
+            ctx.sqlite_integrity_all[rel] = sqlite_backup.integrity_result
+            log_info(sqlite_backup.message)
+        for jsonl_backup in telemetry_result.jsonl_results:
+            if jsonl_backup.source_nonempty:
+                log_info(f"JSONL history verified: {jsonl_backup.rel_path}")
+        ctx.inventory.included.extend(telemetry_result.copied_files)
+        ctx.inventory.missing_optional.extend(telemetry_result.missing_optional)
+        log_info(
+            "Captured long-term telemetry data "
+            f"({len(telemetry_inventory.sqlite_files)} SQLite, "
+            f"{len(telemetry_inventory.jsonl_files)} JSONL, "
+            f"{len(telemetry_inventory.snapshot_files)} snapshots, "
+            f"{len(telemetry_inventory.config_files)} config)"
+        )
 
         secrets_dest = bundle_contents / "secrets" / ".env"
         copy_secrets(ctx.env_path, secrets_dest, ctx.inventory)
@@ -355,7 +391,25 @@ def run_backup(ctx: BackupContext, *, skip_retention: bool = False) -> int:
                 "Incomplete bundles use the .incomplete suffix and are not retention-eligible.",
                 f"Completed bundles use the {ctx.archive_suffix} suffix.",
                 "The published archive checksum is written to a companion .sha256 file beside the archive.",
+                "Long-term Aviary telemetry (Kestrel/Nest/Tuya/Finch SQLite, JSONL history, snapshots) "
+                "is copied under database/ and telemetry/ with per-DB integrity checks.",
             ],
+            telemetry_coverage=TelemetryCoverage(
+                sqlite_databases=sorted(
+                    {
+                        str(path)
+                        for path in telemetry_inventory.sqlite_files
+                    }
+                ),
+                jsonl_history=[
+                    str(path) for path in telemetry_inventory.jsonl_files
+                ],
+                snapshots=[str(path) for path in telemetry_inventory.snapshot_files],
+                config_files=[str(path) for path in telemetry_inventory.config_files],
+                sqlite_integrity=dict(ctx.sqlite_integrity_all),
+                missing_optional=list(telemetry_inventory.missing_optional),
+                catalog_lines=render_telemetry_catalog(telemetry_inventory),
+            ),
         )
         manifest_path = bundle_contents / "MANIFEST.txt"
         write_manifest(manifest_path, manifest_data)

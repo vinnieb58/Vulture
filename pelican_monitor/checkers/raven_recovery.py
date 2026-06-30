@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from pelican_monitor import config
 from pelican_monitor.path_util import host_path, path_access_check
 from pelican_monitor.results import BackupCheckResult, combine_status
+from pelican_monitor.telemetry_coverage import evaluate_latest_archive_telemetry
 from pelican_monitor.subprocess_util import is_timeout, run_command
 from pelican_monitor.timer_parse import parse_next_elapse_realtime
 
@@ -422,6 +423,10 @@ def check_raven_recovery() -> BackupCheckResult:
             stale_hours=config.RAVEN_RECOVERY_CRITICAL_HOURS,
             warn_hours=config.RAVEN_RECOVERY_WARN_HOURS,
         )
+        telemetry = evaluate_latest_archive_telemetry(
+            Path(mount["resolved_path"]),
+            archive.get("latest_name"),
+        )
     else:
         archive = {
             "latest_name": None,
@@ -435,6 +440,20 @@ def check_raven_recovery() -> BackupCheckResult:
             "status": "critical",
             "issues": [("critical", "MOUNT_UNAVAILABLE", "Skipping archive check: mount unavailable")],
         }
+        telemetry = evaluate_latest_archive_telemetry(Path(mount["resolved_path"]), None)
+
+    if archive.get("latest_name") and not telemetry.covered:
+        archive_issues = list(archive.get("issues", []))
+        archive_issues.append(
+            (
+                "warning",
+                "TELEMETRY_COVERAGE_INCOMPLETE",
+                telemetry.message,
+            )
+        )
+        archive = {**archive, "issues": archive_issues}
+        if archive.get("status") == "ok":
+            archive = {**archive, "status": "warning"}
 
     all_issues: list[tuple[str, str, str]] = []
     for section in (timer, service, mount, archive):
@@ -445,7 +464,7 @@ def check_raven_recovery() -> BackupCheckResult:
 
     return BackupCheckResult(
         backup_id="raven_recovery",
-        display_name="Pelican backup",
+        display_name="Pelican backup (repo, DBs, telemetry/history)",
         status=status,
         reason=_primary_reason(all_issues),
         checked_at=_checked_at(),
@@ -461,5 +480,15 @@ def check_raven_recovery() -> BackupCheckResult:
         details={
             "mount": mount,
             "archive": archive,
+            "telemetry_coverage": {
+                "covered": telemetry.covered,
+                "message": telemetry.message,
+                "sqlite_count": telemetry.sqlite_count,
+                "jsonl_count": telemetry.jsonl_count,
+                "snapshot_count": telemetry.snapshot_count,
+                "config_count": telemetry.config_count,
+                "manifest_path": telemetry.manifest_path,
+                "missing_markers": telemetry.missing_markers,
+            },
         },
     )

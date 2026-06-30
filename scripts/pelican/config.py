@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 
 DEFAULT_REPO_ROOT = Path(os.environ.get("PELICAN_REPO_ROOT", "/home/vinnieb58/projects/vulture"))
 DEFAULT_BACKUP_TARGET = Path(
@@ -112,11 +112,19 @@ REPO_EXCLUDE_GLOBS = (
     "**/*.pyc",
     "**/logs/**",
     "**/experiments/debug/**",
+    "**/data/kestrel/debug/**",
+    "**/*screenshot*",
+    "**/*.trace.zip",
     "**/.env",
     "**/data/*.db",
     "**/data/*.sqlite",
     "**/data/*.sqlite3",
-    "**/*.trace.zip",
+    "**/data/kestrel/**/*.db",
+    "**/data/*_error.json",
+    "**/data/canary_status.json",
+    "**/data/backup_monitor_status.json",
+    "**/data/canary_alert_state.json",
+    "**/tuya-raw.json",
     "**/experiments/simplyfresh_probe/.auth/**",
     "**/experiments/simplyfresh_probe/artifacts/**",
 )
