@@ -550,39 +550,37 @@
     {# ------------------------------------------------------------------ #}
     <div style="font-size:0.78rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.35rem;">Current Status</div>
     <div class="status-row">
-      {# Tuya whole-home proxy (sum of 4 CTs) — latest snapshot #}
-      {% set compressor_entry = tuya.appliances | selectattr("key", "equalto", "ac_compressor") | first | default(none) %}
-      {% set furnace_entry    = tuya.appliances | selectattr("key", "equalto", "furnace_air_handler") | first | default(none) %}
+      {# Show each of the four configured Tuya circuits individually.
+         Do NOT derive a "non-HVAC" figure by subtraction — dryer and dishwasher
+         are measured directly; the rest of the home is not monitored. #}
 
-      {# Tuya total measured current power #}
-      {% set total_w = 0 %}
-      {% for a in tuya.appliances %}{% if a.power_w is not none %}{% set total_w = total_w + a.power_w %}{% endif %}{% endfor %}
-      <div class="status-item">
-        <span class="status-item-label">Tuya measured</span>
-        <span class="status-item-value" style="color:var(--orange)">
-          {% if total_w > 0 %}{{ "%.1f"|format(total_w / 1000) }} kW{% else %}—{% endif %}
-        </span>
-      </div>
+      {%- set channel_info = [
+        ("ac_compressor",      "AC Compressor",         "var(--red)"),
+        ("furnace_air_handler","Furnace / Air Handler",  "var(--orange)"),
+        ("dryer",              "Dryer",                  "var(--warn)"),
+        ("dishwasher",         "Dishwasher",             "var(--accent)"),
+      ] -%}
+      {%- set total_w = namespace(v=0) -%}
+      {%- for key, label, color in channel_info -%}
+        {%- set entry = tuya.appliances | selectattr("key", "equalto", key) | first | default(none) -%}
+        <div class="status-item">
+          <span class="status-item-label">{{ label }}</span>
+          <span class="status-item-value" style="color:{{ color }}">
+            {%- if entry and entry.power_w is not none -%}
+              {%- if total_w.v is defined %}{% set total_w.v = total_w.v + entry.power_w %}{% endif -%}
+              {{ "%.0f"|format(entry.power_w) }} W
+            {%- else -%}—{%- endif -%}
+          </span>
+        </div>
+      {%- endfor -%}
 
-      {# Compressor power #}
+      {# Monitored circuits total — NOT whole-home #}
+      {%- set mon_total_w = namespace(v=0) -%}
+      {%- for a in tuya.appliances -%}{%- if a.power_w is not none -%}{%- set mon_total_w.v = mon_total_w.v + a.power_w -%}{%- endif -%}{%- endfor -%}
       <div class="status-item">
-        <span class="status-item-label">Compressor</span>
-        <span class="status-item-value" style="color:var(--red)">
-          {% if compressor_entry and compressor_entry.power_w is not none %}
-            {{ "%.0f"|format(compressor_entry.power_w) }} W
-          {% else %}—{% endif %}
-        </span>
-      </div>
-
-      {# Derived non-HVAC load #}
-      {% set hvac_w = 0 %}
-      {% if compressor_entry and compressor_entry.power_w is not none %}{% set hvac_w = hvac_w + compressor_entry.power_w %}{% endif %}
-      {% if furnace_entry and furnace_entry.power_w is not none %}{% set hvac_w = hvac_w + furnace_entry.power_w %}{% endif %}
-      {% set non_hvac_w = total_w - hvac_w %}
-      <div class="status-item">
-        <span class="status-item-label">Non-HVAC</span>
+        <span class="status-item-label">Monitored total</span>
         <span class="status-item-value">
-          {% if total_w > 0 %}{{ "%.0f"|format([non_hvac_w, 0] | max) }} W{% else %}—{% endif %}
+          {%- if mon_total_w.v > 0 -%}{{ "%.1f"|format(mon_total_w.v / 1000) }} kW{%- else -%}—{%- endif -%}
         </span>
       </div>
 
@@ -594,15 +592,11 @@
         </span>
       </div>
 
-      {# SMT freshness #}
+      {# Freshness #}
       <div class="status-item">
         <span class="status-item-label">SMT latest</span>
-        <span class="status-item-value">
-          {% if kestrel.generated_at %}{{ kestrel.generated_at }}{% else %}—{% endif %}
-        </span>
+        <span class="status-item-value">{% if kestrel.generated_at %}{{ kestrel.generated_at }}{% else %}—{% endif %}</span>
       </div>
-
-      {# Sample times #}
       <div class="status-item">
         <span class="status-item-label">Tuya age</span>
         <span class="status-item-value {% if tuya.state == 'stale' %}fail{% elif tuya.state == 'online' %}ok{% endif %}">
@@ -611,9 +605,7 @@
       </div>
       <div class="status-item">
         <span class="status-item-label">Nest age</span>
-        <span class="status-item-value">
-          {% if hvac.latest_sample_at %}{{ hvac.latest_sample_at }}{% else %}—{% endif %}
-        </span>
+        <span class="status-item-value">{% if hvac.latest_sample_at %}{{ hvac.latest_sample_at }}{% else %}—{% endif %}</span>
       </div>
     </div>
 
@@ -684,10 +676,13 @@
           <span class="story-window">{{ window.label }}</span>
         </div>
         <div class="card-subtitle">
-          Blue bars: SMT average kW (utility) &nbsp;·&nbsp;
-          Orange line: Tuya measured load &nbsp;·&nbsp;
-          Red line: Compressor &nbsp;·&nbsp;
-          Blue shading: Nest cooling period
+          Blue bars: SMT whole-home avg kW &nbsp;·&nbsp;
+          <span style="color:var(--red)">●</span> AC Compressor &nbsp;·&nbsp;
+          <span style="color:var(--orange)">●</span> Furnace / Air Handler &nbsp;·&nbsp;
+          <span style="color:var(--warn)">●</span> Dryer &nbsp;·&nbsp;
+          <span style="color:var(--ok)">●</span> Dishwasher &nbsp;·&nbsp;
+          <span style="color:var(--muted)">- -</span> Monitored Circuits Total &nbsp;·&nbsp;
+          Blue shading: Nest cooling
         </div>
         {% if not window.has_smt and not window.has_tuya %}
         <div class="chart-empty">No data for the selected window. Check data sources below.</div>
@@ -710,11 +705,20 @@
             <div class="peak-details">
               <span class="peak-time">
                 {{ peak.timestamp_display if peak.timestamp_display else peak.timestamp[:16] }}
-                — {{ "%.2f"|format(peak.total_kw) }} kW
+                — {{ "%.2f"|format(peak.monitored_total_kw if peak.monitored_total_kw is not none else peak.total_kw) }} kW monitored
+                {% if peak.smt_whole_home_kw is not none %} / {{ "%.2f"|format(peak.smt_whole_home_kw) }} kW SMT{% endif %}
               </span>
               <span class="peak-numbers">
-                {% if peak.hvac_kw is not none %}HVAC {{ "%.2f"|format(peak.hvac_kw) }} kW{% if peak.compressor_kw is not none %} (comp. {{ "%.2f"|format(peak.compressor_kw) }} kW){% endif %} · {% endif %}
-                {% if peak.non_hvac_kw is not none %}Other {{ "%.2f"|format(peak.non_hvac_kw) }} kW · {% endif %}
+                {# Individual circuit readings #}
+                {% if peak.channels %}
+                  {% if peak.channels.ac_compressor is defined %}AC {{ "%.2f"|format(peak.channels.ac_compressor) }} kW · {% endif %}
+                  {% if peak.channels.furnace_air_handler is defined %}AHU {{ "%.2f"|format(peak.channels.furnace_air_handler) }} kW · {% endif %}
+                  {% if peak.channels.dryer is defined and peak.channels.dryer > 0 %}Dryer {{ "%.2f"|format(peak.channels.dryer) }} kW · {% endif %}
+                  {% if peak.channels.dishwasher is defined and peak.channels.dishwasher > 0 %}DW {{ "%.2f"|format(peak.channels.dishwasher) }} kW · {% endif %}
+                {% elif peak.hvac_kw is not none %}
+                  HVAC {{ "%.2f"|format(peak.hvac_kw) }} kW ·
+                {% endif %}
+                {% if peak.unmonitored_remainder_kw is not none %}Unmonitored est. {{ "%.2f"|format(peak.unmonitored_remainder_kw) }} kW · {% endif %}
                 {% if peak.nest_action %}Nest: {{ peak.nest_action }}{% endif %}
               </span>
               <span class="peak-explanation">{{ peak.explanation }}</span>
@@ -724,9 +728,10 @@
         </div>
         <div class="section-note">
           {% if energy.peaks[0].source == 'smt_interval' %}
-          Peaks from SMT 15-minute average-kW (Tuya data unavailable for this window).
+          Peaks from SMT 15-minute average-kW (Tuya circuit data unavailable for this window).
           {% else %}
-          Peaks from Tuya instantaneous readings; nearby samples within 30 minutes grouped as one event.
+          Peaks from Tuya instantaneous circuit readings; samples within 30 minutes grouped as one event.
+          Unmonitored remainder = SMT whole-home avg kW minus sum of circuit readings at that timestamp.
           {% endif %}
         </div>
         {% else %}
@@ -851,54 +856,64 @@
         <div class="card-subtitle">{{ window.label }}</div>
         {% if bd.has_smt or bd.has_tuya %}
         {% set smt_total = bd.smt_kwh | default(0) %}
-        {% set hvac_kwh  = bd.hvac_kwh | default(0) %}
-        {% set non_hvac  = bd.non_hvac_measured_kwh | default(0) %}
-        {% set unattr    = bd.unattributed_kwh | default(0) %}
+        {# Per-circuit data — bd.channel_kwh is a dict keyed by appliance key #}
+        {%- set channel_rows = [
+          ("ac_compressor",      "AC Compressor",          "var(--red)"),
+          ("furnace_air_handler","Furnace / Air Handler",   "var(--orange)"),
+          ("dryer",              "Dryer",                   "var(--warn)"),
+          ("dishwasher",         "Dishwasher",              "var(--ok)"),
+        ] -%}
         <div class="breakdown-bars">
+          {# Reference bar: SMT whole-home (100%) #}
           {% if bd.has_smt %}
           <div class="breakdown-row">
-            <span class="breakdown-label">SMT total</span>
+            <span class="breakdown-label">SMT whole-home</span>
             <div class="breakdown-bar-track">
               <div class="breakdown-bar-fill" style="width:100%;background:var(--accent);opacity:0.6;"></div>
             </div>
             <span class="breakdown-value">{{ "%.2f"|format(smt_total) }} kWh</span>
           </div>
           {% endif %}
-          {% if bd.has_tuya and hvac_kwh > 0 %}
-          <div class="breakdown-row">
-            <span class="breakdown-label">HVAC <span class="estimate-tag">(est.)</span></span>
-            <div class="breakdown-bar-track">
-              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * hvac_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--orange);"></div>
+          {# Individual circuit bars #}
+          {% if bd.has_tuya and bd.channel_kwh %}
+            {% for key, label, color in channel_rows %}
+              {% if bd.channel_kwh[key] is defined and bd.channel_kwh[key] > 0 %}
+              <div class="breakdown-row">
+                <span class="breakdown-label">{{ label }} <span class="estimate-tag">(est.)</span></span>
+                <div class="breakdown-bar-track">
+                  <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.channel_kwh[key] / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:{{ color }};opacity:0.85;"></div>
+                </div>
+                <span class="breakdown-value">{{ "%.2f"|format(bd.channel_kwh[key]) }} kWh</span>
+              </div>
+              {% endif %}
+            {% endfor %}
+            {# Monitored circuits total #}
+            {% if bd.monitored_total_kwh > 0 %}
+            <div class="breakdown-row" style="border-top:1px dashed var(--border);padding-top:0.25rem;margin-top:0.1rem;">
+              <span class="breakdown-label" style="font-weight:600;">Monitored total <span class="estimate-tag">(est.)</span></span>
+              <div class="breakdown-bar-track">
+                <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.monitored_total_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.5;"></div>
+              </div>
+              <span class="breakdown-value" style="font-weight:600;">{{ "%.2f"|format(bd.monitored_total_kwh) }} kWh</span>
             </div>
-            <span class="breakdown-value">
-              {{ "%.2f"|format(hvac_kwh) }} kWh
-              {% if bd.hvac_pct_of_smt is not none %}<small style="color:var(--muted)">({{ "%.0f"|format(bd.hvac_pct_of_smt) }}%)</small>{% endif %}
-            </span>
-          </div>
+            {% endif %}
           {% endif %}
-          {% if bd.has_tuya and non_hvac > 0 %}
+          {# Unmonitored remainder = SMT - monitored total (only when both present) #}
+          {% if bd.has_smt and bd.has_tuya and bd.unmonitored_remainder_kwh is not none %}
           <div class="breakdown-row">
-            <span class="breakdown-label">Dryer + Dishwasher <span class="estimate-tag">(est.)</span></span>
+            <span class="breakdown-label">Unmonitored remainder <span class="estimate-tag">(est.)</span></span>
             <div class="breakdown-bar-track">
-              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * non_hvac / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:#d29922;opacity:0.8;"></div>
+              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * bd.unmonitored_remainder_kwh / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.3;"></div>
             </div>
-            <span class="breakdown-value">{{ "%.2f"|format(non_hvac) }} kWh</span>
-          </div>
-          {% endif %}
-          {% if bd.has_smt and bd.has_tuya and unattr is not none %}
-          <div class="breakdown-row">
-            <span class="breakdown-label">Other (unmetered)</span>
-            <div class="breakdown-bar-track">
-              <div class="breakdown-bar-fill" style="width:{% if smt_total > 0 %}{{ [100 * [unattr, 0] | max / smt_total, 100] | min | int }}{% else %}0{% endif %}%;background:var(--muted);opacity:0.5;"></div>
-            </div>
-            <span class="breakdown-value">{{ "%.2f"|format([unattr, 0] | max) }} kWh</span>
+            <span class="breakdown-value">{{ "%.2f"|format(bd.unmonitored_remainder_kwh) }} kWh</span>
           </div>
           {% endif %}
         </div>
         <div class="section-note">
-          HVAC and appliance values are estimates from Tuya CT clamps.
-          SMT is the utility billing reference.
-          Tuya does not measure whole-home consumption; "unmetered" includes lighting, small appliances, etc.
+          Circuit values are estimates from Tuya CT clamps (ac_compressor, furnace/AHU, dryer, dishwasher).
+          SMT is the utility billing reference (whole-home).
+          Unmonitored remainder = SMT total minus sum of measured circuits;
+          includes lighting, small appliances, and any other unmonitored loads.
         </div>
         {% else %}
         <div class="chart-empty">Energy breakdown requires at least one data source.</div>

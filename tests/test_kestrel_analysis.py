@@ -38,11 +38,16 @@ from kestrel_analysis import (
     NEST_ACTION_HEATING,
     SHORT_CYCLE_MINUTES,
     SMT_INTERVAL_MINUTES,
+    TUYA_ALL_KEYS,
+    TUYA_CHANNEL_LABELS,
     TUYA_HVAC_KEYS,
+    TUYA_MONITORED_TOTAL_LABEL,
     AnalysisWindow,
     HvacCycle,
     _find_peaks_from_smt,
+    build_all_channel_series,
     build_combined_timeline,
+    build_tuya_channel_series,
     build_tuya_kw_series,
     compute_daily_trends,
     compute_energy_breakdown,
@@ -773,3 +778,326 @@ class TestCoverageCalculations:
         ]
         total = smt_total_kwh(rows, window_start=base, window_end=base + timedelta(hours=1))
         assert total == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Individual Tuya channel visibility
+# ---------------------------------------------------------------------------
+
+def _tuya_record_with_all_channels(ts: datetime) -> FakeTuyaRecord:
+    """Record with all four circuits populated."""
+    return FakeTuyaRecord(
+        timestamp=ts,
+        appliances={
+            "ac_compressor":       {"power_w": 2500.0},
+            "furnace_air_handler": {"power_w": 600.0},
+            "dryer":               {"power_w": 1200.0},
+            "dishwasher":          {"power_w": 800.0},
+        },
+    )
+
+
+def _tuya_record_hvac_only(ts: datetime) -> FakeTuyaRecord:
+    """Record with only HVAC channels; dryer and dishwasher absent."""
+    return FakeTuyaRecord(
+        timestamp=ts,
+        appliances={
+            "ac_compressor":       {"power_w": 2500.0},
+            "furnace_air_handler": {"power_w": 600.0},
+            # dryer and dishwasher intentionally absent
+        },
+    )
+
+
+def _tuya_record_no_power(ts: datetime) -> FakeTuyaRecord:
+    """Record where all channel entries exist but power_w is None."""
+    return FakeTuyaRecord(
+        timestamp=ts,
+        appliances={k: {"power_w": None} for k in TUYA_ALL_KEYS},
+    )
+
+
+class TestIndividualChannelSeries:
+    """Tests 1-5: channel series, monitored total, missing-channel handling."""
+
+    def test_build_tuya_channel_series_returns_one_series_per_channel(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        for key in TUYA_ALL_KEYS:
+            series = build_tuya_channel_series(records, key, window_start=base, window_end=base + timedelta(hours=1))
+            assert len(series) == 5, f"{key} series should have 5 points"
+            assert all("timestamp" in p and "kw" in p for p in series), f"{key} series has malformed points"
+
+    def test_build_all_channel_series_returns_all_four_keys(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(3)]
+        channels = build_all_channel_series(records, window_start=base, window_end=base + timedelta(hours=1))
+        assert set(channels.keys()) == set(TUYA_ALL_KEYS), (
+            f"Expected all four keys, got {set(channels.keys())}"
+        )
+
+    def test_missing_channel_omitted_from_all_channel_series(self):
+        """Channels absent from records must not appear in the result dict."""
+        base = NOW
+        records = [_tuya_record_hvac_only(base + timedelta(seconds=i * 60)) for i in range(3)]
+        channels = build_all_channel_series(records, window_start=base, window_end=base + timedelta(hours=1))
+        assert "ac_compressor" in channels
+        assert "furnace_air_handler" in channels
+        assert "dryer" not in channels, "Absent channel must not appear"
+        assert "dishwasher" not in channels, "Absent channel must not appear"
+
+    def test_channel_with_none_power_not_included(self):
+        """Channels whose power_w is None must not produce a false zero point."""
+        base = NOW
+        records = [_tuya_record_no_power(base + timedelta(seconds=i * 60)) for i in range(3)]
+        for key in TUYA_ALL_KEYS:
+            series = build_tuya_channel_series(records, key, window_start=base, window_end=base + timedelta(hours=1))
+            assert series == [], f"None power_w must yield empty series for {key}"
+
+    def test_monitored_total_equals_sum_of_aligned_channels(self):
+        """The monitored-total series at each timestamp must equal the sum of channels."""
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        window_end = base + timedelta(hours=1)
+        channels = build_all_channel_series(records, window_start=base, window_end=window_end)
+        total_series = build_tuya_kw_series(records, TUYA_ALL_KEYS, window_start=base, window_end=window_end)
+
+        # For each timestamp in the total series, the kw must match the sum of channels
+        for total_point in total_series:
+            ts = total_point["timestamp"]
+            channel_sum = sum(
+                next((p["kw"] for p in series if p["timestamp"] == ts), 0.0)
+                for series in channels.values()
+            )
+            assert total_point["kw"] == pytest.approx(channel_sum, abs=0.001), (
+                f"Monitored total at {ts}: {total_point['kw']} != sum {channel_sum}"
+            )
+
+    def test_actual_zero_reading_is_included(self):
+        """A power_w of 0.0 (device off but reporting) must appear as kw=0."""
+        base = NOW
+        record = FakeTuyaRecord(
+            timestamp=base,
+            appliances={"dryer": {"power_w": 0.0}, "ac_compressor": {"power_w": 2000.0}},
+        )
+        dryer_series = build_tuya_channel_series([record], "dryer", window_start=base - timedelta(seconds=1), window_end=base + timedelta(hours=1))
+        assert len(dryer_series) == 1
+        assert dryer_series[0]["kw"] == pytest.approx(0.0)
+
+
+class TestTimelineChannelPayload:
+    """Test 2: timeline payload includes per-channel arrays."""
+
+    def test_timeline_includes_channels_dict_with_all_four_keys(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert "channels" in result
+        assert set(result["channels"].keys()) == set(TUYA_ALL_KEYS)
+
+    def test_timeline_channels_are_independent_series(self):
+        """Each channel series must be a separate list of {timestamp, kw} dicts."""
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        for key in TUYA_ALL_KEYS:
+            series = result["channels"].get(key, [])
+            assert isinstance(series, list)
+            assert all("timestamp" in p and "kw" in p for p in series)
+
+    def test_timeline_has_tuya_true_when_any_channel_present(self):
+        base = NOW
+        records = [_tuya_record_hvac_only(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert result["has_tuya"] is True
+
+    def test_timeline_missing_channel_absent_from_payload(self):
+        """Absent channels must not appear in payload (no false empty series)."""
+        base = NOW
+        records = [_tuya_record_hvac_only(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert "dryer" not in result["channels"]
+        assert "dishwasher" not in result["channels"]
+
+    def test_timeline_channel_labels_present(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert "channel_labels" in result
+        for key in result["channels"]:
+            assert key in result["channel_labels"]
+            assert result["channel_labels"][key] == TUYA_CHANNEL_LABELS[key]
+
+    def test_timeline_monitored_total_label_present(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert result.get("monitored_total_label") == TUYA_MONITORED_TOTAL_LABEL
+
+    def test_no_whole_home_label_in_timeline_keys(self):
+        """Timeline payload must not use 'whole_home' or 'house_load' keys."""
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(3)]
+        result = build_combined_timeline([], records, [], window_start=base, window_end=base + timedelta(hours=1))
+        for key in result:
+            assert "whole_home" not in key.lower(), f"Found 'whole_home' in key: {key}"
+            assert "house_load" not in key.lower(), f"Found 'house_load' in key: {key}"
+
+
+class TestPeakChannelAttribution:
+    """Test 7: Peak attribution includes individual circuit contributions."""
+
+    def test_peak_channels_dict_contains_measured_circuits(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        peaks = find_demand_peaks(records, [], [], window_start=base, window_end=base + timedelta(hours=1))
+        assert peaks, "Expected at least one peak"
+        peak = peaks[0]
+        assert "channels" in peak
+        for key in TUYA_ALL_KEYS:
+            assert key in peak["channels"], f"Channel '{key}' missing from peak"
+
+    def test_peak_monitored_total_equals_sum_of_channels(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        peaks = find_demand_peaks(records, [], [], window_start=base, window_end=base + timedelta(hours=1))
+        for peak in peaks:
+            channels = peak.get("channels", {})
+            chan_sum = round(sum(channels.values()), 2)
+            assert peak["monitored_total_kw"] == pytest.approx(chan_sum, abs=0.01)
+
+    def test_peak_unmonitored_remainder_computed_when_smt_aligned(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        # SMT interval that contains the peak timestamps
+        smt = [_smt_row(base.isoformat(), 2.0)]  # 2 kWh × 4 = 8 kW avg
+        peaks = find_demand_peaks(records, smt, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert peaks
+        # Peak with aligned SMT should have a remainder
+        peaks_with_smt = [p for p in peaks if p.get("smt_whole_home_kw") is not None]
+        if peaks_with_smt:
+            peak = peaks_with_smt[0]
+            assert peak["unmonitored_remainder_kw"] is not None
+            assert peak["unmonitored_remainder_kw"] >= 0
+
+    def test_peak_unmonitored_none_when_no_smt(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        peaks = find_demand_peaks(records, [], [], window_start=base, window_end=base + timedelta(hours=1))
+        for peak in peaks:
+            assert peak["unmonitored_remainder_kw"] is None
+            assert peak["smt_whole_home_kw"] is None
+
+    def test_peak_hvac_only_classification_with_channels(self):
+        """With compressor dominant, explanation must still be correct."""
+        base = NOW
+        records = [_tuya_record_hvac_only(base + timedelta(seconds=i * 60)) for i in range(5)]
+        nest = [_nest_record(base + timedelta(minutes=i), downstairs="COOLING") for i in range(5)]
+        peaks = find_demand_peaks(records, [], nest, window_start=base, window_end=base + timedelta(hours=1))
+        if peaks:
+            assert peaks[0]["explanation"] in ("HVAC only", "HVAC + other significant load", "Mixed load")
+
+
+class TestEnergyBreakdownChannels:
+    """Test 8: Energy breakdown shows all four circuits."""
+
+    def test_breakdown_channel_kwh_has_all_four_keys(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(10)]
+        bd = compute_energy_breakdown([], records, window_start=base, window_end=base + timedelta(minutes=10))
+        assert "channel_kwh" in bd
+        for key in TUYA_ALL_KEYS:
+            assert key in bd["channel_kwh"], f"Breakdown missing channel '{key}'"
+
+    def test_breakdown_monitored_total_equals_sum_of_channels(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(10)]
+        bd = compute_energy_breakdown([], records, window_start=base, window_end=base + timedelta(minutes=10))
+        channel_sum = round(sum(bd["channel_kwh"].values()), 4)
+        assert bd["monitored_total_kwh"] == pytest.approx(channel_sum, abs=0.001)
+
+    def test_breakdown_absent_channel_not_in_channel_kwh(self):
+        base = NOW
+        records = [_tuya_record_hvac_only(base + timedelta(seconds=i * 60)) for i in range(10)]
+        bd = compute_energy_breakdown([], records, window_start=base, window_end=base + timedelta(minutes=10))
+        assert "dryer" not in bd["channel_kwh"]
+        assert "dishwasher" not in bd["channel_kwh"]
+
+    def test_breakdown_unmonitored_remainder_when_both_present(self):
+        base = NOW
+        smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(4)]
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(240)]
+        bd = compute_energy_breakdown(smt, records, window_start=base, window_end=base + timedelta(hours=1))
+        assert bd["has_smt"]
+        assert bd["has_tuya"]
+        assert bd["unmonitored_remainder_kwh"] is not None
+        assert bd["unmonitored_remainder_kwh"] >= 0
+
+    def test_breakdown_unmonitored_none_when_smt_absent(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(10)]
+        bd = compute_energy_breakdown([], records, window_start=base, window_end=base + timedelta(minutes=10))
+        assert bd["unmonitored_remainder_kwh"] is None
+
+    def test_breakdown_no_whole_home_label(self):
+        """Keys in the breakdown dict must not contain 'whole_home'."""
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        bd = compute_energy_breakdown([], records, window_start=base, window_end=base + timedelta(minutes=5))
+        for key in bd:
+            assert "whole_home" not in key.lower()
+
+
+class TestNoWholehomeLabel:
+    """Test 6: no label anywhere claims Tuya is whole-home."""
+
+    def test_channel_labels_constant_no_whole_home(self):
+        for key, label in TUYA_CHANNEL_LABELS.items():
+            label_lower = label.lower()
+            assert "whole" not in label_lower, f"'{label}' contains 'whole'"
+            assert "house load" not in label_lower, f"'{label}' contains 'house load'"
+
+    def test_monitored_total_label_no_whole_home(self):
+        assert "whole" not in TUYA_MONITORED_TOTAL_LABEL.lower()
+        assert "house" not in TUYA_MONITORED_TOTAL_LABEL.lower()
+        assert "monitored" in TUYA_MONITORED_TOTAL_LABEL.lower()
+
+    def test_source_agreement_note_explains_no_whole_home(self):
+        base = NOW
+        smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(4)]
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(10)]
+        result = compute_source_agreement(smt, records, window_start=base, window_end=base + timedelta(hours=1))
+        note = result["note"].lower()
+        assert "whole-home" in note or "whole_home" in note or "whole home" in note
+
+
+class TestUnmonitoredRemainderConditions:
+    """Test 9: unmonitored remainder withheld when alignment insufficient."""
+
+    def test_remainder_none_when_no_smt(self):
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        peaks = find_demand_peaks(records, [], [], window_start=base, window_end=base + timedelta(hours=1))
+        for peak in peaks:
+            assert peak["unmonitored_remainder_kw"] is None, (
+                "Remainder must be None when no SMT data"
+            )
+
+    def test_remainder_none_when_smt_interval_does_not_contain_peak(self):
+        """SMT interval must contain the peak timestamp; if not, remainder is None."""
+        base = NOW
+        records = [_tuya_record_with_all_channels(base + timedelta(seconds=i * 60)) for i in range(5)]
+        # SMT interval FAR in the past — does not contain peak
+        far_past = base - timedelta(hours=5)
+        smt = [_smt_row(far_past.isoformat(), 2.0)]
+        peaks = find_demand_peaks(records, smt, [], window_start=base, window_end=base + timedelta(hours=1))
+        for peak in peaks:
+            assert peak["unmonitored_remainder_kw"] is None, (
+                "Remainder must be None when SMT interval does not contain peak timestamp"
+            )
+
+    def test_breakdown_remainder_none_when_no_tuya(self):
+        base = NOW
+        smt = [_smt_row((base + timedelta(minutes=i * 15)).isoformat(), 1.0) for i in range(4)]
+        bd = compute_energy_breakdown(smt, [], window_start=base, window_end=base + timedelta(hours=1))
+        assert bd["unmonitored_remainder_kwh"] is None

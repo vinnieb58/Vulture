@@ -91,6 +91,21 @@
   var COOLING_BAND_OPACITY = 0.12;
   var TZ = "America/Chicago";
 
+  // Per-circuit colors and labels — kept in sync with Python TUYA_CHANNEL_LABELS
+  var CHANNEL_COLORS = {
+    "ac_compressor":       "#da3633",
+    "furnace_air_handler": "#f0883e",
+    "dryer":               "#d29922",
+    "dishwasher":          "#3fb950",
+  };
+  var CHANNEL_LABELS = {
+    "ac_compressor":       "AC Compressor",
+    "furnace_air_handler": "Furnace / Air Handler",
+    "dryer":               "Dryer",
+    "dishwasher":          "Dishwasher",
+  };
+  var MONITORED_TOTAL_COLOR = "#8b949e";
+
   // -------------------------------------------------------------------------
   // Data preparation
   // -------------------------------------------------------------------------
@@ -111,10 +126,14 @@
     (data.smt_bars || []).forEach(function (b) {
       if (b.avg_kw > max) max = b.avg_kw;
     });
-    (data.tuya_measured || []).forEach(function (p) {
-      if (p.kw > max) max = p.kw;
-    });
-    (data.tuya_compressor || []).forEach(function (p) {
+    // Scan individual channels
+    if (data.channels) {
+      Object.values(data.channels).forEach(function (series) {
+        (series || []).forEach(function (p) { if (p.kw > max) max = p.kw; });
+      });
+    }
+    // Fall back to legacy fields if channels absent
+    (data.tuya_monitored_total || data.tuya_measured || []).forEach(function (p) {
       if (p.kw > max) max = p.kw;
     });
     return max;
@@ -294,10 +313,25 @@
 
   function renderLegend(container, data) {
     var items = [];
-    if (data.has_smt) items.push({ color: "#58a6ff", opacity: "0.55", label: "SMT (utility, bars)", dashed: false });
+    if (data.has_smt) items.push({ color: "#58a6ff", opacity: "0.55", label: "SMT whole-home (bars)" });
     if (data.has_tuya) {
-      items.push({ color: "#f0883e", opacity: "1", label: "Tuya measured load", dashed: false });
-      items.push({ color: "#da3633", opacity: "1", label: "Compressor", dashed: false });
+      // Show legend items for each channel that has data
+      var channelKeys = data.channels ? Object.keys(data.channels) : [];
+      if (channelKeys.length === 0 && data.tuya_compressor && data.tuya_compressor.length) {
+        // Legacy fallback
+        channelKeys = ["ac_compressor"];
+      }
+      channelKeys.forEach(function (key) {
+        items.push({
+          color: CHANNEL_COLORS[key] || "#8b949e",
+          opacity: "1",
+          label: CHANNEL_LABELS[key] || key,
+        });
+      });
+      // Monitored total (dashed)
+      if (channelKeys.length > 1) {
+        items.push({ color: MONITORED_TOTAL_COLOR, opacity: "0.7", label: "Monitored Circuits Total", dashed: true });
+      }
     }
     if (data.has_nest) items.push({ color: "#58a6ff", opacity: String(COOLING_BAND_OPACITY * 6), label: "Cooling period", band: true });
     if (!items.length) return;
@@ -363,25 +397,27 @@
       var startTs = el.getAttribute("data-start");
       var kwh = parseFloat(el.getAttribute("data-kwh") || "0");
       var avgKw = parseFloat(el.getAttribute("data-avg-kw") || "0");
-      lines.push("<strong>SMT interval</strong>");
+      lines.push("<strong>SMT whole-home</strong>");
       lines.push(formatTime(parseTs(startTs), TZ));
       lines.push("Energy: " + kwh.toFixed(3) + " kWh");
       lines.push("Avg: " + avgKw.toFixed(2) + " kW");
 
-      // Find nearest Tuya and Nest data
       var ts = parseTs(startTs);
-      var nearestTuya = findNearest(data.tuya_measured || [], ts);
-      if (nearestTuya) {
-        lines.push("Tuya measured: " + nearestTuya.kw.toFixed(2) + " kW");
-      }
-      var nearestComp = findNearest(data.tuya_compressor || [], ts);
-      if (nearestComp) {
-        lines.push("Compressor: " + nearestComp.kw.toFixed(2) + " kW");
+      // Show each circuit reading near this SMT interval
+      if (data.channels) {
+        Object.keys(data.channels).forEach(function (key) {
+          var nearest = findNearest(data.channels[key] || [], ts);
+          if (nearest) {
+            var label = CHANNEL_LABELS[key] || key;
+            lines.push(label + ": " + nearest.kw.toFixed(2) + " kW");
+          }
+        });
+      } else {
+        var nearestTuya = findNearest(data.tuya_measured || [], ts);
+        if (nearestTuya) lines.push("Monitored: " + nearestTuya.kw.toFixed(2) + " kW");
       }
       var nestAction = findNestAction(data.nest_samples || [], ts);
-      if (nestAction) {
-        lines.push("Nest: " + nestAction);
-      }
+      if (nestAction) lines.push("Nest: " + nestAction);
     } else if (series === "tuya") {
       var ts2 = parseTs(el.getAttribute("data-timestamp"));
       var kw = parseFloat(el.getAttribute("data-kw") || "0");
@@ -470,9 +506,22 @@
     // 3. SMT bars
     renderSmtBars(svg, data.smt_bars, range, plotW, plotH, maxKwVal);
 
-    // 4. Tuya lines
-    renderLine(svg, data.tuya_measured, plotW, plotH, maxKwVal, range, "#f0883e", null);
-    renderLine(svg, data.tuya_compressor, plotW, plotH, maxKwVal, range, "#da3633", null);
+    // 4. Individual channel lines (one per circuit, each a distinct color)
+    if (data.channels && Object.keys(data.channels).length > 0) {
+      Object.keys(data.channels).forEach(function (key) {
+        var color = CHANNEL_COLORS[key] || "#8b949e";
+        renderLine(svg, data.channels[key], plotW, plotH, maxKwVal, range, color, null);
+      });
+      // Monitored total as secondary dashed line (shown only when multiple channels present)
+      if (Object.keys(data.channels).length > 1) {
+        var totalSeries = data.tuya_monitored_total || data.tuya_measured;
+        renderLine(svg, totalSeries, plotW, plotH, maxKwVal, range, MONITORED_TOTAL_COLOR, "4 2");
+      }
+    } else {
+      // Legacy fallback: render the old aggregated lines
+      renderLine(svg, data.tuya_measured, plotW, plotH, maxKwVal, range, "#f0883e", null);
+      renderLine(svg, data.tuya_compressor, plotW, plotH, maxKwVal, range, "#da3633", null);
+    }
 
     container.appendChild(svg);
 

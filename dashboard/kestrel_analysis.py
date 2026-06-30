@@ -40,6 +40,17 @@ TUYA_HVAC_KEYS: tuple[str, ...] = ("ac_compressor", "furnace_air_handler")
 TUYA_COMPRESSOR_KEY: str = "ac_compressor"
 TUYA_NON_HVAC_KEYS: tuple[str, ...] = ("dryer", "dishwasher")
 
+# User-facing labels for each circuit channel.
+# These are the only labels that should appear in the UI — never "whole home".
+TUYA_CHANNEL_LABELS: dict[str, str] = {
+    "ac_compressor": "AC Compressor",
+    "furnace_air_handler": "Furnace / Air Handler",
+    "dryer": "Dryer",
+    "dishwasher": "Dishwasher",
+}
+# Label for the sum of all monitored circuits (not whole-home).
+TUYA_MONITORED_TOTAL_LABEL: str = "Monitored Circuits Total"
+
 TUYA_EXPECTED_POLL_SECONDS: int = 60
 NEST_EXPECTED_POLL_MINUTES: int = 5
 
@@ -211,24 +222,89 @@ def build_tuya_kw_series(
     window_start: datetime,
     window_end: datetime,
 ) -> list[dict[str, Any]]:
-    """Build a kW time series for given appliance channels in a window."""
+    """Build a summed kW time series for a set of appliance channels.
+
+    Only sums channels that are present with a non-None power_w reading.
+    Records where no requested channel has data are still included with kw=0
+    only when at least one channel entry exists as a dict.
+    """
     in_window = sorted(
         (r for r in records if window_start <= r.timestamp <= window_end),
         key=lambda r: r.timestamp,
     )
     result = []
     for record in in_window:
-        power_w = sum(
-            float(record.appliances.get(key, {}).get("power_w") or 0)
+        values = [
+            float(entry["power_w"])
             for key in appliance_keys
-            if isinstance(record.appliances.get(key), dict)
-        )
+            if isinstance((entry := record.appliances.get(key)), dict)
+            and entry.get("power_w") is not None
+        ]
+        if not values:
+            continue  # no channel data in this record — skip
         result.append(
             {
                 "timestamp": record.timestamp.isoformat(),
-                "kw": round(power_w / 1000.0, 4),
+                "kw": round(sum(values) / 1000.0, 4),
             }
         )
+    return result
+
+
+def build_tuya_channel_series(
+    records: list[Any],  # TuyaPowerHistoryRecord
+    appliance_key: str,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict[str, Any]]:
+    """Build a kW time series for a single Tuya circuit channel.
+
+    Only includes records where the channel has a valid (non-None) power_w
+    reading.  Records where the channel is absent or its reading is None are
+    omitted to avoid producing false zero values.  An actual 0.0 W reading IS
+    included.
+    """
+    in_window = sorted(
+        (r for r in records if window_start <= r.timestamp <= window_end),
+        key=lambda r: r.timestamp,
+    )
+    result = []
+    for record in in_window:
+        entry = record.appliances.get(appliance_key)
+        if not isinstance(entry, dict):
+            continue  # channel absent from this record
+        power_w = entry.get("power_w")
+        if power_w is None:
+            continue  # no reading for this channel
+        result.append(
+            {
+                "timestamp": record.timestamp.isoformat(),
+                "kw": round(float(power_w) / 1000.0, 4),
+            }
+        )
+    return result
+
+
+def build_all_channel_series(
+    records: list[Any],  # TuyaPowerHistoryRecord
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, list[dict[str, Any]]]:
+    """Build per-channel kW series for all four configured Tuya circuits.
+
+    Returns a dict keyed by appliance key.  Channels with no data in the
+    window are omitted from the dict rather than mapped to an empty list,
+    so callers can distinguish 'no data' from 'all readings are zero'.
+    """
+    result: dict[str, list[dict[str, Any]]] = {}
+    for key in TUYA_ALL_KEYS:
+        series = build_tuya_channel_series(
+            records, key, window_start=window_start, window_end=window_end
+        )
+        if series:
+            result[key] = series
     return result
 
 
@@ -720,6 +796,23 @@ def _dominant_nest_action(
     return actions[0]
 
 
+def _smt_avg_kw_at(
+    smt_rows: list[dict[str, Any]],
+    ts: datetime,
+) -> float | None:
+    """Return the SMT average kW for the 15-min interval containing ``ts``.
+
+    Returns None when no interval contains the timestamp.  Used to compute
+    the unmonitored remainder (SMT avg kW minus sum of Tuya circuits).
+    """
+    for row in smt_rows:
+        start = _parse_ts(str(row["start_ts"]))
+        end = _parse_ts(str(row["end_ts"]))
+        if start <= ts < end:
+            return smt_kwh_to_avg_kw(float(row.get("kwh") or 0))
+    return None
+
+
 def _classify_peak(
     *,
     hvac_kw: float,
@@ -770,39 +863,37 @@ def find_demand_peaks(
         key=lambda r: r.timestamp,
     )
     if not in_window:
-        return _find_peaks_from_smt(smt_rows, nest_records, window_start=window_start, window_end=window_end, top_n=top_n, tz_name=tz_name)
+        return _find_peaks_from_smt(
+            smt_rows, nest_records,
+            window_start=window_start, window_end=window_end,
+            top_n=top_n, tz_name=tz_name,
+        )
 
-    # Build (timestamp, total_kw, hvac_kw, compressor_kw, non_hvac_kw) for each record
-    data_points: list[tuple[datetime, float, float, float, float]] = []
+    # Build per-record data: track each circuit individually.
+    # Only channels with a non-None power_w contribute; absent/None channels
+    # are omitted (not coerced to zero).
+    DataPoint = tuple[datetime, dict[str, float], float]  # ts, chan_kw, monitored_total
+    data_points: list[DataPoint] = []
     for record in in_window:
-        total_w = sum(
-            float(record.appliances.get(k, {}).get("power_w") or 0)
-            for k in TUYA_ALL_KEYS
-            if isinstance(record.appliances.get(k), dict)
-        )
-        hvac_w = sum(
-            float(record.appliances.get(k, {}).get("power_w") or 0)
-            for k in TUYA_HVAC_KEYS
-            if isinstance(record.appliances.get(k), dict)
-        )
-        comp_w = float(record.appliances.get(TUYA_COMPRESSOR_KEY, {}).get("power_w") or 0) \
-            if isinstance(record.appliances.get(TUYA_COMPRESSOR_KEY), dict) else 0.0
-        non_hvac_w = total_w - hvac_w
-        data_points.append((
-            record.timestamp,
-            total_w / 1000.0,
-            hvac_w / 1000.0,
-            comp_w / 1000.0,
-            max(non_hvac_w, 0) / 1000.0,
-        ))
+        chan_kw: dict[str, float] = {}
+        for key in TUYA_ALL_KEYS:
+            entry = record.appliances.get(key)
+            if isinstance(entry, dict):
+                pw = entry.get("power_w")
+                if pw is not None:
+                    chan_kw[key] = round(float(pw) / 1000.0, 4)
+        if not chan_kw:
+            continue  # record has no circuit data — skip
+        monitored_total = round(sum(chan_kw.values()), 4)
+        data_points.append((record.timestamp, chan_kw, monitored_total))
 
     if not data_points:
         return []
 
-    # Group into peak events with cooldown
+    # Group consecutive samples into peak events using cooldown window.
     cooldown = timedelta(minutes=cooldown_minutes)
-    groups: list[list[tuple[datetime, float, float, float, float]]] = []
-    current_group: list[tuple[datetime, float, float, float, float]] = []
+    groups: list[list[DataPoint]] = []
+    current_group: list[DataPoint] = []
     last_ts: datetime | None = None
 
     for point in data_points:
@@ -817,34 +908,49 @@ def find_demand_peaks(
     if current_group:
         groups.append(current_group)
 
-    # Take the maximum from each group
-    peak_events: list[tuple[datetime, float, float, float, float]] = []
-    for group in groups:
-        peak = max(group, key=lambda p: p[1])
-        peak_events.append(peak)
-
-    # Sort by total_kw descending, take top_n
-    peak_events.sort(key=lambda p: p[1], reverse=True)
+    # Take the highest-total sample from each group as the peak representative.
+    peak_events: list[DataPoint] = [
+        max(group, key=lambda p: p[2]) for group in groups
+    ]
+    peak_events.sort(key=lambda p: p[2], reverse=True)
     peak_events = peak_events[:top_n]
 
     results = []
-    for ts, total_kw, hvac_kw, comp_kw, non_hvac_kw in peak_events:
+    for ts, chan_kw, monitored_total in peak_events:
         nest_action = _dominant_nest_action(nest_records, at=ts)
+        hvac_kw = round(
+            sum(chan_kw.get(k, 0.0) for k in TUYA_HVAC_KEYS), 2
+        )
         explanation = _classify_peak(
             hvac_kw=hvac_kw,
-            non_hvac_kw=non_hvac_kw,
-            total_kw=total_kw,
+            non_hvac_kw=0.0,          # not derived as a single figure
+            total_kw=monitored_total,
             nest_action=nest_action,
             has_tuya=True,
+        )
+        # Unmonitored remainder: SMT whole-home avg kW minus monitored circuits.
+        # Only computed when an SMT interval contains this timestamp.
+        smt_kw = _smt_avg_kw_at(smt_rows, ts)
+        unmonitored = (
+            round(max(smt_kw - monitored_total, 0.0), 2)
+            if smt_kw is not None else None
         )
         results.append({
             "timestamp": ts.isoformat(),
             "timestamp_display": _format_local_datetime(ts, tz_name),
             "time_display": _format_local_time(ts, tz_name),
-            "total_kw": round(total_kw, 2),
-            "compressor_kw": round(comp_kw, 2),
-            "hvac_kw": round(hvac_kw, 2),
-            "non_hvac_kw": round(non_hvac_kw, 2),
+            # Per-circuit readings at this sample
+            "channels": chan_kw,
+            # Derived aggregates
+            "monitored_total_kw": round(monitored_total, 2),
+            "hvac_kw": hvac_kw,
+            "compressor_kw": chan_kw.get(TUYA_COMPRESSOR_KEY),
+            # SMT-derived remainder (None when SMT not aligned)
+            "smt_whole_home_kw": round(smt_kw, 2) if smt_kw is not None else None,
+            "unmonitored_remainder_kw": unmonitored,
+            # Legacy field kept for backward compat with classify/story code
+            "total_kw": round(monitored_total, 2),
+            "non_hvac_kw": None,  # replaced by individual channels
             "nest_action": nest_action,
             "explanation": explanation,
             "source": "tuya_instantaneous",
@@ -889,9 +995,13 @@ def _find_peaks_from_smt(
             "timestamp_display": _format_local_datetime(ts, tz_name),
             "time_display": _format_local_time(ts, tz_name),
             "total_kw": avg_kw,
+            "monitored_total_kw": None,     # no Tuya data
+            "channels": {},                 # no per-circuit readings
             "compressor_kw": None,
             "hvac_kw": None,
             "non_hvac_kw": None,
+            "smt_whole_home_kw": avg_kw,    # SMT IS the whole-home reading here
+            "unmonitored_remainder_kw": None,  # nothing to subtract
             "nest_action": nest_action,
             "explanation": explanation,
             "source": "smt_interval",
@@ -913,36 +1023,54 @@ def compute_energy_breakdown(
     """
     Break down energy consumption for the analysis window.
 
-    Components are mathematically reconciled against SMT as the reference.
-    Tuya-derived values are labeled as estimates.
+    Shows each Tuya circuit individually.  Components are reconciled against
+    SMT as the utility billing reference.  The unmonitored remainder is
+    SMT total minus the sum of all monitored circuits; it represents lighting,
+    small appliances, EV charging, and anything else not CT-clamped.
+
+    Tuya-derived values are estimates.  Do not label any Tuya total as
+    'whole home' — no whole-home CT is installed.
     """
-    smt_kwh = smt_total_kwh(smt_rows, window_start=window_start, window_end=window_end)
-    hvac_kwh = integrate_tuya_energy(
-        tuya_records, TUYA_HVAC_KEYS, window_start=window_start, window_end=window_end
-    )
-    compressor_kwh = integrate_tuya_energy(
-        tuya_records, (TUYA_COMPRESSOR_KEY,), window_start=window_start, window_end=window_end
-    )
-    non_hvac_measured_kwh = integrate_tuya_energy(
-        tuya_records, TUYA_NON_HVAC_KEYS, window_start=window_start, window_end=window_end
-    )
-    tuya_total_kwh = round(hvac_kwh + non_hvac_measured_kwh, 4)
+    smt_kwh_val = smt_total_kwh(smt_rows, window_start=window_start, window_end=window_end)
 
-    # Unattributed = SMT total - Tuya measured (may be negative if Tuya data noisy)
-    unattributed_kwh = round(smt_kwh - tuya_total_kwh, 4) if smt_kwh > 0 else None
+    # Per-circuit energy integration (each circuit independently)
+    channel_kwh: dict[str, float] = {}
+    for key in TUYA_ALL_KEYS:
+        kwh = integrate_tuya_energy(
+            tuya_records, (key,), window_start=window_start, window_end=window_end
+        )
+        if kwh > 0:
+            channel_kwh[key] = round(kwh, 4)
 
-    hvac_pct = round(100.0 * hvac_kwh / smt_kwh, 1) if smt_kwh > 0 and hvac_kwh > 0 else None
+    monitored_total_kwh = round(sum(channel_kwh.values()), 4)
+
+    # Unmonitored remainder: only when both SMT and circuit data are present.
+    unmonitored_kwh: float | None = None
+    if smt_kwh_val > 0 and monitored_total_kwh > 0:
+        unmonitored_kwh = round(max(smt_kwh_val - monitored_total_kwh, 0.0), 4)
+
+    # HVAC composite (for cycle stats and story — not shown separately unless
+    # individual channels are also shown)
+    hvac_kwh = round(sum(channel_kwh.get(k, 0.0) for k in TUYA_HVAC_KEYS), 4)
+    hvac_pct = round(100.0 * hvac_kwh / smt_kwh_val, 1) if smt_kwh_val > 0 and hvac_kwh > 0 else None
 
     return {
-        "smt_kwh": smt_kwh,
-        "hvac_kwh": hvac_kwh,          # estimate from Tuya
-        "compressor_kwh": compressor_kwh,  # estimate from Tuya
-        "non_hvac_measured_kwh": non_hvac_measured_kwh,  # estimate from Tuya
-        "tuya_total_kwh": tuya_total_kwh,  # estimate — partial, not whole-home
-        "unattributed_kwh": unattributed_kwh,  # SMT minus Tuya measured
+        "smt_kwh": smt_kwh_val,
+        # Per-circuit estimates (key → kWh; absent keys had zero readings)
+        "channel_kwh": channel_kwh,
+        "monitored_total_kwh": monitored_total_kwh,
+        "unmonitored_remainder_kwh": unmonitored_kwh,
+        # Aggregates kept for backward compat with HVAC cycle stats / story
+        "hvac_kwh": hvac_kwh,
+        "compressor_kwh": channel_kwh.get(TUYA_COMPRESSOR_KEY, 0.0),
+        "non_hvac_measured_kwh": round(
+            sum(channel_kwh.get(k, 0.0) for k in TUYA_NON_HVAC_KEYS), 4
+        ),
+        # Legacy alias
+        "tuya_total_kwh": monitored_total_kwh,
         "hvac_pct_of_smt": hvac_pct,
-        "has_smt": smt_kwh > 0,
-        "has_tuya": tuya_total_kwh > 0,
+        "has_smt": smt_kwh_val > 0,
+        "has_tuya": monitored_total_kwh > 0,
     }
 
 
@@ -1089,14 +1217,16 @@ def generate_energy_story(
     # No SMT/Tuya fraction finding: Tuya monitors circuits, not whole-home,
     # so any SMT-vs-Tuya percentage would be misleading.
 
-    # Largest non-HVAC peak
-    non_hvac_peaks = [p for p in peaks if p.get("explanation") in ("Non-HVAC load", "Mixed load")]
-    if non_hvac_peaks:
-        top_non_hvac = max(non_hvac_peaks, key=lambda p: p.get("non_hvac_kw") or 0)
-        time_str = top_non_hvac.get("time_display") or ""
-        non_hvac_kw = top_non_hvac.get("non_hvac_kw") or 0
-        if non_hvac_kw > 0 and time_str:
-            findings.append(f"Largest non-HVAC load was {non_hvac_kw:.1f} kW around {time_str}.")
+    # Unmonitored remainder at peak (when SMT and Tuya are both aligned)
+    if peaks:
+        top = peaks[0]
+        unmon = top.get("unmonitored_remainder_kw")
+        time_str = top.get("time_display") or ""
+        if unmon is not None and unmon > 0.5 and time_str:
+            findings.append(
+                f"Estimated unmonitored load at peak: {unmon:.1f} kW "
+                f"(SMT whole-home minus measured circuits)."
+            )
 
     return findings[:5]
 
@@ -1134,16 +1264,26 @@ def build_combined_timeline(
             })
     smt_bars.sort(key=lambda r: r["start_ts"])
 
-    # Tuya series
-    tuya_measured = build_tuya_kw_series(
+    # Per-circuit series (each channel individually — do not aggregate before
+    # passing to the frontend so users can see each circuit separately)
+    channels = build_all_channel_series(
+        tuya_records, window_start=window_start, window_end=window_end
+    )
+
+    # Monitored circuits total (sum of all present channels per timestamp)
+    tuya_monitored_total = build_tuya_kw_series(
         tuya_records, TUYA_ALL_KEYS, window_start=window_start, window_end=window_end
     )
+
+    # HVAC composite series (compressor + air handler together — kept for
+    # the chart's HVAC highlight line)
     tuya_hvac = build_tuya_kw_series(
         tuya_records, TUYA_HVAC_KEYS, window_start=window_start, window_end=window_end
     )
-    tuya_compressor = build_tuya_kw_series(
-        tuya_records, (TUYA_COMPRESSOR_KEY,), window_start=window_start, window_end=window_end
-    )
+
+    # Legacy aliases kept for backward compatibility
+    tuya_compressor = channels.get(TUYA_COMPRESSOR_KEY, [])
+    tuya_measured = tuya_monitored_total  # was the sum; now correctly labeled
 
     # Nest cooling bands (per-zone and household-level)
     tz = ZoneInfo(tz_name)
@@ -1204,14 +1344,22 @@ def build_combined_timeline(
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
         "smt_bars": smt_bars,
-        "tuya_measured": tuya_measured,
+        # Individual circuit series — these drive the four separate lines
+        "channels": channels,
+        "channel_labels": {k: TUYA_CHANNEL_LABELS[k] for k in channels},
+        # Derived series
+        "tuya_monitored_total": tuya_monitored_total,
         "tuya_hvac": tuya_hvac,
+        # Legacy aliases (kept for backward compat with existing JS + tests)
+        "tuya_measured": tuya_measured,
         "tuya_compressor": tuya_compressor,
         "nest_samples": nest_samples,
         "cooling_bands": cooling_bands,
         "has_smt": bool(smt_bars),
-        "has_tuya": bool(tuya_measured),
+        "has_tuya": bool(channels) or bool(tuya_monitored_total),
         "has_nest": bool(nest_samples),
+        # Metadata for the frontend legend
+        "monitored_total_label": TUYA_MONITORED_TOTAL_LABEL,
     }
 
 
