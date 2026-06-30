@@ -94,11 +94,13 @@ class TestKestrelDashboardHTTP:
 
         assert response.status_code == 200
         text = response.text
+        # Redesigned page structure (energy-explanation layout)
+        assert "Today's Energy Story" in text
         assert "Daily usage — last 30 days" in text
-        assert "Top 10 peak 15-minute intervals" in text
-        assert "4.00" in text
-        assert "Mon 6/15, 1:00–1:15 PM" in text
+        assert "7-Day Trends" in text
         assert "chart-data-daily-30" in text
+        assert "chart-data-energy-timeline" in text
+        assert "kestrel_energy_timeline.js" in text
 
     def test_nest_home_card_no_longer_renders_top_intervals_or_full_daily_totals(
         self, client, tmp_path, monkeypatch
@@ -205,9 +207,10 @@ class TestKestrelDashboardHTTP:
 
         response = self._stub_host(client).get("/kestrel")
         text = response.text
-        assert "HVAC Runtime" in text
-        assert "Energy + HVAC Correlation — Latest Overlapping 24h" in text
+        # Redesigned page: HVAC section is now "HVAC Performance"
+        assert "HVAC Performance" in text
         assert "Nest Collection" in text
+        assert "Today's Energy Story" in text
         assert "Downstairs" in text or "House any" in text
 
     def test_kestrel_page_shows_nest_auth_failure_when_stale_and_error_file(
