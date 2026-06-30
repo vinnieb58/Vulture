@@ -18,6 +18,10 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-$HOME/projects/vulture}"
 
+RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/raven_git_state.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_git_state.sh"
+
 DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
 DASHBOARD_SERVICE="vulture-dashboard"
 DASHBOARD_HEALTH_URL="http://localhost:8088/health"
@@ -245,7 +249,7 @@ rebuild_dashboard_stack() {
         if ! "${up_cmd[@]}"; then
             echo "  ERROR: dashboard recreate failed" >&2
             docker compose -f "$DASHBOARD_COMPOSE_FILE" ps 2>&1 || true
-            docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+            print_dashboard_logs_on_failure "$DASHBOARD_COMPOSE_FILE" "$DASHBOARD_SERVICE" 50
             exit 1
         fi
         echo "  Restarted dashboard (no build)"
@@ -279,7 +283,7 @@ rebuild_dashboard_stack() {
             rm -f "$build_args_file"
             echo "  ERROR: dashboard container recreate failed" >&2
             docker compose -f "$DASHBOARD_COMPOSE_FILE" ps 2>&1 || true
-            docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+            print_dashboard_logs_on_failure "$DASHBOARD_COMPOSE_FILE" "$DASHBOARD_SERVICE" 50
             exit 1
         fi
 
@@ -363,7 +367,7 @@ verify_dashboard_health() {
     done
 
     echo "  ERROR: dashboard health check failed after ${DASHBOARD_HEALTH_WAIT_SECONDS}s: ${DASHBOARD_HEALTH_URL}" >&2
-    docker compose -f "$DASHBOARD_COMPOSE_FILE" logs --tail 50 "$DASHBOARD_SERVICE" 2>&1 || true
+    print_dashboard_logs_on_failure "$DASHBOARD_COMPOSE_FILE" "$DASHBOARD_SERVICE" 80
     exit 1
 }
 
@@ -446,6 +450,9 @@ main() {
 
     section "CD into ${APP_DIR}"
     cd "$APP_DIR"
+
+    section "Git state (deploy)"
+    print_raven_git_state "current"
 
     if ! command -v docker &>/dev/null; then
         echo "  ERROR: docker not found"

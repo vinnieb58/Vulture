@@ -610,7 +610,7 @@
       </div>
 
       <div class="card full-width">
-        <div class="card-title">Energy + HVAC Correlation</div>
+        <div class="card-title">Energy + HVAC Correlation — Latest Overlapping 24h</div>
         {% if hvac.correlation.warning %}
         <div class="section-warning">{{ hvac.correlation.warning }}</div>
         {% endif %}
@@ -625,7 +625,7 @@
         </div>
         {% endif %}
         {% if hvac.correlation.available and hvac.correlation.rows %}
-        <div class="card-subtitle">Last {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
+        <div class="card-subtitle">Latest overlapping {{ hvac.correlation.hours }} hours · 15-minute intervals</div>
         <table class="data-table">
           <thead>
             <tr>
@@ -660,10 +660,12 @@
         <div class="chart-empty">
           {% if hvac.correlation.status == 'no_overlap' %}
           Waiting for Nest HVAC history and Smart Meter Texas intervals to overlap.
-          {% elif hvac.correlation.status == 'no_nest_history' %}
+          {% elif hvac.correlation.status == 'no_nest_data' %}
           Correlation requires Nest HVAC history from the poll timer.
-          {% elif hvac.correlation.status in ('no_smt_db', 'empty_smt') %}
+          {% elif hvac.correlation.status in ('no_smt_db', 'no_smt_data') %}
           Correlation requires Smart Meter Texas interval data in the Kestrel database.
+          {% elif hvac.correlation.status == 'no_matched_rows' %}
+          Smart Meter Texas intervals were found, but none could be matched to Nest HVAC samples in the selected window.
           {% else %}
           Correlation rows will appear once overlapping Nest HVAC history and Smart Meter Texas intervals exist in the selected window.
           {% endif %}

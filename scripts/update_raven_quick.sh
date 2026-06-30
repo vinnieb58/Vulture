@@ -44,6 +44,7 @@ PIP="${APP_DIR}/.venv/bin/pip"
 PYTHON_BIN="${APP_DIR}/${PYTHON}"
 REBUILD_DOCKER_SCRIPT="${APP_DIR}/scripts/rebuild_docker.sh"
 DASHBOARD_COMPOSE_FILE="${APP_DIR}/docker-compose.dashboard.yml"
+DASHBOARD_SERVICE="vulture-dashboard"
 
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
@@ -56,6 +57,8 @@ RAVEN_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${RAVEN_SCRIPTS_DIR}/raven_finch_services.sh"
 # shellcheck source=scripts/raven_preupdate_backup.sh
 source "${RAVEN_SCRIPTS_DIR}/raven_preupdate_backup.sh"
+# shellcheck source=scripts/raven_git_state.sh
+source "${RAVEN_SCRIPTS_DIR}/raven_git_state.sh"
 
 usage() {
     cat <<'EOF'
@@ -90,10 +93,7 @@ section() {
 }
 
 print_git_state() {
-    local label="$1"
-    echo "  ${label}:"
-    echo "    branch: $(git branch --show-current 2>/dev/null || echo '(detached)')"
-    echo "    commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    print_raven_git_state "$1"
 }
 
 unit_source_exists() {
@@ -260,6 +260,7 @@ show_final_status() {
             echo ""
         else
             echo "  Dashboard health check failed at http://localhost:8088/health"
+            print_dashboard_logs_on_failure "$DASHBOARD_COMPOSE_FILE" "$DASHBOARD_SERVICE"
         fi
     else
         echo "  Skipped (curl not available)"
