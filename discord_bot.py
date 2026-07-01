@@ -29,6 +29,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+from concerts.discord_commands import register_concert_commands
 from crow.bot import setup_crow
 from discord_messages import (
     SAFE_MESSAGE_LIMIT,
@@ -36,6 +37,7 @@ from discord_messages import (
     send_paginated_followup,
 )
 from engine.command_router import dispatch
+from engine.concerts.repository import init_concert_tables
 from engine.database import init_db
 from engine.hunt_repository import init_hunts_table
 
@@ -131,6 +133,9 @@ bot = VultureBot()
 
 # Crow v0.1 — read-only Raven / Vulture ops commands (same runtime as hunt commands)
 setup_crow(bot, max_message_len=_MAX_MSG)
+
+# Vulture Concerts v1 — concert search/watch commands (separate from marketplace hunts)
+register_concert_commands(bot.tree)
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +331,7 @@ def main() -> None:
     # This is safe to call on every startup (CREATE TABLE IF NOT EXISTS).
     init_db()
     init_hunts_table()
+    init_concert_tables()
     log.info("Starting Vulture Discord bot")
     log.info(
         "Config: GUILD=%s | HUNT_SOURCE=%s | WEBHOOK=%s",

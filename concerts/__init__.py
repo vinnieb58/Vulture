@@ -1,0 +1,1 @@
+"""Vulture Concerts Discord integration."""
