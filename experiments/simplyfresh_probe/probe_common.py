@@ -51,6 +51,12 @@ SAFE_MODAL_CLOSE_PATTERNS = [
     re.compile(r"\bdismiss\b", re.I),
 ]
 
+MODAL_ADD_BUTTON_PATTERN = re.compile(r"^add$", re.I)
+
+REGULAR_SIZE_PATTERNS = [
+    re.compile(r"^regular$", re.I),
+]
+
 ORDER_NOW_PATTERNS = [
     re.compile(r"^order\s*now$", re.I),
     re.compile(r"\border\s*now\b", re.I),
@@ -124,6 +130,14 @@ class OverlayCloseResult:
     strategy: str | None = None
     active_count_before: int = 0
     active_count_after: int = 0
+
+
+@dataclass
+class ModalAddResult:
+    add_clicked: bool = False
+    add_failed_reason: str | None = None
+    regular_size_selected: bool = False
+    modal_closed: bool = False
 
 
 def setup_logging(name: str) -> logging.Logger:
@@ -292,6 +306,14 @@ def is_safe_modal_close_aria(label: str) -> bool:
     if is_forbidden_control_text(normalized):
         return False
     return bool(re.search(r"\b(close|dismiss|back|cancel)\b", normalized, re.I))
+
+
+def is_modal_add_button_text(text: str) -> bool:
+    """True for meal-item modal Add control only (not checkout/submit)."""
+    normalized = " ".join(text.split()).strip()
+    if not normalized or is_forbidden_control_text(normalized):
+        return False
+    return bool(MODAL_ADD_BUTTON_PATTERN.match(normalized))
 
 
 def find_forbidden_controls(page: Page) -> list[dict[str, str]]:
@@ -785,6 +807,144 @@ def count_visible_modals(page: Page) -> int:
 
 def meal_selection_modal_open(page: Page) -> bool:
     return count_visible_modals(page) > 0
+
+
+def _first_visible_meal_modal(page: Page) -> Any | None:
+    for selector in (MODAL_CONTENT_SELECTOR, MODAL_ROOT_SELECTOR):
+        loc = page.locator(selector)
+        for idx in range(min(loc.count(), 5)):
+            item = loc.nth(idx)
+            try:
+                if item.is_visible():
+                    return item
+            except Exception:
+                continue
+    return None
+
+
+def _modal_control_already_selected(item: Any) -> bool:
+    try:
+        if item.evaluate(
+            "el => el.checked === true || el.getAttribute('aria-checked') === 'true'"
+        ):
+            return True
+        class_name = (item.get_attribute("class") or "").lower()
+        if "selected" in class_name or "active" in class_name:
+            return True
+        if item.get_attribute("aria-selected") == "true":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def select_modal_regular_size(page: Page, log: logging.Logger) -> bool:
+    """Select default Regular size inside the open meal item modal."""
+    modal = _first_visible_meal_modal(page)
+    if modal is None:
+        log.warning("No visible meal modal for Regular size selection")
+        return False
+
+    selectors = "button, a, [role='button'], [role='radio'], label, input[type='radio']"
+    loc = modal.locator(selectors)
+    for idx in range(min(loc.count(), 40)):
+        item = loc.nth(idx)
+        try:
+            if not item.is_visible():
+                continue
+            text = (item.inner_text(timeout=300) or item.get_attribute("value") or "").strip()
+            if not text:
+                text = (item.get_attribute("aria-label") or "").strip()
+            if not text or not _control_matches(text, REGULAR_SIZE_PATTERNS):
+                continue
+            if is_forbidden_control_text(text):
+                continue
+            if _modal_control_already_selected(item):
+                log.info("Regular size already selected in meal modal")
+                return True
+            if _is_control_disabled(item):
+                log.info("Regular size control disabled; assuming default")
+                return True
+            log.info("Selecting Regular size in meal modal")
+            item.click(timeout=4000)
+            human_pause()
+            return True
+        except Exception:
+            continue
+
+    log.info("Regular size option not found in meal modal; proceeding to Add")
+    return False
+
+
+def click_meal_modal_add_button(page: Page, log: logging.Logger) -> bool:
+    """Click Add only inside the visible meal item modal."""
+    modal = _first_visible_meal_modal(page)
+    if modal is None:
+        log.warning("No visible meal modal for Add button")
+        return False
+
+    selectors = "button, a, [role='button'], input[type='button'], input[type='submit']"
+    loc = modal.locator(selectors)
+    for idx in range(min(loc.count(), 30)):
+        item = loc.nth(idx)
+        try:
+            if not item.is_visible():
+                continue
+            text = (item.inner_text(timeout=300) or item.get_attribute("value") or "").strip()
+            if not text:
+                text = (item.get_attribute("aria-label") or "").strip()
+            if not is_modal_add_button_text(text):
+                continue
+            if _is_control_disabled(item):
+                log.warning("Add button disabled in meal modal")
+                return False
+            log.info("Clicking Add in meal modal")
+            item.click(timeout=5000)
+            human_pause()
+            return True
+        except Exception as exc:
+            log.warning("Could not click Add in meal modal: %s", exc)
+            continue
+    return False
+
+
+def wait_for_meal_modal_closed(
+    page: Page,
+    log: logging.Logger,
+    timeout_ms: int = 10_000,
+) -> bool:
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        if not meal_selection_modal_open(page):
+            log.info("Meal modal closed after Add")
+            return True
+        human_pause(0.3)
+    log.warning("Meal modal still open after Add (timeout %sms)", timeout_ms)
+    return False
+
+
+def add_selected_meal_via_modal(page: Page, log: logging.Logger) -> ModalAddResult:
+    """
+    After meal option click: select Regular size, click Add in modal, wait for close.
+    Does not click Cancel. Add is allowed only inside the meal item modal.
+    """
+    result = ModalAddResult()
+    if not meal_selection_modal_open(page):
+        result.add_failed_reason = "modal_not_open"
+        return result
+
+    result.regular_size_selected = select_modal_regular_size(page, log)
+    if not click_meal_modal_add_button(page, log):
+        result.add_failed_reason = "add_button_not_found_or_disabled"
+        return result
+
+    result.add_clicked = True
+    human_pause()
+    if wait_for_meal_modal_closed(page, log):
+        result.modal_closed = True
+    else:
+        result.add_failed_reason = "modal_still_open_after_add"
+    return result
 
 
 def _click_safe_modal_dismiss_button(page: Page, log: logging.Logger) -> bool:

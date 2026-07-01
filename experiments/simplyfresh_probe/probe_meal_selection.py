@@ -35,6 +35,7 @@ from probe_common import (
     TIMEZONE,
     USER_AGENT,
     VIEWPORT,
+    add_selected_meal_via_modal,
     capture_named,
     detect_autosave_markers,
     detect_month_label,
@@ -101,6 +102,8 @@ class MealSelectionReport:
     non_vegetarian_options_detected: int = 0
     forbidden_controls_detected: list[str] = field(default_factory=list)
     autosave_risk_detected: bool = False
+    add_clicked: int = 0
+    add_failed_reason: Optional[str] = None
     recommended_next_step: str = ""
     calendar_days: list[CalendarDay] = field(default_factory=list)
     day_results: list[dict[str, Any]] = field(default_factory=list)
@@ -372,14 +375,40 @@ def close_ui_after_meal_selection(
     page: Page,
     run_dir: Path,
     day_slug: str,
+    *,
+    skip_modal_dismiss: bool = False,
 ) -> bool:
-    """Close profile overlay and meal modal after a successful day selection."""
+    """Close profile overlay; dismiss meal modal only if Add did not close it."""
+    if skip_modal_dismiss and meal_selection_modal_open(page):
+        capture_named(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
+        save_step_debug(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
+        return False
     if not ensure_calendar_ui_unblocked(page, log):
         capture_named(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
         save_step_debug(page, run_dir, f"ui_blocked_after_{day_slug}", PROBE_DIR, log)
         return False
-    save_step_debug(page, run_dir, f"modal_closed_after_{day_slug}", PROBE_DIR, log)
+    save_step_debug(page, run_dir, f"after_add_ui_clear_{day_slug}", PROBE_DIR, log)
     return True
+
+
+def record_add_failure(
+    report: MealSelectionReport,
+    day: CalendarDay,
+    day_slug: str,
+    reason: str,
+    *,
+    meal: Optional[str] = None,
+) -> None:
+    report.add_failed_reason = reason
+    report.days_skipped += 1
+    entry: dict[str, Any] = {
+        "day": day.label,
+        "status": "add_failed",
+        "add_failed_reason": reason,
+    }
+    if meal:
+        entry["meal"] = meal
+    report.day_results.append(entry)
 
 
 def build_recommendation(report: MealSelectionReport, mode: str) -> str:
@@ -423,6 +452,8 @@ def print_report(report: MealSelectionReport) -> None:
     print(f"non_vegetarian_options_detected: {report.non_vegetarian_options_detected}")
     print(f"forbidden_controls_detected: {','.join(forbidden)}")
     print(f"autosave_risk_detected: {str(report.autosave_risk_detected).lower()}")
+    print(f"add_clicked: {report.add_clicked}")
+    print(f"add_failed_reason: {report.add_failed_reason or 'none'}")
     print(f"recommended_next_step: {report.recommended_next_step}")
     print("=" * 60 + "\n")
 
@@ -603,17 +634,34 @@ def run_meal_probe(
                     continue
 
                 human_pause()
+                add_result = add_selected_meal_via_modal(page, log)
+                capture_named(page, run_dir, f"after_add_{day_slug}", PROBE_DIR, log)
+
+                if not add_result.add_clicked or not add_result.modal_closed:
+                    reason = add_result.add_failed_reason or "add_failed"
+                    record_add_failure(report, day, day_slug, reason, meal=choice.selected)
+                    close_ui_after_meal_selection(page, run_dir, day_slug)
+                    continue
+
+                report.add_clicked += 1
+
                 if detect_autosave_markers(page, html_before):
-                    log.warning("AUTOSAVE_RISK_DETECTED after selecting day=%r", day.label)
+                    log.warning("AUTOSAVE_RISK_DETECTED after Add on day=%r", day.label)
                     report.autosave_risk_detected = True
                     capture_named(page, run_dir, f"autosave_risk_{day_slug}", PROBE_DIR, log)
                     report.day_results.append(
-                        {"day": day.label, "status": "selected", "meal": choice.selected, "autosave_risk": True}
+                        {
+                            "day": day.label,
+                            "status": "selected",
+                            "meal": choice.selected,
+                            "add_clicked": True,
+                            "autosave_risk": True,
+                        }
                     )
                     report.days_selected += 1
                     capture_named(page, run_dir, f"each_day_after_{day_slug}", PROBE_DIR, log)
-                    if not close_ui_after_meal_selection(page, run_dir, day_slug):
-                        log.error("Stopping — modal/overlay still open after day %r", day.label)
+                    if not close_ui_after_meal_selection(page, run_dir, day_slug, skip_modal_dismiss=True):
+                        log.error("Stopping — overlay still open after day %r", day.label)
                         break
                     if not continue_after_autosave:
                         log.warning("Stopping after AUTOSAVE_RISK_DETECTED (use --continue-after-autosave to proceed)")
@@ -623,12 +671,18 @@ def run_meal_probe(
                 day = enrich_day_from_page(page, day)
                 report.days_selected += 1
                 report.day_results.append(
-                    {"day": day.label, "status": "selected", "meal": choice.selected, "reason": choice.reason}
+                    {
+                        "day": day.label,
+                        "status": "selected",
+                        "meal": choice.selected,
+                        "reason": choice.reason,
+                        "add_clicked": True,
+                    }
                 )
                 capture_named(page, run_dir, f"each_day_after_{day_slug}", PROBE_DIR, log)
-                log.info("Selected %r for day %r", choice.selected, day.label)
-                if not close_ui_after_meal_selection(page, run_dir, day_slug):
-                    log.error("Stopping — modal/overlay still open after day %r", day.label)
+                log.info("Added %r for day %r", choice.selected, day.label)
+                if not close_ui_after_meal_selection(page, run_dir, day_slug, skip_modal_dismiss=True):
+                    log.error("Stopping — overlay still open after day %r", day.label)
                     break
 
             post_forbidden = find_forbidden_controls(page)
@@ -666,6 +720,8 @@ def run_meal_probe(
                         "non_vegetarian_options_detected": report.non_vegetarian_options_detected,
                         "forbidden_controls_detected": report.forbidden_controls_detected,
                         "autosave_risk_detected": report.autosave_risk_detected,
+                        "add_clicked": report.add_clicked,
+                        "add_failed_reason": report.add_failed_reason,
                         "recommended_next_step": report.recommended_next_step,
                         "day_results": report.day_results,
                         "calendar_days": [asdict(d) for d in report.calendar_days],
