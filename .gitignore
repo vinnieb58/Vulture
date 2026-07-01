@@ -43,6 +43,9 @@ experiments/debug/
 experiments/simplyfresh_probe/.auth/
 experiments/simplyfresh_probe/artifacts/
 
+# Concerts source probe artifacts (sample JSON only; never commit API keys)
+artifacts/concerts/
+
 # Kestrel probe runtime data (SQLite, status JSON, debug artifacts)
 data/kestrel/
 data/telemetry/
