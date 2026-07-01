@@ -79,6 +79,45 @@ NEGATIVE_GENRE_SIGNALS = frozenset(
     }
 )
 
+# SeatGeek taxonomies are comma-joined in probe output (e.g. "concert, rock").
+SEATGEEK_POSITIVE_TAXONOMY_TOKENS = frozenset(
+    {
+        "concert",
+        "rock",
+        "indie",
+        "metal",
+        "alternative",
+        "punk",
+        "hard rock",
+        "classic rock",
+    }
+)
+SEATGEEK_NEGATIVE_TAXONOMY_TOKENS = frozenset(
+    {
+        "sports",
+        "comedy",
+        "theater",
+        "family",
+        "nfl",
+        "nba",
+        "mlb",
+        "nhl",
+        "mls",
+        "ncaa",
+        "monster truck",
+        "wrestling",
+        "rodeo",
+    }
+)
+
+ARTIFACT_FILENAME_VERSION = 2
+ARTIFACT_FILENAME_RE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_-]*_\d{8}T\d{9}_\d+_[0-9a-f]{8}\.json$"
+)
+LEGACY_ARTIFACT_FILENAME_RE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_-]*_\d{8}T\d{6}Z\.json$"
+)
+
 
 @dataclass(frozen=True)
 class NormalizedEvent:
@@ -311,6 +350,43 @@ def build_normalized_event(
     )
 
 
+def split_taxonomy_tokens(taxonomy_csv: str) -> list[str]:
+    return [
+        token.strip().lower()
+        for token in re.split(r"[,/]", taxonomy_csv or "")
+        if token.strip()
+    ]
+
+
+def classify_seatgeek_taxonomies(taxonomy_csv: str) -> str:
+    """
+    Deterministic SeatGeek taxonomy signal for broad concert watches.
+
+    Returns: positive | negative | neutral
+    """
+    tokens = split_taxonomy_tokens(taxonomy_csv)
+    if not tokens:
+        return "neutral"
+    if any(token in SEATGEEK_NEGATIVE_TAXONOMY_TOKENS for token in tokens):
+        return "negative"
+    if any(token in SEATGEEK_POSITIVE_TAXONOMY_TOKENS for token in tokens):
+        return "positive"
+    for token in tokens:
+        if "sport" in token or "comedy" in token or "theater" in token:
+            return "negative"
+        if "rock" in token or "metal" in token or "concert" in token:
+            return "positive"
+    return "neutral"
+
+
+def count_by_taxonomy_token(events: list[NormalizedEvent]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        for token in split_taxonomy_tokens(event.genre_or_classification):
+            counts[token] = counts.get(token, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def classify_genre_signal(genre_or_classification: str) -> str:
     """
     Deterministic genre signal for broad rock watches.
@@ -375,12 +451,27 @@ def summarize_event_duplicates(events: list[NormalizedEvent]) -> list[dict[str, 
 
 
 def artifact_filename(label: str) -> str:
-    """Unique artifact basename: label + UTC timestamp ms + pid + short uuid."""
+    """
+    Unique artifact basename: {label}_{YYYYMMDDTHHMMSSmmm}_{pid}_{uuid8}.json
+
+    Example: probe_20260701T174415433_14394_67f80a94.json
+    """
+    safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", (label or "probe").strip()).strip("_") or "probe"
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%S")
     ms = f"{now.microsecond // 1000:03d}"
     suffix = uuid.uuid4().hex[:8]
-    return f"{label}_{stamp}{ms}_{os.getpid()}_{suffix}.json"
+    name = f"{safe_label}_{stamp}{ms}_{os.getpid()}_{suffix}.json"
+    if not ARTIFACT_FILENAME_RE.match(name):
+        raise RuntimeError(f"Invalid artifact filename generated: {name}")
+    if LEGACY_ARTIFACT_FILENAME_RE.match(name):
+        raise RuntimeError(f"Legacy artifact filename format detected: {name}")
+    return name
+
+
+def is_collision_resistant_artifact_name(name: str) -> bool:
+    """True when filename matches the v2 collision-resistant artifact format."""
+    return bool(ARTIFACT_FILENAME_RE.match(name))
 
 
 def extract_eventbrite_id(url: str) -> str:
@@ -436,10 +527,13 @@ def save_artifact(
     out_dir = ARTIFACTS_ROOT / source
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = out_dir / artifact_filename(label)
+    basename = artifact_filename(label)
+    path = out_dir / basename
     body: dict[str, Any] = {
         "saved_at": stamp,
         "source": source,
+        "artifact_basename": basename,
+        "artifact_filename_version": ARTIFACT_FILENAME_VERSION,
         "meta": meta or {},
         "payload": payload,
     }
@@ -447,6 +541,7 @@ def save_artifact(
         body["normalized_events"] = [event.to_dict() for event in events]
         body["normalized_count"] = len(events)
         body["genre_counts"] = count_by_genre(events)
+        body["taxonomy_token_counts"] = count_by_taxonomy_token(events)
         body["duplicate_groups"] = summarize_event_duplicates(events)
         body["duplicate_group_count"] = len(body["duplicate_groups"])
     path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
