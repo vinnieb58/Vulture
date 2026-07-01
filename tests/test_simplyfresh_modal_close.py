@@ -22,3 +22,14 @@ def test_safe_modal_close_rejects_submit_and_pay():
     assert not is_safe_modal_close_text("Pay Now")
     assert not is_safe_modal_close_text("Confirm Order")
     assert not is_safe_modal_close_aria("Continue to payment")
+
+
+def test_modal_add_button_allowed_only_for_add():
+    from probe_common import is_modal_add_button_text
+
+    assert is_modal_add_button_text("Add")
+    assert is_modal_add_button_text("add")
+    assert not is_modal_add_button_text("Add to cart checkout")
+    assert not is_modal_add_button_text("Submit")
+    assert not is_modal_add_button_text("Pay")
+    assert not is_modal_add_button_text("Confirm")
