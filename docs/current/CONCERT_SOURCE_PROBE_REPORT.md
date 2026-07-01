@@ -10,27 +10,91 @@ Scripts live under `experiments/concerts/`. Sample artifacts are written to `art
 
 | Recommendation | Source | Rationale |
 |----------------|--------|-----------|
-| **Promote (primary)** | Ticketmaster Discovery API | Official JSON API; stable `event.id`; city/state, keyword, classification, and date-range filters; best fit for arena/amphitheater rock/metal tours |
-| **Promote (secondary)** | SeatGeek API | Clean JSON aggregator; numeric event IDs; `q`, venue city/state, taxonomy, and datetime filters; useful cross-source dedupe |
+| **Promote (primary, with caveats)** | Ticketmaster Discovery API | Raven-validated: usable normalized fields, strong metro coverage; requires post-fetch genre filtering and `event_dedupe_key` alert suppression |
+| **Promote (secondary)** | SeatGeek API | Clean JSON aggregator; numeric event IDs; useful cross-source dedupe (not yet Raven-validated) |
 | **Keep probing** | Eventbrite browse (JSON-LD) | Works without credentials from cloud IP; good for city/genre/date browse; weak artist precision |
 | **Reject for v1** | Songkick HTML, AXS web, Live Nation web, Houston venue pages | Blocked, empty CSR shells, or no parseable listings from this host |
 
-**Top 1–2 for the first Concerts vertical:** **Ticketmaster Discovery API** + **SeatGeek API** (both need free developer credentials). Use **Eventbrite** as a credential-free supplemental feed until keys are provisioned on Raven.
+**Top 1–2 for the first Concerts vertical:** **Ticketmaster Discovery API** (primary, with deterministic genre filter + event-level dedupe) + **SeatGeek API** (secondary cross-check). Use **Eventbrite** as a credential-free supplemental feed until SeatGeek is validated on Raven.
+
+---
+
+## Raven Ticketmaster evidence (2026-07-01)
+
+Ticketmaster Discovery API was exercised on **Raven** with a live `TICKETMASTER_API_KEY`. Findings:
+
+| Finding | Detail |
+|---------|--------|
+| **Normalized fields usable** | `provider_event_id`, artist/title, venue, city, state, `starts_at`, ticket URL, and `genre_or_classification` populate reliably from Discovery v2 |
+| **`genre=rock` is noisy** | `classificationName=Rock` also returns **Pop**, **Country**, **R&B**, **Other**, and **Alternative** listings — not a pure rock/hard-rock/metal feed |
+| **Duplicate same-show rows** | Ticketmaster can return the **same show twice** with **different `provider_event_id` values** (separate ticket types/offerings) |
+| **Probe helpers** | `genre_counts` and `duplicate_groups` are emitted in probe stdout and saved artifacts |
+
+### Observed duplicate same-show examples (Raven)
+
+| Artist | Venue | Date | Issue |
+|--------|-------|------|-------|
+| Black Label Society | Boeing Center at Tech Port | 2026-09-05 | 2 rows, different provider IDs |
+| Sevendust | Boeing Center at Tech Port | 2026-09-11 | 2 rows, different provider IDs |
+| INOHA | Paper Tiger | 2026-09-20 | 2 rows, different provider IDs |
+| Scene Queen | Paper Tiger | 2026-09-27 | 2 rows, different provider IDs |
+
+**v1 implication:** use Ticketmaster as the primary ingest source, but **never alert on `dedupe_key` alone** — suppress duplicate same-show alerts with `event_dedupe_key` (see below).
+
+---
+
+## Proposed dedupe model
+
+Two layers, both deterministic:
+
+| Key | Formula | Use |
+|-----|---------|-----|
+| **`provider_dedupe_key`** (`dedupe_key` in probe output) | `{source}\|{provider_event_id}` | Track unique provider rows, cache raw fetches, audit which Ticketmaster IDs were seen |
+| **`event_dedupe_key`** | `normalize(artist_or_title) + normalize(venue) + normalize(local starts_at)` → `event\|{sha1_16}` | Suppress duplicate **same-show** alerts when provider IDs differ |
+
+**Alert rule:** fire at most **one alert per `event_dedupe_key` per hunt cycle** (or per watch window), even when multiple `provider_event_id` values exist for the same artist/venue/start.
+
+**Cross-source rule:** when Ticketmaster + SeatGeek overlap, prefer matching on `event_dedupe_key` (or equivalent normalized artist + venue + local datetime), not provider IDs.
+
+Probe helpers implementing this model live in `experiments/concerts/probe_common.py`:
+
+- `make_provider_dedupe_key()`
+- `make_event_dedupe_key()`
+- `summarize_event_duplicates()` — groups with `count > 1`
+- `count_by_genre()` — classification histogram
+
+---
+
+## Proposed deterministic filter model (no LLM)
+
+Ticketmaster `classificationName` / genre is **advisory**, not authoritative for broad rock watches.
+
+| Signal | Classifications | Broad rock/metal watch behavior |
+|--------|-----------------|--------------------------------|
+| **Positive** | Rock, Hard Rock, Metal, Alternative, Punk | Include by default |
+| **Negative** | Pop, Country, R&B, Other | Exclude from broad rock watches |
+| **Neutral** | Anything else / missing | Include only if other watch rules match (e.g. explicit artist) |
+
+**Rules:**
+
+1. **Broad genre watches** (`genre=rock`, metro scans): apply positive/negative classification filter after fetch. Do **not** trust Ticketmaster `classificationName=Rock` alone.
+2. **Explicit artist watches** (Breaking Benjamin, Shinedown, Disturbed, etc.): **override** broad genre filtering — if the artist matches, include regardless of Pop/Country/R&B/Other classification.
+3. **No LLM runtime filtering** — all include/exclude decisions must be deterministic (`classify_genre_signal()` in `probe_common.py`).
 
 ---
 
 ## Sources attempted
 
-| Source | Script | Auth | Cloud probe result | Verdict |
-|--------|--------|------|-------------------|---------|
-| Ticketmaster Discovery API | `probe_ticketmaster.py` | `TICKETMASTER_API_KEY` | Exit 2, clear missing-key message (HTTP 401 without key) | **Promote** |
-| SeatGeek API | `probe_seatgeek.py` | `SEATGEEK_CLIENT_ID` | Exit 2, clear missing-key message (HTTP 403 without client) | **Promote** |
-| Bandsintown REST | `probe_bandsintown.py` | `BANDSINTOWN_APP_ID` | Exit 2, clear missing-key message (HTTP 401) | Keep probing |
-| Songkick | `probe_songkick.py` | None | HTTP 406, 0 events | **Reject** (this IP) |
-| Eventbrite | `probe_eventbrite.py` | Optional `EVENTBRITE_TOKEN`; browse works without | 3–20 events per query via JSON-LD | Keep probing |
+| Source | Script | Auth | Probe result | Verdict |
+|--------|--------|------|--------------|---------|
+| Ticketmaster Discovery API | `probe_ticketmaster.py` | `TICKETMASTER_API_KEY` | Raven: usable fields; noisy rock; duplicate same-show IDs | **Promote (with filters + event dedupe)** |
+| SeatGeek API | `probe_seatgeek.py` | `SEATGEEK_CLIENT_ID` | Exit 2 without key on cloud | **Promote** (pending Raven run) |
+| Bandsintown REST | `probe_bandsintown.py` | `BANDSINTOWN_APP_ID` | Exit 2 without key | Keep probing |
+| Songkick | `probe_songkick.py` | None | HTTP 406, 0 events (cloud) | **Reject** (this IP) |
+| Eventbrite | `probe_eventbrite.py` | Optional `EVENTBRITE_TOKEN`; browse works without | 3–20 events per query via JSON-LD (cloud) | Keep probing |
 | Houston venue pages | `probe_static_venues.py` | None | 0 parseable events; CSR/403/redirect | **Reject** for v1 |
 | AXS web | _(manual)_ | None | HTTP 403 | **Reject** |
-| Live Nation web | _(manual)_ | None | HTTP 200 HTML shell, no `__NEXT_DATA__` / ld+json events | **Reject** |
+| Live Nation web | _(manual)_ | None | HTTP 200 HTML shell, no event JSON | **Reject** |
 
 ---
 
@@ -38,15 +102,15 @@ Scripts live under `experiments/concerts/`. Sample artifacts are written to `art
 
 | Capability | Ticketmaster API | SeatGeek API | Bandsintown API | Eventbrite browse | Songkick HTML | Venue pages |
 |------------|------------------|--------------|-----------------|-------------------|---------------|-------------|
-| City/metro search | Yes (`city`, `stateCode`, geo) | Yes (`venue.city`, `venue.state`) | Post-filter only | Yes (browse slug) | Blocked | No |
-| Artist search | Yes (`keyword`) | Yes (`q`) | Yes (artist endpoint) | Weak (slug/substring) | Blocked | No |
-| Genre / rock-metal | Yes (`classificationName`) | Yes (`taxonomies.name`) | No | Yes (`music/rock`, `music/metal`) | — | No |
-| Date range | Yes (`startDateTime` / `endDateTime`) | Yes (`datetime_utc.gte/lte`) | Client-side filter | Yes (`start_date` / `end_date` query params) | — | No |
-| Stable event ID | Yes (`id`) | Yes (numeric `id`) | Yes (`id` / offer URL) | Yes (numeric ID in ticket URL) | Would be `/concerts/{id}` | No |
-| Venue, city, state, time, ticket URL | Yes | Yes | Yes | Yes (date often date-only) | Partial | No |
-| Simple `requests` | Yes | Yes | Yes | Yes | No (406) | No (CSR/403) |
-| Browser automation required | No | No | No | No | Likely from residential IP | Yes for Live Nation venues |
-| Deterministic dedupe | **Strong** | **Strong** | Good | Good (`eventbrite\|{id}`) | Unknown | Poor |
+| City/metro search | Yes | Yes | Post-filter only | Yes | Blocked | No |
+| Artist search | Yes | Yes | Yes (artist endpoint) | Weak | Blocked | No |
+| Genre / rock-metal | Yes (noisy) | Yes | No | Yes | — | No |
+| Date range | Yes | Yes | Client-side filter | Yes | — | No |
+| Stable provider event ID | Yes | Yes | Yes | Yes | — | No |
+| Same-show dedupe without provider ID | **Needs `event_dedupe_key`** | TBD | TBD | TBD | — | No |
+| Venue, city, state, time, ticket URL | Yes (Raven) | Yes | Yes | Yes | Partial | No |
+| Simple `requests` | Yes | Yes | Yes | Yes | No | No |
+| Deterministic dedupe | **Provider strong; event-level required** | Strong | Good | Good | Unknown | Poor |
 
 ---
 
@@ -59,85 +123,54 @@ Scripts live under `experiments/concerts/`. Sample artifacts are written to `art
 | `BANDSINTOWN_APP_ID` | Bandsintown artist events | https://www.bandsintown.com/api/overview |
 | `EVENTBRITE_TOKEN` | Eventbrite API v3 (optional) | https://www.eventbrite.com/platform/ |
 
-All probe scripts fail safely with exit code **2** and a clear message when a required credential is missing. No secrets are read from files or hardcoded.
+All credentialed probe scripts fail safely with exit code **2** and a clear message when a required credential is missing.
 
 ---
 
-## Sample commands and result counts
-
-Run from repo root (or `experiments/concerts/`). Date window defaults to **today → +180 days**.
-
-### Credential-free probes (executed 2026-07-01)
+## Sample commands
 
 ```bash
-python experiments/concerts/probe_eventbrite.py --city Houston --state TX --limit 8
-# normalized_count=8
-
-python experiments/concerts/probe_eventbrite.py --genre rock --city Austin --state TX --limit 5
-# normalized_count=5 (e.g. RippleFest Texas 2026)
-
-python experiments/concerts/probe_eventbrite.py --genre metal --city Houston --state TX --limit 5
-# normalized_count=3 (e.g. Destroying Texas Fest 20)
-
-python experiments/concerts/probe_eventbrite.py --city Dallas --state TX --limit 5
-# normalized_count=5
-
-python experiments/concerts/probe_eventbrite.py --artist "Breaking Benjamin" --city Houston --state TX --limit 5
-# normalized_count=2 after substring filter; browse slug returns unrelated "Breaking Bad" trivia — not true artist matches
-
-python experiments/concerts/probe_songkick.py --city Houston --state TX
-# normalized_count=0, HTTP 406 blocked
-
-python experiments/concerts/probe_static_venues.py
-# normalized_count=0 across 4 venues (CSR placeholders, 403, or consent redirect)
-```
-
-### Credentialed probes (missing-key validation)
-
-```bash
-python experiments/concerts/probe_ticketmaster.py --city Houston --state TX --artist "Breaking Benjamin"
-# exit 2: Missing TICKETMASTER_API_KEY
-
-python experiments/concerts/probe_seatgeek.py --city Houston --state TX --artist "Shinedown"
-# exit 2: Missing SEATGEEK_CLIENT_ID
-
-python experiments/concerts/probe_bandsintown.py --artist "Disturbed"
-# exit 2: Missing BANDSINTOWN_APP_ID
-```
-
-### Suggested Raven follow-up (with keys)
-
-```bash
+# Raven-validated Ticketmaster (requires key)
 export TICKETMASTER_API_KEY=...
-python experiments/concerts/probe_ticketmaster.py --city Houston --state TX --genre rock --artist "Breaking Benjamin"
+python experiments/concerts/probe_ticketmaster.py --city San Antonio --state TX --genre rock --limit 50
+# stdout includes genre_counts and duplicate_groups
 
-export SEATGEEK_CLIENT_ID=...
-python experiments/concerts/probe_seatgeek.py --city Houston --state TX --genre rock --artist "Shinedown"
+python experiments/concerts/probe_ticketmaster.py --artist "Breaking Benjamin" --city Houston --state TX
+
+# Credential-free Eventbrite
+python experiments/concerts/probe_eventbrite.py --city Houston --state TX --limit 8
+
+# Missing-key validation
+python experiments/concerts/probe_seatgeek.py --city Houston --state TX  # exit 2
 ```
 
 ---
 
 ## Normalized output shape
 
-Every probe emits:
-
 ```json
 {
-  "source": "eventbrite",
-  "provider_event_id": "1977513145050",
-  "artist_or_title": "RippleFest Texas 2026 - 2 DAY PASS",
-  "venue": "The Far Out Lounge & Stage",
-  "city": "Austin",
+  "source": "ticketmaster",
+  "provider_event_id": "vvG1JZabc123",
+  "artist_or_title": "Sevendust",
+  "venue": "Boeing Center at Tech Port",
+  "city": "San Antonio",
   "state": "TX",
-  "starts_at": "2026-09-18",
-  "ticket_url": "https://www.eventbrite.com/e/...",
-  "genre_or_classification": "rock",
-  "raw_url": "https://www.eventbrite.com/e/...",
-  "dedupe_key": "eventbrite|1977513145050"
+  "starts_at": "2026-09-11T20:00:00Z",
+  "ticket_url": "https://www.ticketmaster.com/...",
+  "genre_or_classification": "Rock",
+  "raw_url": "https://www.ticketmaster.com/...",
+  "dedupe_key": "ticketmaster|vvG1JZabc123",
+  "event_dedupe_key": "event|a1b2c3d4e5f67890"
 }
 ```
 
-`dedupe_key` is `{source}|{provider_event_id}` when an ID exists; otherwise a short hash of title/venue/start.
+- `dedupe_key` = **provider_dedupe_key** (`source|provider_event_id`)
+- `event_dedupe_key` = show-scoped key for alert suppression
+
+Probe stdout (non-`--json`) also prints `genre_counts` and `duplicate_groups` when duplicates exist.
+
+Artifacts are saved as `{label}_{YYYYMMDDTHHMMSSmmm}_{pid}_{uuid8}.json` to avoid same-second overwrite collisions.
 
 ---
 
@@ -145,80 +178,45 @@ Every probe emits:
 
 | Source | Observation |
 |--------|-------------|
-| **Ticketmaster Discovery API** | No blocking observed on auth failure path; rate limits apply per developer account (not measured here) |
-| **SeatGeek API** | 403 without `client_id`; no rate-limit data without credentials |
-| **Bandsintown** | 401 without `app_id` |
-| **Eventbrite browse** | HTTP 200 from cloud; ~8–20 JSON-LD events per browse page; no bot wall |
-| **Eventbrite API** | Destination search POST returns 401 without session/CSRF; optional `EVENTBRITE_TOKEN` path not tested (no token in env) |
-| **Songkick** | HTTP **406** with empty body from cloud IP |
-| **Ticketmaster.com / AXS** | HTTP **403** identity/bot challenges on web search |
-| **Live Nation web** | HTTP 200 but no embedded event JSON; search API path returns HTML shell |
-| **713 Music Hall / House of Blues** | HTTP 200 **"THIS PAGE IS STILL IN SOUND CHECK"** CSR placeholder |
-| **White Oak Music Hall** | HTTP **403** Forbidden |
-| **Cynthia Woods Mitchell Pavilion** | Redirect to consent/tracking page; no event listings |
+| **Ticketmaster Discovery API** | Works from Raven residential IP; rate limits per developer account |
+| **SeatGeek API** | 403 without `client_id` |
+| **Eventbrite browse** | HTTP 200 from cloud; no bot wall |
+| **Songkick** | HTTP **406** from cloud IP |
+| **Ticketmaster.com / AXS web** | HTTP **403** bot challenges |
+| **Live Nation / venue pages** | CSR placeholders or 403 |
 
 ---
 
-## Dedupe viability
+## Updated Ticketmaster v1 recommendation
 
-- **Ticketmaster + SeatGeek:** Both expose stable numeric/string IDs and canonical ticket URLs. Cross-source dedupe can use `(artist_normalized, venue_normalized, starts_at_utc)` with source-specific IDs retained. Strongest pair for production.
-- **Eventbrite:** Stable numeric IDs in ticket URLs; good single-source dedupe; overlaps with Ticketmaster/SeatGeek will need fuzzy title+datetime matching (many listings are parties/fests, not arena tours).
-- **Bandsintown:** Artist-scoped; good for tour-date alerts per artist; weak for metro-wide discovery.
-- **Songkick / venues / AXS / Live Nation web:** Not viable from current probe evidence.
+**Use Ticketmaster Discovery API as the primary Concerts ingest source on Raven**, with these mandatory v1 guardrails:
 
----
-
-## Per-source notes
-
-### Ticketmaster Discovery API — **Promote**
-
-Best-aligned with major rock/hard rock/metal tours (Toyota Center, Cynthia Woods, etc.). Supports `classificationName` (Rock, Hard Rock, Metal), `keyword`, `city`/`stateCode`, `startDateTime`/`endDateTime`, and `radius` when using geo params. Requires API key before any data returns.
-
-### SeatGeek API — **Promote**
-
-Secondary aggregator with similar filter surface (`q`, `venue.city`, `venue.state`, `taxonomies.name`, datetime range). Free client ID. Good for coverage gaps and dedupe cross-checks against Ticketmaster.
-
-### Eventbrite — **Keep probing**
-
-Only source that returned real normalized events without credentials. City browse (`/b/tx--houston/music/`), genre browse (`/b/tx--austin/music/rock/`), and date query params work. **Artist slug search is unreliable** — `breaking-benjamin` returns "Breaking Bad" trivia and unrelated titles. Treat as supplemental (clubs/fests), not primary arena-tour coverage.
-
-### Bandsintown — **Keep probing**
-
-Artist-tour API is simple and useful for watchlist-driven hunts, but requires `app_id`, has no metro/genre search, and is not sufficient alone for a metro Concerts vertical.
-
-### Songkick — **Reject** (for now)
-
-Public metro and artist pages returned HTTP 406 from the cloud probe host. Re-test from Raven residential IP before reconsidering.
-
-### AXS / Live Nation — **Reject** (for now)
-
-No public JSON API probed. Web surfaces blocked or client-rendered without parseable event payloads. Live Nation venue subdomains (713 Music Hall, HOB) mirror the CSR placeholder problem.
-
-### Houston venue pages — **Reject** for v1
-
-Defer venue-specific adapters until Ticketmaster/SeatGeek coverage is validated on Raven. Revisit with Playwright on residential IP if pavilion/warehouse shows are systematically missing from APIs.
+1. **Fetch** by metro (`city`/`stateCode`) and/or explicit `keyword` artist watches; keep `classificationName` as a broad pre-filter only.
+2. **Filter deterministically** after normalization: exclude Pop/Country/R&B/Other from broad rock watches; allow explicit artist watches to override.
+3. **Dedupe for alerts** on `event_dedupe_key`, not `dedupe_key` — Ticketmaster duplicate provider rows for the same show are expected.
+4. **Log** `genre_counts` and `duplicate_group_count` per hunt cycle for tuning.
+5. **Do not** promote to production adapter until SeatGeek overlap is checked and repeated Raven hunt-cycle evidence is recorded.
 
 ---
 
-## Files added
+## Files
 
 | Path | Purpose |
 |------|---------|
-| `experiments/concerts/probe_common.py` | Shared CLI, normalization, artifacts |
+| `experiments/concerts/probe_common.py` | Shared CLI, normalization, dedupe, genre signals, artifacts |
 | `experiments/concerts/probe_ticketmaster.py` | Ticketmaster Discovery API |
 | `experiments/concerts/probe_seatgeek.py` | SeatGeek API |
 | `experiments/concerts/probe_bandsintown.py` | Bandsintown artist events |
 | `experiments/concerts/probe_songkick.py` | Songkick HTML recon |
 | `experiments/concerts/probe_eventbrite.py` | Eventbrite JSON-LD (+ optional API) |
 | `experiments/concerts/probe_static_venues.py` | Houston venue page recon |
+| `tests/test_concert_probe_common.py` | Unit tests for shared probe helpers |
 | `docs/current/CONCERT_SOURCE_PROBE_REPORT.md` | This report |
-
-`.gitignore` updated to exclude `artifacts/concerts/`.
 
 ---
 
 ## Next steps (out of scope for this branch)
 
-1. Provision `TICKETMASTER_API_KEY` and `SEATGEEK_CLIENT_ID` on Raven; re-run probes for Houston/Austin/Dallas + rock/metal + Breaking Benjamin / Shinedown / Disturbed.
-2. Compare result overlap and dedupe collision rate between Ticketmaster and SeatGeek.
+1. Run SeatGeek probe on Raven; compare overlap and `event_dedupe_key` collision rate with Ticketmaster.
+2. Tune positive/negative genre lists from repeated Raven `genre_counts` histograms.
 3. Only after repeated Raven evidence: design a Concerts vertical adapter (still separate from marketplace hunts).

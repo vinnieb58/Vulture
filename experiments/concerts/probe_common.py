@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,34 @@ TEXAS_CITY_SLUGS = {
     "dallas": "tx--dallas",
 }
 
+# Proposed deterministic filter signals (advisory Ticketmaster classifications).
+POSITIVE_GENRE_SIGNALS = frozenset(
+    {
+        "rock",
+        "hard rock",
+        "metal",
+        "alternative",
+        "alternative rock",
+        "punk",
+        "punk rock",
+    }
+)
+NEGATIVE_GENRE_SIGNALS = frozenset(
+    {
+        "pop",
+        "country",
+        "r&b",
+        "rnb",
+        "other",
+        "hip-hop/rap",
+        "hip hop/rap",
+        "latin",
+        "jazz",
+        "classical",
+        "dance/electronic",
+    }
+)
+
 
 @dataclass(frozen=True)
 class NormalizedEvent:
@@ -64,6 +93,7 @@ class NormalizedEvent:
     genre_or_classification: str
     raw_url: str
     dedupe_key: str
+    event_dedupe_key: str
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -190,6 +220,51 @@ def genre_browse_slug(genre: Optional[str]) -> Optional[str]:
     return re.sub(r"[^a-z0-9]+", "-", key).strip("-")
 
 
+def normalize_dedupe_text(value: str) -> str:
+    """Lowercase and collapse whitespace/punctuation for stable dedupe keys."""
+    collapsed = re.sub(r"[^a-z0-9]+", " ", (value or "").strip().lower())
+    return re.sub(r"\s+", " ", collapsed).strip()
+
+
+def normalize_local_starts_at(starts_at: str) -> str:
+    """Normalize start time to local date/time string for event-level dedupe."""
+    raw = (starts_at or "").strip()
+    if not raw:
+        return ""
+    if "T" in raw:
+        local_part = raw.split("T", 1)[0]
+        time_match = re.search(r"T(\d{2}:\d{2})", raw)
+        if time_match:
+            return f"{local_part} {time_match.group(1)}"
+        return local_part
+    return raw[:16]
+
+
+def make_provider_dedupe_key(source: str, provider_event_id: str) -> str:
+    """Provider-scoped identity: source + provider_event_id."""
+    if provider_event_id:
+        return f"{source}|{provider_event_id}"
+    return f"{source}|"
+
+
+def make_event_dedupe_key(
+    *,
+    artist_or_title: str,
+    venue: str,
+    starts_at: str,
+) -> str:
+    """Show-scoped identity: normalized artist + venue + local date/time."""
+    parts = [
+        normalize_dedupe_text(artist_or_title),
+        normalize_dedupe_text(venue),
+        normalize_local_starts_at(starts_at),
+    ]
+    if not any(parts):
+        return ""
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"event|{digest}"
+
+
 def make_dedupe_key(
     source: str,
     provider_event_id: str,
@@ -198,19 +273,9 @@ def make_dedupe_key(
     venue: str = "",
     starts_at: str = "",
 ) -> str:
-    if provider_event_id:
-        return f"{source}|{provider_event_id}"
-    digest = hashlib.sha1(
-        "|".join(
-            [
-                source,
-                artist_or_title.strip().lower(),
-                venue.strip().lower(),
-                starts_at.strip(),
-            ]
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    return f"{source}|{digest}"
+    """Backward-compatible alias for provider_dedupe_key."""
+    _ = (artist_or_title, venue, starts_at)
+    return make_provider_dedupe_key(source, provider_event_id)
 
 
 def build_normalized_event(
@@ -237,14 +302,85 @@ def build_normalized_event(
         ticket_url=ticket_url or "",
         genre_or_classification=genre_or_classification or "",
         raw_url=raw_url or ticket_url or "",
-        dedupe_key=make_dedupe_key(
-            source,
-            provider_event_id,
+        dedupe_key=make_provider_dedupe_key(source, provider_event_id),
+        event_dedupe_key=make_event_dedupe_key(
             artist_or_title=artist_or_title,
             venue=venue,
             starts_at=starts_at,
         ),
     )
+
+
+def classify_genre_signal(genre_or_classification: str) -> str:
+    """
+    Deterministic genre signal for broad rock watches.
+
+    Returns: positive | negative | neutral
+    """
+    normalized = normalize_dedupe_text(genre_or_classification)
+    if not normalized:
+        return "neutral"
+    if normalized in POSITIVE_GENRE_SIGNALS:
+        return "positive"
+    if normalized in NEGATIVE_GENRE_SIGNALS:
+        return "negative"
+    for label in POSITIVE_GENRE_SIGNALS:
+        if label in normalized:
+            return "positive"
+    for label in NEGATIVE_GENRE_SIGNALS:
+        if label in normalized:
+            return "negative"
+    return "neutral"
+
+
+def count_by_genre(events: list[NormalizedEvent]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        label = (event.genre_or_classification or "(none)").strip() or "(none)"
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0].lower())))
+
+
+def summarize_event_duplicates(events: list[NormalizedEvent]) -> list[dict[str, Any]]:
+    """Group events by event_dedupe_key; return groups with more than one provider row."""
+    grouped: dict[str, list[NormalizedEvent]] = {}
+    for event in events:
+        key = event.event_dedupe_key
+        if not key:
+            continue
+        grouped.setdefault(key, []).append(event)
+
+    duplicates: list[dict[str, Any]] = []
+    for key, group in grouped.items():
+        if len(group) < 2:
+            continue
+        duplicates.append(
+            {
+                "event_dedupe_key": key,
+                "count": len(group),
+                "artist_or_title": group[0].artist_or_title,
+                "venue": group[0].venue,
+                "starts_at": group[0].starts_at,
+                "provider_event_ids": [event.provider_event_id for event in group],
+                "dedupe_keys": [event.dedupe_key for event in group],
+            }
+        )
+    duplicates.sort(
+        key=lambda item: (
+            str(item.get("starts_at") or ""),
+            str(item.get("artist_or_title") or "").lower(),
+        )
+    )
+    return duplicates
+
+
+def artifact_filename(label: str) -> str:
+    """Unique artifact basename: label + UTC timestamp ms + pid + short uuid."""
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y%m%dT%H%M%S")
+    ms = f"{now.microsecond // 1000:03d}"
+    suffix = uuid.uuid4().hex[:8]
+    return f"{label}_{stamp}{ms}_{os.getpid()}_{suffix}.json"
 
 
 def extract_eventbrite_id(url: str) -> str:
@@ -300,7 +436,7 @@ def save_artifact(
     out_dir = ARTIFACTS_ROOT / source
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = out_dir / f"{label}_{stamp}.json"
+    path = out_dir / artifact_filename(label)
     body: dict[str, Any] = {
         "saved_at": stamp,
         "source": source,
@@ -310,6 +446,9 @@ def save_artifact(
     if events is not None:
         body["normalized_events"] = [event.to_dict() for event in events]
         body["normalized_count"] = len(events)
+        body["genre_counts"] = count_by_genre(events)
+        body["duplicate_groups"] = summarize_event_duplicates(events)
+        body["duplicate_group_count"] = len(body["duplicate_groups"])
     path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
@@ -321,6 +460,7 @@ def print_probe_summary(
     artifact_path: Optional[Path],
     notes: Optional[list[str]] = None,
     json_only: bool = False,
+    show_duplicate_summary: bool = True,
 ) -> None:
     payload = [event.to_dict() for event in events]
     if json_only:
@@ -334,6 +474,19 @@ def print_probe_summary(
     if notes:
         for note in notes:
             print(f"note={note}")
+
+    genre_counts = count_by_genre(events)
+    if genre_counts:
+        print("genre_counts=")
+        print(json.dumps(genre_counts, indent=2, ensure_ascii=False))
+
+    if show_duplicate_summary:
+        duplicate_groups = summarize_event_duplicates(events)
+        print(f"duplicate_group_count={len(duplicate_groups)}")
+        if duplicate_groups:
+            print("duplicate_groups=")
+            print(json.dumps(duplicate_groups, indent=2, ensure_ascii=False))
+
     print("normalized_events=")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
