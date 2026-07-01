@@ -22,6 +22,7 @@ from finch.cart_choice import (
     paginate_pending_more,
     prepare_add_or_needs_choice,
     process_add_list_with_choice,
+    process_intents_with_choice,
     rerun_pending_search,
 )
 from finch.cart_ops import (
@@ -61,6 +62,16 @@ from finch.preferences import (
 from finch.env_util import load_env
 from finch.kroger_client import KrogerAuthError, KrogerError, load_kroger_client_from_env
 from finch.preview import build_preview
+from finch.staples import (
+    batch_to_grocery_intents,
+    clear_pending_staple_batch,
+    format_staple_preview_text,
+    format_staples_list_text,
+    get_pending_staple_batch,
+    list_staple_items,
+    remove_from_staple_batch,
+    start_staple_batch,
+)
 
 FINCH_KEY_HEADER = "X-Finch-Key"
 
@@ -177,6 +188,20 @@ class PreferenceChangeRequest(BaseModel):
 class PreferenceAliasRequest(BaseModel):
     from_key: str = Field(..., min_length=1)
     to_key: str = Field(..., min_length=1)
+
+
+class StaplesChatRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+
+
+class StaplesRemoveRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+    targets: str = Field(..., min_length=1)
+
+
+class StaplesConfirmRequest(BaseModel):
+    chat_key: str = Field(..., min_length=1)
+    source: str | None = None
 
 
 def _needs_choice_response(outcome: NeedsChoiceOutcome) -> dict[str, Any]:
@@ -551,6 +576,129 @@ def create_app() -> FastAPI:
                 f"Started new Finch grocery trip (trip {trip_id}). "
                 "Duplicate guard cleared for this trip."
             ),
+        }
+
+    @application.get("/finch/staples", dependencies=[Depends(require_finch_key)])
+    def finch_staples_list() -> dict[str, Any]:
+        items = list_staple_items(enabled_only=True)
+        return {
+            "ok": True,
+            "items": [item.to_dict() for item in items],
+            "text": format_staples_list_text(),
+        }
+
+    @application.get("/finch/staples/pending", dependencies=[Depends(require_finch_key)])
+    def finch_staples_pending(chat_key: str) -> dict[str, Any]:
+        batch = get_pending_staple_batch(chat_key)
+        if batch is None:
+            return {"ok": True, "pending": None}
+        return {
+            "ok": True,
+            "pending": batch.to_dict(),
+            "text": format_staple_preview_text(batch),
+        }
+
+    @application.post("/finch/staples/start", dependencies=[Depends(require_finch_key)])
+    def finch_staples_start(body: StaplesChatRequest) -> dict[str, Any]:
+        batch = start_staple_batch(body.chat_key)
+        return {
+            "ok": True,
+            "pending": batch.to_dict(),
+            "text": format_staple_preview_text(batch),
+        }
+
+    @application.post("/finch/staples/remove", dependencies=[Depends(require_finch_key)])
+    def finch_staples_remove(body: StaplesRemoveRequest) -> dict[str, Any]:
+        batch = get_pending_staple_batch(body.chat_key)
+        if batch is None:
+            return {
+                "ok": False,
+                "message": "No pending staple batch. Send 'add staples' first.",
+            }
+        updated = remove_from_staple_batch(body.chat_key, body.targets)
+        if updated is None:
+            return {
+                "ok": False,
+                "message": "No pending staple batch. Send 'add staples' first.",
+            }
+        return {
+            "ok": True,
+            "pending": updated.to_dict(),
+            "text": format_staple_preview_text(updated),
+        }
+
+    @application.post("/finch/staples/cancel", dependencies=[Depends(require_finch_key)])
+    def finch_staples_cancel(body: StaplesChatRequest) -> dict[str, Any]:
+        cleared = clear_pending_staple_batch(body.chat_key)
+        return {
+            "ok": True,
+            "cleared": cleared,
+            "message": "Cancelled staple batch." if cleared else "No pending staple batch to cancel.",
+        }
+
+    @application.post("/finch/staples/confirm", dependencies=[Depends(require_finch_key)])
+    def finch_staples_confirm(body: StaplesConfirmRequest) -> dict[str, Any]:
+        batch = get_pending_staple_batch(body.chat_key)
+        if batch is None:
+            return {
+                "ok": False,
+                "message": "No pending staple batch. Send 'add staples' first.",
+            }
+        if not batch.items:
+            clear_pending_staple_batch(body.chat_key)
+            return {
+                "ok": False,
+                "message": "Staple batch is empty. Send 'add staples' to start again.",
+            }
+
+        intents = batch_to_grocery_intents(batch)
+        clear_pending_staple_batch(body.chat_key)
+
+        try:
+            require_live_cart()
+            require_saved_token()
+        except CartGuardError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        client = load_kroger_client_from_env()
+        try:
+            ensure_fresh_user_token(client)
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            progress = process_intents_with_choice(
+                intents,
+                chat_key=body.chat_key,
+                client=client,
+                execute_add_fn=lambda attempt: _execute_single_cart_add(
+                    attempt,
+                    client,
+                    action="cart_add_list",
+                    source=body.source,
+                ),
+            )
+        except CartResolveError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KrogerAuthError, KrogerError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if progress.needs_choice is not None:
+            payload = _needs_choice_response(progress.needs_choice)
+            payload["partial_outcomes"] = progress.added_outcomes
+            payload["succeeded"] = [
+                o["attempt"] for o in progress.added_outcomes if o.get("attempt")
+            ]
+            return payload
+
+        outcomes = progress.added_outcomes
+        succeeded = [o["attempt"] for o in outcomes if o.get("attempt")]
+        return {
+            "ok": all(o.get("ok") or o.get("duplicate") for o in outcomes) if outcomes else False,
+            "succeeded": succeeded,
+            "failed": [],
+            "outcomes": outcomes,
+            "live_cart": live_cart_enabled(),
         }
 
     @application.post("/finch/trip/undo-last", dependencies=[Depends(require_finch_key)])
