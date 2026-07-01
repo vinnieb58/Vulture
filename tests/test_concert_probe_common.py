@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -21,12 +22,18 @@ _SPEC.loader.exec_module(concert_probe_common)
 artifact_filename = concert_probe_common.artifact_filename
 build_normalized_event = concert_probe_common.build_normalized_event
 classify_genre_signal = concert_probe_common.classify_genre_signal
+classify_seatgeek_taxonomies = concert_probe_common.classify_seatgeek_taxonomies
 count_by_genre = concert_probe_common.count_by_genre
+count_by_taxonomy_token = concert_probe_common.count_by_taxonomy_token
+is_collision_resistant_artifact_name = concert_probe_common.is_collision_resistant_artifact_name
 make_event_dedupe_key = concert_probe_common.make_event_dedupe_key
 make_provider_dedupe_key = concert_probe_common.make_provider_dedupe_key
 normalize_dedupe_text = concert_probe_common.normalize_dedupe_text
 normalize_local_starts_at = concert_probe_common.normalize_local_starts_at
+save_artifact = concert_probe_common.save_artifact
+split_taxonomy_tokens = concert_probe_common.split_taxonomy_tokens
 summarize_event_duplicates = concert_probe_common.summarize_event_duplicates
+ARTIFACTS_ROOT = concert_probe_common.ARTIFACTS_ROOT
 
 
 class TestNormalizeDedupeText:
@@ -159,8 +166,47 @@ class TestArtifactFilename:
         name = artifact_filename("probe")
         assert name.startswith("probe_")
         assert name.endswith(".json")
-        assert re.search(r"_\d+_[0-9a-f]{8}\.json$", name)
+        assert is_collision_resistant_artifact_name(name)
+        assert re.search(r"^probe_\d{8}T\d{9}_\d+_[0-9a-f]{8}\.json$", name)
 
     def test_distinct_names(self):
         names = {artifact_filename("probe") for _ in range(20)}
         assert len(names) == 20
+
+    def test_rejects_legacy_second_level_format(self):
+        assert not is_collision_resistant_artifact_name("probe_20260701T204445Z.json")
+
+    def test_save_artifact_uses_collision_resistant_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(concert_probe_common, "ARTIFACTS_ROOT", tmp_path)
+        path = save_artifact("seatgeek", "probe", {"hello": "world"})
+        assert is_collision_resistant_artifact_name(path.name)
+        body = json.loads(path.read_text(encoding="utf-8"))
+        assert body["artifact_filename_version"] == 2
+        assert body["artifact_basename"] == path.name
+
+
+class TestSeatGeekTaxonomies:
+    def test_positive_concert_rock(self):
+        assert classify_seatgeek_taxonomies("concert, rock") == "positive"
+
+    def test_negative_sports(self):
+        assert classify_seatgeek_taxonomies("sports, nfl") == "negative"
+
+    def test_count_by_taxonomy_token(self):
+        events = [
+            build_normalized_event(
+                source="seatgeek",
+                provider_event_id="1",
+                artist_or_title="A",
+                genre_or_classification="concert, rock",
+            ),
+            build_normalized_event(
+                source="seatgeek",
+                provider_event_id="2",
+                artist_or_title="B",
+                genre_or_classification="sports, nfl",
+            ),
+        ]
+        assert count_by_taxonomy_token(events)["concert"] == 1
+        assert count_by_taxonomy_token(events)["sports"] == 1
+        assert split_taxonomy_tokens("concert, rock") == ["concert", "rock"]
