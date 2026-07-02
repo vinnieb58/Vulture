@@ -13,7 +13,7 @@ from engine.concerts.formatter import (
     format_watches_list,
 )
 from engine.concerts.nightingale import export_handoffs
-from engine.concerts.query_parser import FilterValidationError, parse_and_validate
+from engine.concerts.query_parser import FilterValidationError, criteria_from_args, parse_and_validate
 from engine.concerts.repository import (
     create_watch,
     list_watches,
@@ -41,15 +41,14 @@ SAMPLE_QUERIES = [
 ]
 
 
+def _resolve_criteria(args: dict) -> SearchCriteria:
+    """Prefer typed Discord options with freeform query fallback."""
+    return criteria_from_args(args)
+
+
 def cmd_search(args: dict) -> ConcertCommandResult:
-    query = (args.get("query") or "").strip()
-    if not query:
-        return ConcertCommandResult(
-            success=False,
-            message="Provide filters, e.g. `artist:\"Three Days Grace\" area:\"houston\" days:180`",
-        )
     try:
-        criteria = parse_and_validate(query)
+        criteria = _resolve_criteria(args)
     except (FilterValidationError, ValueError) as exc:
         return ConcertCommandResult(success=False, message=str(exc))
 
@@ -69,14 +68,8 @@ def cmd_search(args: dict) -> ConcertCommandResult:
 
 
 def cmd_watch(args: dict) -> ConcertCommandResult:
-    query = (args.get("query") or "").strip()
-    if not query:
-        return ConcertCommandResult(
-            success=False,
-            message="Provide watch filters, e.g. `artist:\"Shinedown\" area:\"houston\" days:365`",
-        )
     try:
-        criteria = parse_and_validate(query)
+        criteria = _resolve_criteria(args)
     except (FilterValidationError, ValueError) as exc:
         return ConcertCommandResult(success=False, message=str(exc))
 
