@@ -184,6 +184,7 @@ def check_services() -> dict[str, Any]:
         _service_entry("docker", "docker"),
         _service_entry("vulture_bot", config.VULTURE_BOT_UNIT, optional=True),
         _service_entry("vulture_scheduler_timer", config.VULTURE_SCHEDULER_TIMER, optional=True),
+        _service_entry("vulture_concert_watches_timer", config.VULTURE_CONCERT_WATCHES_TIMER, optional=True),
     ]
 
     ok, out = run_command(

@@ -50,6 +50,10 @@ VULTURE_BOT_SYSTEMD_UNIT = os.getenv("CROW_VULTURE_BOT_UNIT", "vulture-bot").str
 VULTURE_SCHEDULER_SYSTEMD_UNIT = (
     os.getenv("CROW_VULTURE_SCHEDULER_UNIT", "vulture-scheduler").strip() or "vulture-scheduler"
 )
+VULTURE_CONCERT_WATCHES_TIMER = (
+    os.getenv("CROW_VULTURE_CONCERT_WATCHES_TIMER", "vulture-concert-watches.timer").strip()
+    or "vulture-concert-watches.timer"
+)
 
 # Raven health scripts (optional fallback; Crow prefers internal checks)
 RAVEN_HEALTHCHECK_SCRIPT = Path(

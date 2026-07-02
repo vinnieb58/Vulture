@@ -137,6 +137,58 @@ def list_watches(*, active_only: bool = True) -> list[ConcertWatch]:
     return [_row_to_watch(r) for r in rows]
 
 
+def count_watches() -> tuple[int, int]:
+    """Return (active_count, paused_count) for concert watches."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active_count,
+                SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END) AS paused_count
+            FROM concert_watches
+            """
+        ).fetchone()
+    if not row:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def count_concert_events(*, days: int | None = None) -> int:
+    """Count persisted concert events, optionally limited to recent days."""
+    with get_connection() as conn:
+        if days is None:
+            row = conn.execute("SELECT COUNT(*) FROM concert_events").fetchone()
+            return int(row[0]) if row else 0
+        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM concert_events
+            WHERE COALESCE(first_seen_at, '') >= ?
+            """,
+            (cutoff_iso,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_concert_alerts(*, days: int | None = None) -> int:
+    """Count concert alerts sent, optionally limited to recent days."""
+    with get_connection() as conn:
+        if days is None:
+            row = conn.execute("SELECT COUNT(*) FROM concert_alerts").fetchone()
+            return int(row[0]) if row else 0
+        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM concert_alerts
+            WHERE COALESCE(alerted_at, '') >= ?
+            """,
+            (cutoff_iso,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def get_watch(watch_id: int) -> Optional[ConcertWatch]:
     with get_connection() as conn:
         row = conn.execute(

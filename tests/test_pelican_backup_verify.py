@@ -27,5 +27,21 @@ class TestPelicanBackupVerify:
         _touch_db(db)
         assert run_verify(repo, db_path=db) == 0
 
+    def test_dry_run_passes_with_concert_tables(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        db = repo / "data" / "vulture.db"
+        _touch_db(db)
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE concert_watches (id INTEGER PRIMARY KEY);
+            CREATE TABLE concert_events (id INTEGER PRIMARY KEY);
+            CREATE TABLE concert_alerts (id INTEGER PRIMARY KEY);
+            """
+        )
+        conn.commit()
+        conn.close()
+        assert run_verify(repo, db_path=db) == 0
+
     def test_dry_run_fails_without_repo(self, tmp_path: Path) -> None:
         assert run_verify(tmp_path / "missing", db_path=tmp_path / "missing.db") == 1

@@ -51,6 +51,10 @@ VULTURE_SCHEDULER_TIMER = (
     os.getenv("CANARY_VULTURE_SCHEDULER_TIMER", "vulture-scheduler.timer").strip()
     or "vulture-scheduler.timer"
 )
+VULTURE_CONCERT_WATCHES_TIMER = (
+    os.getenv("CANARY_VULTURE_CONCERT_WATCHES_TIMER", "vulture-concert-watches.timer").strip()
+    or "vulture-concert-watches.timer"
+)
 DASHBOARD_CONTAINER = (
     os.getenv("CANARY_DASHBOARD_CONTAINER", "vulture-dashboard").strip() or "vulture-dashboard"
 )

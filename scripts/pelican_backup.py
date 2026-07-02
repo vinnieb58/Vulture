@@ -51,7 +51,7 @@ from pelican.naming import (  # noqa: E402
     is_pelican_managed_name,
 )
 from pelican.retention import plan_retention  # noqa: E402
-from pelican.sqlite_backup import backup_and_verify_sqlite  # noqa: E402
+from pelican.sqlite_backup import backup_and_verify_sqlite, verify_concert_tables  # noqa: E402
 from pelican.telemetry_data import (  # noqa: E402
     backup_telemetry_data,
     discover_long_term_data,
@@ -77,6 +77,7 @@ class BackupContext:
     git_commit: str = ""
     sqlite_integrity: str = ""
     sqlite_integrity_all: dict[str, str] = field(default_factory=dict)
+    concert_table_counts: dict[str, int] = field(default_factory=dict)
     archive_checksum: str = ""
     published: bool = False
 
@@ -330,6 +331,14 @@ def run_backup(ctx: BackupContext, *, skip_retention: bool = False) -> int:
         ctx.inventory.included.extend([str(db_dest), str(integrity_note)])
         log_info(sqlite_result.message)
 
+        concert_verify = verify_concert_tables(db_dest)
+        ctx.concert_table_counts = dict(concert_verify.counts)
+        if concert_verify.ok:
+            log_info(concert_verify.message)
+        else:
+            log_error(concert_verify.message)
+            return 1
+
         telemetry_inventory = discover_long_term_data(ctx.repo_root, primary_db=ctx.db_path)
         telemetry_dest = bundle_contents
         telemetry_result = backup_telemetry_data(
@@ -407,6 +416,7 @@ def run_backup(ctx: BackupContext, *, skip_retention: bool = False) -> int:
                 snapshots=[str(path) for path in telemetry_inventory.snapshot_files],
                 config_files=[str(path) for path in telemetry_inventory.config_files],
                 sqlite_integrity=dict(ctx.sqlite_integrity_all),
+                concert_table_counts=dict(ctx.concert_table_counts),
                 missing_optional=list(telemetry_inventory.missing_optional),
                 catalog_lines=render_telemetry_catalog(telemetry_inventory),
             ),

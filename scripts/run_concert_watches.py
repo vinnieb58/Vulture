@@ -28,12 +28,17 @@ logging.basicConfig(
 )
 
 from engine.concerts.repository import init_concert_tables  # noqa: E402
+from engine.concerts.status_snapshot import write_status_snapshot  # noqa: E402
 from engine.concerts.watch_runner import run_concert_watches  # noqa: E402
 
 
 def main() -> int:
     init_concert_tables()
     summary = run_concert_watches()
+    try:
+        write_status_snapshot(summary)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not write concert status snapshot: %s", exc)
     print(summary)
     return 0 if not summary["errors"] else 1
 
