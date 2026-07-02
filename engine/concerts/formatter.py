@@ -95,22 +95,29 @@ HELP_TEXT = """**Vulture Concerts — /concert commands**
 `/concert test` — Dry-run sample searches (no API calls for credentials check)
 `/concert help` — This help text
 
-**Filter syntax** (combine as needed):
+**Typed options** (recommended in Discord):
+Use slash parameters: `artist`, `genre`, `area`, `city`, `state`, `radius`, `days`, `force`
+Area presets are tappable choices: houston, dallas, austin, san antonio, east texas, louisiana, texas, nationwide
+
+**Examples:**
 ```
-artist:"Three Days Grace" city:"Houston" days:180
-artist:"Breaking Benjamin" area:"texas" days:365
-genre:"rock" area:"houston" days:180
-artist:"Disturbed" area:"nationwide" days:365
+/concert search artist:Three Days Grace area:houston days:180
+/concert search genre:rock area:louisiana days:365
+/concert watch artist:Shinedown area:houston days:365
 ```
 
-**Area presets:** houston, dallas, austin, san antonio, east texas, louisiana, texas, nationwide
+**Freeform query fallback** (optional `query` parameter):
+```
+artist:"Three Days Grace" city:"Houston" days:180
+genre:"rock" area:"houston" days:180
+```
+Typed options override conflicting freeform values.
 
 **Explicit geo:**
 ```
-city:"Houston" state:"TX" radius:75
-city:"New Orleans" state:"LA" radius:100
+/concert search city:Houston state:TX radius:75
 ```
 
 Broad rock watches include Rock/Metal/Alternative and exclude Sports/Comedy/Theater/Country/R&B/Pop.
-Nationwide genre-only watches are blocked unless `force:true` is added.
+Nationwide genre-only watches are blocked unless `force:true` is set.
 """
