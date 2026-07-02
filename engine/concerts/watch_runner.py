@@ -43,6 +43,7 @@ def run_concert_watches() -> dict:
 
         summary["events_found"] += len(result.events)
         upsert_provider_events(result.events)
+        result.stats.log_summary(logger=log, prefix=f"Concert watch #{watch.id}")
 
         for event in result.events:
             if alert_exists(watch.id, event.event_dedupe_key):

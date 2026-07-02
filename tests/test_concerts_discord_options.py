@@ -19,6 +19,7 @@ from engine.concerts.query_parser import (
     merge_filters_from_args,
 )
 from engine.concerts.search import SearchResult
+from engine.concerts.stats import SearchStats
 
 
 class TestCriteriaFromArgs:
@@ -93,7 +94,7 @@ class TestCriteriaFromArgs:
 class TestSearchAndWatchTypedDispatch:
     @patch("engine.concerts.command_router.search_concerts")
     def test_search_accepts_typed_args(self, mock_search):
-        mock_search.return_value = SearchResult(events=[], provider_notes=[], queries_run=0)
+        mock_search.return_value = SearchResult(events=[], provider_notes=[], queries_run=0, stats=SearchStats())
         result = dispatch_concert(
             "search",
             {"artist": "Breaking Benjamin", "area": "texas", "days": 365},
@@ -106,7 +107,7 @@ class TestSearchAndWatchTypedDispatch:
 
     @patch("engine.concerts.command_router.search_concerts")
     def test_watch_accepts_typed_args(self, mock_search):
-        mock_search.return_value = SearchResult(events=[], provider_notes=[], queries_run=0)
+        mock_search.return_value = SearchResult(events=[], provider_notes=[], queries_run=0, stats=SearchStats())
         result = dispatch_concert(
             "watch",
             {"artist": "Disturbed", "area": "nationwide", "days": 365},
@@ -132,7 +133,7 @@ class TestDiscordCommandRegistration:
         import concerts.discord_commands as module
 
         source = inspect.getsource(module.register_concert_commands)
-        for command in ("concert_search", "concert_watch"):
+        for command in ("concert_search", "concert_watch", "concert_pause", "concert_unwatch"):
             assert f"async def {command}" in source
         for option in FILTER_OPTION_NAMES:
             assert option in source

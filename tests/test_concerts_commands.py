@@ -17,6 +17,7 @@ from engine.concerts.repository import (
     upsert_provider_events,
 )
 from engine.concerts.search import SearchCriteria, SearchResult
+from engine.concerts.stats import SearchStats
 from engine.database import get_connection
 
 
@@ -95,7 +96,12 @@ class TestCommandRouter:
 
     @patch("engine.concerts.command_router.search_concerts")
     def test_search_mocked(self, mock_search, concert_db):
-        mock_search.return_value = SearchResult(events=[], provider_notes=[], queries_run=2)
+        mock_search.return_value = SearchResult(
+            events=[],
+            provider_notes=[],
+            queries_run=2,
+            stats=SearchStats(),
+        )
         result = dispatch_concert(
             "search",
             {"query": 'artist:"Three Days Grace" city:"Houston" days:180'},

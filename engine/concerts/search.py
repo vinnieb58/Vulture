@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from engine.concerts.probe_util import NormalizedEvent, resolve_date_window
@@ -14,8 +14,12 @@ from engine.concerts.dedupe import MergedConcertEvent, merge_events
 from engine.concerts.filters import passes_genre_filter
 from engine.concerts.providers.seatgeek import search_seatgeek
 from engine.concerts.providers.ticketmaster import search_ticketmaster
+from engine.concerts.ranking import is_seatgeek_generic_noise, rank_merged_events
+from engine.concerts.stats import SearchStats
 
 log = logging.getLogger(__name__)
+
+DEFAULT_DISPLAY_LIMIT = 10
 
 
 @dataclass
@@ -35,6 +39,7 @@ class SearchResult:
     events: list[MergedConcertEvent] = field(default_factory=list)
     provider_notes: list[str] = field(default_factory=list)
     queries_run: int = 0
+    stats: SearchStats = field(default_factory=SearchStats)
 
 
 def _date_window(days_forward: int) -> tuple[date, date]:
@@ -53,6 +58,7 @@ def search_concerts(criteria: SearchCriteria) -> SearchResult:
     """
     start, end = _date_window(criteria.days_forward)
     result = SearchResult()
+    stats = SearchStats()
 
     if _is_nationwide(criteria):
         if not criteria.artist_query:
@@ -73,7 +79,8 @@ def search_concerts(criteria: SearchCriteria) -> SearchResult:
             result.provider_notes.append(str(exc))
             return result
 
-    raw_events: list[NormalizedEvent] = []
+    tm_raw: list[NormalizedEvent] = []
+    sg_raw: list[NormalizedEvent] = []
 
     for geo in geo_searches:
         result.queries_run += 1
@@ -89,7 +96,7 @@ def search_concerts(criteria: SearchCriteria) -> SearchResult:
             label = geo.label if geo else "nationwide"
             result.provider_notes.append(f"Ticketmaster ({label}): {tm_err}")
         else:
-            raw_events.extend(tm_events)
+            tm_raw.extend(tm_events)
 
         result.queries_run += 1
         sg_events, sg_err = search_seatgeek(
@@ -104,9 +111,13 @@ def search_concerts(criteria: SearchCriteria) -> SearchResult:
             label = geo.label if geo else "nationwide"
             result.provider_notes.append(f"SeatGeek ({label}): {sg_err}")
         else:
-            raw_events.extend(sg_events)
+            sg_raw.extend(sg_events)
 
-    filtered = [
+    stats.ticketmaster_returned = len(tm_raw)
+    stats.seatgeek_returned = len(sg_raw)
+    raw_events = tm_raw + sg_raw
+
+    genre_filtered = [
         e
         for e in raw_events
         if passes_genre_filter(
@@ -115,7 +126,31 @@ def search_concerts(criteria: SearchCriteria) -> SearchResult:
             artist_query=criteria.artist_query,
         )
     ]
-    result.events = merge_events(filtered)
+    stats.after_genre_filter = len(genre_filtered)
+
+    cleaned: list[NormalizedEvent] = []
+    for event in genre_filtered:
+        if is_seatgeek_generic_noise(
+            event,
+            genre=criteria.genre,
+            artist_query=criteria.artist_query,
+        ):
+            stats.noise_hidden += 1
+            continue
+        cleaned.append(event)
+
+    merged = merge_events(cleaned)
+    stats.merged_count = len(merged)
+    ranked = rank_merged_events(
+        merged,
+        artist_query=criteria.artist_query,
+        genre=criteria.genre,
+    )
+    result.events = ranked
+    stats.displayed_count = min(len(ranked), DEFAULT_DISPLAY_LIMIT)
+    result.stats = stats
+
+    stats.log_summary(logger=log)
     return result
 
 

@@ -17,7 +17,9 @@ from engine.concerts.query_parser import FilterValidationError, criteria_from_ar
 from engine.concerts.repository import (
     create_watch,
     list_watches,
+    pause_watch,
     seed_bootstrap_alerts,
+    unwatch,
     upsert_provider_events,
 )
 from engine.concerts.search import SearchCriteria, search_concerts
@@ -106,6 +108,47 @@ def cmd_watches(args: dict) -> ConcertCommandResult:
     )
 
 
+def cmd_pause(args: dict) -> ConcertCommandResult:
+    watch_id = args.get("watch_id")
+    if watch_id is None:
+        return ConcertCommandResult(success=False, message="`watch_id` is required.")
+    try:
+        wid = int(watch_id)
+    except (TypeError, ValueError):
+        return ConcertCommandResult(success=False, message=f"Invalid watch_id: {watch_id!r}")
+
+    watch = pause_watch(wid)
+    if not watch:
+        return ConcertCommandResult(success=False, message=f"Watch #{wid} not found.")
+
+    from engine.concerts.formatter import format_watch_summary
+
+    return ConcertCommandResult(
+        success=True,
+        message=f"Watch paused.\n\n{format_watch_summary(watch)}",
+        data={"watch_id": wid, "active": False},
+    )
+
+
+def cmd_unwatch(args: dict) -> ConcertCommandResult:
+    watch_id = args.get("watch_id")
+    if watch_id is None:
+        return ConcertCommandResult(success=False, message="`watch_id` is required.")
+    try:
+        wid = int(watch_id)
+    except (TypeError, ValueError):
+        return ConcertCommandResult(success=False, message=f"Invalid watch_id: {watch_id!r}")
+
+    if not unwatch(wid):
+        return ConcertCommandResult(success=False, message=f"Watch #{wid} not found.")
+
+    return ConcertCommandResult(
+        success=True,
+        message=f"Watch **#{wid}** removed.",
+        data={"watch_id": wid, "removed": True},
+    )
+
+
 def cmd_test(args: dict) -> ConcertCommandResult:
     """Validate credentials and run sample query parsing (optional live search)."""
     tm_key = bool(os.getenv("TICKETMASTER_API_KEY", "").strip())
@@ -162,6 +205,8 @@ _COMMANDS = {
     "search": cmd_search,
     "watch": cmd_watch,
     "watches": cmd_watches,
+    "pause": cmd_pause,
+    "unwatch": cmd_unwatch,
     "test": cmd_test,
     "help": cmd_help,
 }
