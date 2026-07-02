@@ -8,4 +8,5 @@ Type=oneshot
 User=vinnieb58
 WorkingDirectory=/home/vinnieb58/projects/vulture
 EnvironmentFile=/home/vinnieb58/projects/vulture/.env
-ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python /home/vinnieb58/projects/vulture/scripts/run_concert_watches.py
+Environment=PYTHONPATH=/home/vinnieb58/projects/vulture
+ExecStart=/home/vinnieb58/projects/vulture/.venv/bin/python scripts/run_concert_watches.py
