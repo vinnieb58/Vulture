@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from crow.checks._subprocess import run_command
 from crow.config import (
     VULTURE_BOT_SYSTEMD_UNIT,
+    VULTURE_CONCERT_WATCHES_TIMER,
     VULTURE_SCHEDULER_SYSTEMD_UNIT,
 )
 from crow.system._status import StatusItem, StatusLevel
@@ -59,6 +60,7 @@ def get_critical_service_statuses() -> list[ServiceCheck]:
         check_service("Docker", "docker"),
         check_service("Vulture Bot", VULTURE_BOT_SYSTEMD_UNIT),
         check_service("Vulture Scheduler", VULTURE_SCHEDULER_SYSTEMD_UNIT),
+        check_service("Vulture Concert Watches", VULTURE_CONCERT_WATCHES_TIMER),
     ]
 
 

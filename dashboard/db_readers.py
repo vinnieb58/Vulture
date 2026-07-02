@@ -55,6 +55,14 @@ def read_db_snapshot(log_lines: list[str] | None = None) -> dict[str, Any]:
         "warning": None,
         "tables": [],
         "hunt_counts": {"total": 0, "active": 0, "paused": 0, "ended": 0, "other": 0},
+        "concert_counts": {
+            "active": 0,
+            "paused": 0,
+            "total_events": 0,
+            "total_alerts": 0,
+            "recent_events": 0,
+            "recent_alerts": 0,
+        },
         "hunts": [],
         "recent_listings": [],
         "adapter_sources": [],
@@ -95,6 +103,9 @@ def read_db_snapshot(log_lines: list[str] | None = None) -> dict[str, Any]:
                 f"Available tables: {', '.join(tables) or '(none)'}"
             )
 
+        if any(t in tables for t in ("concert_watches", "concert_events", "concert_alerts")):
+            snapshot["concert_counts"] = _count_concerts(conn, tables)
+
         snapshot["available"] = snapshot["warning"] is None or bool(
             snapshot["recent_listings"] or snapshot["hunts"]
         )
@@ -128,6 +139,61 @@ def _count_hunts(conn: sqlite3.Connection) -> dict[str, int]:
         row = conn.execute("SELECT COUNT(*) FROM hunts").fetchone()
         counts["total"] = int(row[0]) if row else 0
         counts["active"] = counts["total"]
+
+    return counts
+
+
+def _count_concerts(conn: sqlite3.Connection, tables: list[str]) -> dict[str, int]:
+    """Count concert watches/events/alerts when tables exist."""
+    from datetime import datetime, timedelta, timezone
+
+    counts = {
+        "active": 0,
+        "paused": 0,
+        "total_events": 0,
+        "total_alerts": 0,
+        "recent_events": 0,
+        "recent_alerts": 0,
+    }
+    recent_days = int(os.environ.get("DASHBOARD_CONCERT_RECENT_DAYS", "7"))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=recent_days)).isoformat()
+
+    if "concert_watches" in tables:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active_count,
+                SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END) AS paused_count
+            FROM concert_watches
+            """
+        ).fetchone()
+        if row:
+            counts["active"] = int(row[0] or 0)
+            counts["paused"] = int(row[1] or 0)
+
+    if "concert_events" in tables:
+        row = conn.execute("SELECT COUNT(*) FROM concert_events").fetchone()
+        counts["total_events"] = int(row[0]) if row else 0
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM concert_events
+            WHERE COALESCE(first_seen_at, '') >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+        counts["recent_events"] = int(row[0]) if row else 0
+
+    if "concert_alerts" in tables:
+        row = conn.execute("SELECT COUNT(*) FROM concert_alerts").fetchone()
+        counts["total_alerts"] = int(row[0]) if row else 0
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM concert_alerts
+            WHERE COALESCE(alerted_at, '') >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+        counts["recent_alerts"] = int(row[0]) if row else 0
 
     return counts
 

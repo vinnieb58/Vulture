@@ -6,6 +6,17 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+CONCERT_TABLES = ("concert_watches", "concert_events", "concert_alerts")
+
+
+@dataclass(frozen=True)
+class ConcertTableVerifyResult:
+    ok: bool
+    db_path: Path
+    tables_present: dict[str, bool]
+    counts: dict[str, int]
+    message: str
+
 
 @dataclass(frozen=True)
 class SqliteBackupResult:
@@ -44,6 +55,82 @@ def run_integrity_check(db_path: Path) -> str:
     finally:
         conn.close()
     return row[0] if row else "unknown"
+
+
+def verify_concert_tables(db_path: Path) -> ConcertTableVerifyResult:
+    """Verify Vulture Concerts tables exist and are readable with row counts."""
+    if not db_path.is_file():
+        return ConcertTableVerifyResult(
+            ok=False,
+            db_path=db_path,
+            tables_present={name: False for name in CONCERT_TABLES},
+            counts={name: 0 for name in CONCERT_TABLES},
+            message=f"SQLite source not found: {db_path}",
+        )
+
+    tables_present: dict[str, bool] = {name: False for name in CONCERT_TABLES}
+    counts: dict[str, int] = {name: 0 for name in CONCERT_TABLES}
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        return ConcertTableVerifyResult(
+            ok=False,
+            db_path=db_path,
+            tables_present=tables_present,
+            counts=counts,
+            message=f"Could not open SQLite database: {exc}",
+        )
+
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        existing = {row[0] for row in rows}
+        for table in CONCERT_TABLES:
+            tables_present[table] = table in existing
+            if table in existing:
+                row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                counts[table] = int(row[0]) if row else 0
+    except sqlite3.Error as exc:
+        return ConcertTableVerifyResult(
+            ok=False,
+            db_path=db_path,
+            tables_present=tables_present,
+            counts=counts,
+            message=f"Concert table verification failed: {exc}",
+        )
+    finally:
+        conn.close()
+
+    present_count = sum(1 for present in tables_present.values() if present)
+    if present_count == 0:
+        return ConcertTableVerifyResult(
+            ok=True,
+            db_path=db_path,
+            tables_present=tables_present,
+            counts=counts,
+            message="Concert tables not initialized (skipped)",
+        )
+
+    missing = [name for name, present in tables_present.items() if not present]
+    if missing:
+        return ConcertTableVerifyResult(
+            ok=False,
+            db_path=db_path,
+            tables_present=tables_present,
+            counts=counts,
+            message=f"Missing concert tables: {', '.join(missing)}",
+        )
+
+    summary = ", ".join(f"{name}={counts[name]}" for name in CONCERT_TABLES)
+    return ConcertTableVerifyResult(
+        ok=True,
+        db_path=db_path,
+        tables_present=tables_present,
+        counts=counts,
+        message=f"Concert tables verified ({summary})",
+    )
 
 
 def backup_and_verify_sqlite(source: Path, destination: Path) -> SqliteBackupResult:

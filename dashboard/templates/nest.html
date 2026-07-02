@@ -569,6 +569,74 @@
         </a>
       </div>
 
+      {# ── Vulture Concerts ─────────────────────────────────── #}
+      {% set cc = nest.concerts %}
+      {% set cs = cc.status | lower %}
+      <div class="card status-{{ cs }}">
+        <div class="card-header">
+          <span class="card-title">Vulture Concerts</span>
+          <span class="status-badge {{ cs }}">{{ cc.status }}</span>
+        </div>
+        <div class="card-headline {{ cs }}">{{ cc.headline }}</div>
+        <div class="card-details">
+          <div class="detail-row">
+            <span>Watch timer</span>
+            <strong>{{ cc.timer_active }} / {{ cc.timer_enabled }}</strong>
+          </div>
+          {% if cc.next_run %}
+          <div class="detail-row">
+            <span>Next run</span>
+            <strong>{{ cc.next_run }}</strong>
+          </div>
+          {% endif %}
+          {% if cc.last_run %}
+          <div class="detail-row">
+            <span>Last run</span>
+            <strong>{{ cc.last_run }}{% if cc.last_result %} ({{ cc.last_result }}){% endif %}</strong>
+          </div>
+          {% endif %}
+          <div class="detail-row">
+            <span>Active watches</span>
+            <strong>{{ cc.active_watches }}</strong>
+          </div>
+          <div class="detail-row">
+            <span>Paused watches</span>
+            <strong>{{ cc.paused_watches }}</strong>
+          </div>
+          <div class="detail-row">
+            <span>Recent events (7d)</span>
+            <strong>{{ cc.recent_events }}</strong>
+          </div>
+          <div class="detail-row">
+            <span>Recent alerts (7d)</span>
+            <strong>{{ cc.recent_alerts }}</strong>
+          </div>
+          {% if cc.cycle.checked_at %}
+          <div class="detail-row">
+            <span>Last cycle</span>
+            <strong>
+              checked={{ cc.cycle.watches_checked or 0 }},
+              events={{ cc.cycle.events_found or 0 }},
+              alerts={{ cc.cycle.alerts_sent or 0 }},
+              errors={{ (cc.cycle.errors | length) if cc.cycle.errors else 0 }}
+            </strong>
+          </div>
+          {% endif %}
+          <div class="detail-row">
+            <span>Ticketmaster</span>
+            <strong class="{{ 'ok' if cc.providers.ticketmaster else 'fail' }}" style="color:{% if cc.providers.ticketmaster %}var(--ok){% else %}var(--fail){% endif %}">
+              {{ 'configured' if cc.providers.ticketmaster else 'not configured' }}
+            </strong>
+          </div>
+          <div class="detail-row">
+            <span>SeatGeek</span>
+            <strong class="{{ 'ok' if cc.providers.seatgeek else 'fail' }}" style="color:{% if cc.providers.seatgeek %}var(--ok){% else %}var(--fail){% endif %}">
+              {{ 'configured' if cc.providers.seatgeek else 'not configured' }}
+            </strong>
+          </div>
+        </div>
+      </div>
+
       {# ── House (climate / household status) ───────────────── #}
       {% set hc = nest.house %}
       {% set hs = hc.style %}

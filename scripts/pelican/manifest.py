@@ -17,6 +17,7 @@ class TelemetryCoverage:
     snapshots: list[str] = field(default_factory=list)
     config_files: list[str] = field(default_factory=list)
     sqlite_integrity: dict[str, str] = field(default_factory=dict)
+    concert_table_counts: dict[str, int] = field(default_factory=dict)
     missing_optional: list[str] = field(default_factory=list)
     catalog_lines: list[str] = field(default_factory=list)
 
@@ -113,6 +114,13 @@ def render_manifest(data: ManifestData) -> str:
                 lines.append(f"  - {path}")
         else:
             lines.append("  - (none)")
+
+        lines.extend(["", "vulture_db_concert_tables:"])
+        if cov.concert_table_counts:
+            for table, count in sorted(cov.concert_table_counts.items()):
+                lines.append(f"  - {table}: {count}")
+        else:
+            lines.append("  - (not verified)")
 
         lines.extend(["", "telemetry_missing_optional:"])
         if cov.missing_optional:

@@ -67,6 +67,7 @@ from raven_metrics_history import (
 )
 from metrics_sampler import start_metrics_sampler, stop_metrics_sampler
 from vulture_runtime import get_vulture_runtime
+from concert_status import build_concert_card
 
 AUTO_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_AUTO_REFRESH_SECONDS", "30"))
 
@@ -372,6 +373,11 @@ def _compute_vulture_card(vulture: dict[str, Any], db: dict[str, Any]) -> dict[s
     }
 
 
+def _compute_concert_card(db: dict[str, Any]) -> dict[str, Any]:
+    """Plain-English Vulture Concerts card for the Nest overview."""
+    return build_concert_card(db)
+
+
 def _compute_house_card(house: dict[str, Any]) -> dict[str, Any]:
     """Plain-English House card for household climate (Nest thermostats)."""
     return format_house_card_display(house)
@@ -666,10 +672,12 @@ async def nest_overview(request: Request) -> HTMLResponse:
 
     kestrel = read_kestrel_status()
     house = read_house_status()
+    concert = _compute_concert_card(db)
     nest = {
         "raven": _compute_raven_card(raven, services, docker, metrics_peaks),
         "storage": _compute_storage_card(storage),
         "vulture": _compute_vulture_card(vulture, db),
+        "concerts": concert,
         "house": _compute_house_card(house),
         "network": _compute_network_card(raven),
         "kestrel": _compute_kestrel_card(kestrel),
@@ -678,6 +686,9 @@ async def nest_overview(request: Request) -> HTMLResponse:
     house_warning = house.get("warning")
     if isinstance(house_warning, str) and house_warning:
         warnings.append(house_warning)
+    concert_warning = concert.get("warning")
+    if isinstance(concert_warning, str) and concert_warning:
+        warnings.append(concert_warning)
 
     context = {
         "title": "Nest",

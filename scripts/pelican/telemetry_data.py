@@ -32,6 +32,7 @@ DISPOSABLE_FILE_GLOBS = (
     "data/canary_status.json",
     "data/backup_monitor_status.json",
     "data/canary_alert_state.json",
+    "data/concert_watch_status.json",
     "tuya-raw.json",
 )
 

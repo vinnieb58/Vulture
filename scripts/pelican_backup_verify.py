@@ -12,6 +12,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from pelican.config import DEFAULT_DB_PATH, DEFAULT_REPO_ROOT  # noqa: E402
+from pelican.sqlite_backup import verify_concert_tables  # noqa: E402
 from pelican.telemetry_data import (  # noqa: E402
     discover_long_term_data,
     render_telemetry_catalog,
@@ -65,8 +66,14 @@ def run_verify(repo_root: Path, *, db_path: Path) -> int:
         log_warn(f"Required SQLite sources missing: {', '.join(required_missing)}")
         return 1
 
+    concert_verify = verify_concert_tables(db_path.resolve())
+    if concert_verify.ok:
+        log_info(concert_verify.message)
+    else:
+        log_warn(concert_verify.message)
+
     log_info("Dry-run validation passed — sources are discoverable for Pelican backup")
-    return 0
+    return 0 if concert_verify.ok else 1
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
