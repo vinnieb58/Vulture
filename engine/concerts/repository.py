@@ -215,7 +215,7 @@ def alert_exists(watch_id: int, event_dedupe_key: str) -> bool:
 def record_alert(watch_id: int, event_dedupe_key: str) -> ConcertAlert:
     now = _now_iso()
     with get_connection() as conn:
-        cur = conn.execute(
+        conn.execute(
             """
             INSERT OR IGNORE INTO concert_alerts (watch_id, event_dedupe_key, alerted_at)
             VALUES (?, ?, ?)
@@ -237,3 +237,20 @@ def record_alert(watch_id: int, event_dedupe_key: str) -> ConcertAlert:
         event_dedupe_key=d["event_dedupe_key"],
         alerted_at=d["alerted_at"],
     )
+
+
+def seed_bootstrap_alerts(watch_id: int, events: list[MergedConcertEvent]) -> int:
+    """
+    Record alert-ledger entries for initial watch results without sending notifications.
+
+    Prevents the first scheduled watch cycle from alerting on events that were
+    already known when the watch was created.
+    """
+    seeded = 0
+    for event in events:
+        key = event.event_dedupe_key
+        if not key:
+            continue
+        record_alert(watch_id, key)
+        seeded += 1
+    return seeded

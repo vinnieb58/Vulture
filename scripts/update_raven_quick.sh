@@ -26,6 +26,8 @@
 #   VULTURE_BOT_SERVICE        — default: vulture-bot.service
 #   VULTURE_SCHEDULER_SERVICE  — default: vulture-scheduler.service
 #   VULTURE_SCHEDULER_TIMER    — default: vulture-scheduler.timer
+#   VULTURE_CONCERT_WATCHES_SERVICE — default: vulture-concert-watches.service
+#   VULTURE_CONCERT_WATCHES_TIMER   — default: vulture-concert-watches.timer
 
 set -euo pipefail
 
@@ -34,6 +36,8 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 VULTURE_BOT_SERVICE="${VULTURE_BOT_SERVICE:-vulture-bot.service}"
 VULTURE_SCHEDULER_SERVICE="${VULTURE_SCHEDULER_SERVICE:-vulture-scheduler.service}"
 VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
+VULTURE_CONCERT_WATCHES_SERVICE="${VULTURE_CONCERT_WATCHES_SERVICE:-vulture-concert-watches.service}"
+VULTURE_CONCERT_WATCHES_TIMER="${VULTURE_CONCERT_WATCHES_TIMER:-vulture-concert-watches.timer}"
 
 SKIP_DOCKER=0
 SKIP_SERVICES=0
@@ -49,6 +53,8 @@ DASHBOARD_SERVICE="vulture-dashboard"
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
 SCHEDULER_TIMER_UNIT="${VULTURE_SCHEDULER_TIMER%.timer}"
+CONCERT_WATCHES_UNIT="${VULTURE_CONCERT_WATCHES_SERVICE%.service}"
+CONCERT_WATCHES_TIMER_UNIT="${VULTURE_CONCERT_WATCHES_TIMER%.timer}"
 FINCH_API_SERVICE="${FINCH_API_SERVICE:-finch-api.service}"
 FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
 
@@ -186,6 +192,21 @@ restart_systemd_services() {
         fi
     fi
 
+    if unit_source_exists "$VULTURE_CONCERT_WATCHES_TIMER"; then
+        if ! sudo systemctl enable "$VULTURE_CONCERT_WATCHES_TIMER"; then
+            echo "  ERROR: failed to enable ${VULTURE_CONCERT_WATCHES_TIMER}"
+            exit 1
+        fi
+        if ! sudo systemctl restart "$VULTURE_CONCERT_WATCHES_TIMER"; then
+            echo "  ERROR: failed to restart ${VULTURE_CONCERT_WATCHES_TIMER}"
+            systemctl status "$CONCERT_WATCHES_TIMER_UNIT" --no-pager -l 2>&1 || true
+            exit 1
+        fi
+        echo "  Restarted: ${VULTURE_CONCERT_WATCHES_TIMER}"
+    else
+        echo "  Skipped (not present): ${VULTURE_CONCERT_WATCHES_TIMER}"
+    fi
+
     if ! restart_finch_services; then
         exit 1
     fi
@@ -236,6 +257,8 @@ show_final_status() {
     print_unit_state "$VULTURE_BOT_SERVICE"
     print_unit_state "$VULTURE_SCHEDULER_TIMER"
     print_unit_state "$VULTURE_SCHEDULER_SERVICE" " (inactive/dead between timer runs is OK)"
+    print_unit_state "$VULTURE_CONCERT_WATCHES_TIMER"
+    print_unit_state "$VULTURE_CONCERT_WATCHES_SERVICE" " (inactive/dead between timer runs is OK)"
     print_unit_state "$FINCH_API_SERVICE"
     print_unit_state "$FINCH_TELEGRAM_SERVICE"
 

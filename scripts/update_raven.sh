@@ -26,6 +26,8 @@
 #   VULTURE_BOT_SERVICE        — systemd unit for the bot (default: vulture-bot.service)
 #   VULTURE_SCHEDULER_SERVICE  — oneshot scheduler unit (default: vulture-scheduler.service)
 #   VULTURE_SCHEDULER_TIMER    — scheduler timer unit (default: vulture-scheduler.timer)
+#   VULTURE_CONCERT_WATCHES_SERVICE — oneshot concert watch unit (default: vulture-concert-watches.service)
+#   VULTURE_CONCERT_WATCHES_TIMER   — concert watch timer (default: vulture-concert-watches.timer)
 #   SKIP_SYSTEMD_RESTART       — set to 1 to skip service restarts (tests / dry run)
 #   SKIP_DASHBOARD_RESTART     — set to 1 to skip dashboard Docker compose up (tests / dry run)
 #   SKIP_PREUPDATE_BACKUP      — set to 1 to skip pre-update mutable-state backup
@@ -60,6 +62,8 @@ PYTHON="${PYTHON:-.venv/bin/python}"
 VULTURE_BOT_SERVICE="${VULTURE_BOT_SERVICE:-vulture-bot.service}"
 VULTURE_SCHEDULER_SERVICE="${VULTURE_SCHEDULER_SERVICE:-vulture-scheduler.service}"
 VULTURE_SCHEDULER_TIMER="${VULTURE_SCHEDULER_TIMER:-vulture-scheduler.timer}"
+VULTURE_CONCERT_WATCHES_SERVICE="${VULTURE_CONCERT_WATCHES_SERVICE:-vulture-concert-watches.service}"
+VULTURE_CONCERT_WATCHES_TIMER="${VULTURE_CONCERT_WATCHES_TIMER:-vulture-concert-watches.timer}"
 FINCH_API_SERVICE="${FINCH_API_SERVICE:-finch-api.service}"
 FINCH_TELEGRAM_SERVICE="${FINCH_TELEGRAM_SERVICE:-finch-telegram.service}"
 
@@ -83,12 +87,16 @@ PYTHON_BIN="${APP_DIR}/${PYTHON}"
 BOT_UNIT="${VULTURE_BOT_SERVICE%.service}"
 SCHEDULER_UNIT="${VULTURE_SCHEDULER_SERVICE%.service}"
 SCHEDULER_TIMER_UNIT="${VULTURE_SCHEDULER_TIMER%.timer}"
+CONCERT_WATCHES_UNIT="${VULTURE_CONCERT_WATCHES_SERVICE%.service}"
+CONCERT_WATCHES_TIMER_UNIT="${VULTURE_CONCERT_WATCHES_TIMER%.timer}"
 
 SYSTEMD_SRC="${APP_DIR}/deploy/systemd"
 SYSTEMD_UNITS=(
     vulture-bot.service
     vulture-scheduler.service
     vulture-scheduler.timer
+    vulture-concert-watches.service
+    vulture-concert-watches.timer
     finch-api.service
     finch-telegram.service
     pelican-backup.service
@@ -138,6 +146,10 @@ install_systemd_units() {
     sudo systemctl enable "$VULTURE_SCHEDULER_TIMER"
     echo "  Enabled: $VULTURE_SCHEDULER_TIMER"
     echo "  Note: $VULTURE_SCHEDULER_SERVICE is oneshot; the timer triggers it."
+
+    sudo systemctl enable "$VULTURE_CONCERT_WATCHES_TIMER"
+    echo "  Enabled: $VULTURE_CONCERT_WATCHES_TIMER"
+    echo "  Note: $VULTURE_CONCERT_WATCHES_SERVICE is oneshot; the timer triggers it."
     echo "  Note: pelican-backup.timer is installed but not enabled by deploy; use:"
     echo "        ./scripts/install_pelican_timer.sh --enable"
     echo "  Note: pelican-monitor.timer is installed but not enabled by deploy; use:"
@@ -160,6 +172,13 @@ restart_systemd_services() {
         exit 1
     fi
     echo "  Restarted: $VULTURE_SCHEDULER_TIMER"
+
+    if ! sudo systemctl restart "$VULTURE_CONCERT_WATCHES_TIMER"; then
+        echo "  ERROR: failed to restart $VULTURE_CONCERT_WATCHES_TIMER"
+        print_service_diagnostics "$CONCERT_WATCHES_TIMER_UNIT"
+        exit 1
+    fi
+    echo "  Restarted: $VULTURE_CONCERT_WATCHES_TIMER"
 
     if ! restart_finch_services; then
         exit 1
@@ -233,6 +252,8 @@ show_runtime_status() {
     echo "    $VULTURE_BOT_SERVICE        — discord_bot.py (long-running)"
     echo "    $VULTURE_SCHEDULER_TIMER    — schedules hunt cycles"
     echo "    $VULTURE_SCHEDULER_SERVICE  — oneshot main.py cycle (inactive between runs is OK)"
+    echo "    $VULTURE_CONCERT_WATCHES_TIMER — schedules concert watch cycles"
+    echo "    $VULTURE_CONCERT_WATCHES_SERVICE — oneshot concert watch cycle (inactive between runs is OK)"
     echo "    $FINCH_API_SERVICE            — Finch local API"
     echo "    $FINCH_TELEGRAM_SERVICE       — Finch Telegram bridge"
     echo ""
@@ -399,8 +420,9 @@ echo ""
 echo "  Verify on Raven:"
 echo "    systemctl status $SCHEDULER_TIMER_UNIT --no-pager -l"
 echo "    systemctl status $SCHEDULER_UNIT --no-pager -l"
-echo "    systemctl list-timers --all | grep vulture"
-echo "    journalctl -u $SCHEDULER_UNIT -n 80 --no-pager"
+    echo "    systemctl list-timers --all | grep vulture"
+    echo "    journalctl -u $SCHEDULER_UNIT -n 80 --no-pager"
+    echo "    journalctl -u $CONCERT_WATCHES_UNIT -n 80 --no-pager"
     echo "    systemctl status $BOT_UNIT --no-pager -l"
     echo "    journalctl -u $BOT_UNIT -n 100 --no-pager"
     echo "    systemctl status ${FINCH_API_SERVICE%.service} --no-pager -l"

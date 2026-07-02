@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Vulture concert watch cycle every 30 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=30min
+Persistent=true
+Unit=vulture-concert-watches.service
+
+[Install]
+WantedBy=timers.target

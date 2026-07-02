@@ -79,6 +79,19 @@ def test_update_raven_installs_finch_units() -> None:
     assert "finch-telegram.service" in text
 
 
+def test_update_raven_installs_concert_watch_units() -> None:
+    text = _read(UPDATE_RAVEN)
+    assert "vulture-concert-watches.service" in text
+    assert "vulture-concert-watches.timer" in text
+    assert "VULTURE_CONCERT_WATCHES_TIMER" in text
+
+
+def test_update_raven_quick_restarts_concert_watch_timer() -> None:
+    text = _read(UPDATE_RAVEN_QUICK)
+    assert "VULTURE_CONCERT_WATCHES_TIMER" in text
+    assert "Restarted: ${VULTURE_CONCERT_WATCHES_TIMER}" in text
+
+
 def test_update_raven_restarts_finch_after_vulture_services() -> None:
     text = _read(UPDATE_RAVEN)
     vulture_restart_idx = text.index('echo "  Restarted: $VULTURE_SCHEDULER_TIMER"')

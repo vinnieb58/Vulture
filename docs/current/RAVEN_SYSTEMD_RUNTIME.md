@@ -11,12 +11,21 @@ Raven runs the Vulture Discord bot (Vulture hunts + Crow) and hunt scheduler as 
 | `vulture-bot.service` | `discord_bot.py` | Discord control plane (Crow + Vulture hunt commands) |
 | `vulture-scheduler.service` | `main.py` (oneshot) | Runs one hunt cycle and exits |
 | `vulture-scheduler.timer` | — | Schedules hunt cycles every 15 minutes |
+| `vulture-concert-watches.service` | `scripts/run_concert_watches.py` (oneshot) | Runs one concert watch cycle and exits |
+| `vulture-concert-watches.timer` | — | Schedules concert watch cycles every 30 minutes |
 
 ### Scheduler architecture (oneshot + timer)
 
 - **`vulture-scheduler.service`** is `Type=oneshot`. It runs one `main.py` hunt cycle and exits with status 0 on success.
 - **`vulture-scheduler.timer`** is the actual scheduler heartbeat. It triggers the oneshot service shortly after boot, then every 15 minutes after the previous run finishes (`OnUnitInactiveSec=15min`).
 - Between timer runs, **`vulture-scheduler.service` is expected to be `inactive`/`dead`**. That is normal — it does not mean the scheduler failed.
+
+### Concert watch architecture (separate from marketplace hunts)
+
+- **`vulture-concert-watches.service`** is `Type=oneshot`. It runs `scripts/run_concert_watches.py` once and exits.
+- **`vulture-concert-watches.timer`** triggers the oneshot service shortly after boot, then every 30 minutes after the previous run finishes.
+- **`/concert watch`** seeds the alert ledger for events found during the initial search so the first timer cycle does not alert on bootstrap results.
+- Between timer runs, **`vulture-concert-watches.service` is expected to be `inactive`/`dead`**.
 
 Both long-running and oneshot units:
 
@@ -60,7 +69,7 @@ Quick deploy but intentionally run one scheduler cycle after update:
 2. Dependency install (`pip install -r requirements.txt`) when present
 3. Python compile check (syntax only)
 4. Install/update systemd units from `deploy/systemd/`
-5. Restart `vulture-bot.service` and `vulture-scheduler.timer` (when present)
+5. Restart `vulture-bot.service`, `vulture-scheduler.timer`, and `vulture-concert-watches.timer` (when present)
 6. Rebuild/restart Docker compose stacks via `scripts/rebuild_docker.sh`
 7. Print final status (git, bot, timer, scheduler worker, dashboard)
 
@@ -128,7 +137,7 @@ APP_DIR=/home/vinnieb58/projects/vulture BRANCH=main bash scripts/update_raven.s
 5. One live `main.py` hunt cycle
 6. **Only after all checks pass:** install systemd units, `daemon-reload`, enable services, restart
 
-The update script copies all unit files from `deploy/systemd/` into `/etc/systemd/system/`, enables `vulture-bot.service` and `vulture-scheduler.timer`, and restarts both. It does **not** enable `vulture-scheduler.service` as a long-running daemon.
+The update script copies all unit files from `deploy/systemd/` into `/etc/systemd/system/`, enables `vulture-bot.service`, `vulture-scheduler.timer`, and `vulture-concert-watches.timer`, and restarts them. It does **not** enable oneshot worker services as long-running daemons.
 
 If any step fails, services are **not** restarted (fail-safe).
 
@@ -147,11 +156,17 @@ sudo cp deploy/systemd/vulture-bot.service /etc/systemd/system/
 sudo cp deploy/systemd/vulture-scheduler.service /etc/systemd/system/
 sudo cp deploy/systemd/vulture-scheduler.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable vulture-bot.service vulture-scheduler.timer
-sudo systemctl start vulture-bot.service vulture-scheduler.timer
+sudo systemctl enable vulture-bot.service vulture-scheduler.timer vulture-concert-watches.timer
+sudo systemctl start vulture-bot.service vulture-scheduler.timer vulture-concert-watches.timer
 ```
 
-Do **not** enable `vulture-scheduler.service` directly — the timer triggers it.
+Or install only the concert watch timer:
+
+```bash
+./scripts/install_concert_watches_timer.sh --enable
+```
+
+Do **not** enable oneshot worker services (`vulture-scheduler.service`, `vulture-concert-watches.service`) directly — their timers trigger them.
 
 Adjust `User`, paths, or timer intervals in the unit files before copying if the host layout differs.
 
@@ -160,8 +175,11 @@ Adjust `User`, paths, or timer intervals in the unit files before copying if the
 ```bash
 systemctl status vulture-scheduler.timer --no-pager -l
 systemctl status vulture-scheduler.service --no-pager -l
+systemctl status vulture-concert-watches.timer --no-pager -l
+systemctl status vulture-concert-watches.service --no-pager -l
 systemctl list-timers --all | grep vulture
 journalctl -u vulture-scheduler.service -n 80 --no-pager
+journalctl -u vulture-concert-watches.service -n 80 --no-pager
 
 systemctl is-active vulture-bot
 systemctl is-active vulture-scheduler.timer

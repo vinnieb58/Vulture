@@ -17,6 +17,7 @@ from engine.concerts.query_parser import FilterValidationError, parse_and_valida
 from engine.concerts.repository import (
     create_watch,
     list_watches,
+    seed_bootstrap_alerts,
     upsert_provider_events,
 )
 from engine.concerts.search import SearchCriteria, search_concerts
@@ -82,18 +83,24 @@ def cmd_watch(args: dict) -> ConcertCommandResult:
     watch = create_watch(criteria)
     result = search_concerts(criteria)
     upsert_provider_events(result.events)
+    seeded = seed_bootstrap_alerts(watch.id, result.events)
 
     from engine.concerts.formatter import format_watch_summary
 
     msg = (
         f"Watch saved.\n\n{format_watch_summary(watch)}\n\n"
-        f"Initial search: {len(result.events)} matching event(s) found "
-        f"(alerts fire on new event_dedupe_key matches)."
+        f"Initial search: {len(result.events)} matching event(s) found.\n"
+        f"Seeded {seeded} existing event(s) in alert ledger — "
+        f"only newly discovered shows will alert."
     )
     return ConcertCommandResult(
         success=True,
         message=msg,
-        data={"watch_id": watch.id, "initial_event_count": len(result.events)},
+        data={
+            "watch_id": watch.id,
+            "initial_event_count": len(result.events),
+            "bootstrap_seeded": seeded,
+        },
     )
 
 
