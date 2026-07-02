@@ -254,3 +254,41 @@ def seed_bootstrap_alerts(watch_id: int, events: list[MergedConcertEvent]) -> in
         record_alert(watch_id, key)
         seeded += 1
     return seeded
+
+
+def pause_watch(watch_id: int) -> Optional[ConcertWatch]:
+    """Pause a watch (active=0). Returns updated watch or None if not found."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM concert_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE concert_watches SET active = 0 WHERE id = ?",
+            (watch_id,),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM concert_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+    log.info("Paused concert watch #%s", watch_id)
+    return _row_to_watch(updated)
+
+
+def unwatch(watch_id: int) -> bool:
+    """Permanently remove a watch and its alert ledger rows."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM concert_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM concert_alerts WHERE watch_id = ?", (watch_id,))
+        conn.execute("DELETE FROM concert_watches WHERE id = ?", (watch_id,))
+        conn.commit()
+    log.info("Removed concert watch #%s", watch_id)
+    return True

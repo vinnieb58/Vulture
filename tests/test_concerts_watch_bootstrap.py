@@ -16,6 +16,7 @@ from engine.concerts.repository import (
     seed_bootstrap_alerts,
 )
 from engine.concerts.search import SearchCriteria, SearchResult
+from engine.concerts.stats import SearchStats
 from engine.concerts.watch_runner import run_concert_watches
 
 
@@ -65,7 +66,7 @@ def _merged_event(
 
 
 def _search_result(events: list[MergedConcertEvent]) -> SearchResult:
-    return SearchResult(events=events, provider_notes=[], queries_run=1)
+    return SearchResult(events=events, provider_notes=[], queries_run=1, stats=SearchStats())
 
 
 class TestBootstrapSeeding:

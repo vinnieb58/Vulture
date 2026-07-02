@@ -169,6 +169,20 @@ def register_concert_commands(tree: app_commands.CommandTree) -> None:
         result = dispatch_concert("watches", {})
         await _send_result(interaction, result, command="watches")
 
+    @concert.command(name="pause", description="Pause a concert watch (stops alerts).")
+    @app_commands.describe(watch_id="Watch ID from /concert watches")
+    async def concert_pause(interaction: discord.Interaction, watch_id: int) -> None:
+        await interaction.response.defer(ephemeral=True)
+        result = dispatch_concert("pause", {"watch_id": watch_id})
+        await _send_result(interaction, result, command="pause")
+
+    @concert.command(name="unwatch", description="Remove a concert watch permanently.")
+    @app_commands.describe(watch_id="Watch ID from /concert watches")
+    async def concert_unwatch(interaction: discord.Interaction, watch_id: int) -> None:
+        await interaction.response.defer(ephemeral=True)
+        result = dispatch_concert("unwatch", {"watch_id": watch_id})
+        await _send_result(interaction, result, command="unwatch")
+
     @concert.command(
         name="test",
         description="Validate concert config and sample query parsing.",

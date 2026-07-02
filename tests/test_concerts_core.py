@@ -62,8 +62,8 @@ class TestFormatter:
         merged = merge_events([_event("ticketmaster", "x", "Shinedown", "Arena", "2026-11-01T20:00:00Z")])[0]
         card = format_event_card(merged, index=1)
         assert "Shinedown" in card
-        assert "Ticket:" in card
         assert "ticketmaster" in card
+        assert "https://example.com/x" in card
 
     def test_alert_format(self):
         merged = merge_events([_event("ticketmaster", "x", "Shinedown", "Arena", "2026-11-01T20:00:00Z")])[0]
